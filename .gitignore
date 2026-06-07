@@ -22,3 +22,5 @@ pnpm-debug.log*
 # Supabase local files
 supabase/.branches
 supabase/.tempq
+
+worker/.dev.vars
