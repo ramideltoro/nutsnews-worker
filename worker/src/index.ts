@@ -1,6 +1,7 @@
 type Env = {
   SUPABASE_URL: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
+  OPENAI_API_KEY: string;
 };
 
 type RssArticle = {
@@ -11,6 +12,14 @@ type RssArticle = {
   publishedAt: string | null;
 };
 
+type AiArticleDecision = {
+  decision: "accept" | "reject";
+  category: string;
+  positivity_score: number;
+  summary: string;
+  reason: string;
+};
+
 const RSS_FEEDS = [
   {
     source: "BBC",
@@ -19,6 +28,18 @@ const RSS_FEEDS = [
   {
     source: "NPR",
     url: "https://feeds.npr.org/1001/rss.xml",
+  },
+  {
+    source: "NASA",
+    url: "https://www.nasa.gov/news-release/feed/",
+  },
+  {
+    source: "ScienceDaily",
+    url: "https://www.sciencedaily.com/rss/top.xml",
+  },
+  {
+    source: "Good News Network",
+    url: "https://www.goodnewsnetwork.org/feed/",
   },
 ];
 
@@ -84,57 +105,91 @@ async function fetchRssArticles(): Promise<RssArticle[]> {
   return allArticles;
 }
 
-function isProbablyPositive(article: RssArticle): boolean {
-  const text = `${article.title} ${article.excerpt}`.toLowerCase();
+async function classifyAndSummarizeArticle(
+  env: Env,
+  article: RssArticle,
+): Promise<AiArticleDecision> {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are filtering articles for HappyNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept only positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, and remarkable achievement stories. Return only valid JSON.",
+        },
+        {
+          role: "user",
+          content: `
+Article:
+Source: ${article.source}
+Title: ${article.title}
+Excerpt: ${article.excerpt}
 
-  const blockedWords = [
-    "politics",
-    "political",
-    "election",
-    "government",
-    "president",
-    "minister",
-    "war",
-    "military",
-    "attack",
-    "killed",
-    "death",
-    "dead",
-    "crime",
-    "court",
-    "lawsuit",
-    "market",
-    "stock",
-    "inflation",
-    "economy",
-    "money",
-    "bank",
-  ];
+Return JSON exactly like this:
+{
+  "decision": "accept" or "reject",
+  "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting",
+  "positivity_score": number from 1 to 10,
+  "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
+  "reason": "Short reason for the decision"
+}
+          `,
+        },
+      ],
+    }),
+  });
 
-  const positiveWords = [
-    "community",
-    "health",
-    "wellness",
-    "science",
-    "culture",
-    "animal",
-    "travel",
-    "inspiring",
-    "hope",
-    "happy",
-    "remarkable",
-    "achievement",
-    "discovery",
-    "garden",
-    "nature",
-    "music",
-    "art",
-  ];
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.log(`OpenAI error: ${response.status} ${errorText}`);
 
-  const isBlocked = blockedWords.some((word) => text.includes(word));
-  const isPositive = positiveWords.some((word) => text.includes(word));
+    return {
+      decision: "reject",
+      category: "Uplifting",
+      positivity_score: 0,
+      summary: "",
+      reason: "OpenAI request failed",
+    };
+  }
 
-  return !isBlocked && isPositive;
+  const data = (await response.json()) as {
+    choices?: Array<{
+      message?: {
+        content?: string;
+      };
+    }>;
+  };
+
+  const content = data.choices?.[0]?.message?.content;
+
+  if (!content) {
+    return {
+      decision: "reject",
+      category: "Uplifting",
+      positivity_score: 0,
+      summary: "",
+      reason: "OpenAI returned empty content",
+    };
+  }
+
+  try {
+    return JSON.parse(content) as AiArticleDecision;
+  } catch {
+    return {
+      decision: "reject",
+      category: "Uplifting",
+      positivity_score: 0,
+      summary: "",
+      reason: "OpenAI returned invalid JSON",
+    };
+  }
 }
 
 async function saveArticleToSupabase(env: Env, article: RssArticle) {
@@ -180,13 +235,29 @@ async function refreshArticles(env: Env) {
     throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY. Check worker/.dev.vars");
   }
 
-  const articles = await fetchRssArticles();
-  const filteredArticles = articles.filter(isProbablyPositive);
+  if (!env.OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY. Check worker/.dev.vars");
+  }
 
+  const articles = await fetchRssArticles();
+
+  let acceptedCount = 0;
   let savedCount = 0;
 
-  for (const article of filteredArticles) {
-    const saved = await saveArticleToSupabase(env, article);
+  for (const article of articles) {
+    const aiDecision = await classifyAndSummarizeArticle(env, article);
+
+    if (aiDecision.decision !== "accept") {
+      console.log(`Rejected: ${article.title} — ${aiDecision.reason}`);
+      continue;
+    }
+
+    acceptedCount += 1;
+
+    const saved = await saveArticleToSupabase(env, {
+      ...article,
+      excerpt: aiDecision.summary,
+    });
 
     if (saved) {
       savedCount += 1;
@@ -195,7 +266,7 @@ async function refreshArticles(env: Env) {
 
   return {
     fetchedCount: articles.length,
-    filteredCount: filteredArticles.length,
+    acceptedCount,
     savedCount,
   };
 }
