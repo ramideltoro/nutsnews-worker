@@ -207,6 +207,7 @@ async function saveArticleToSupabase(env: Env, article: RssArticle) {
       original_url: article.url,
       image_url: null,
       published_at: article.publishedAt,
+	  published_on_site_at: new Date().toISOString(),
       original_excerpt: article.excerpt,
       ai_summary: article.excerpt || article.title,
       category: "Uplifting",
