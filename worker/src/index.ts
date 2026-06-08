@@ -19,6 +19,7 @@ type AiArticleDecision = {
   summary: string;
   reason: string;
 };
+const MAX_ARTICLE_QUEUE_SIZE = 1000;
 
 const RSS_FEEDS = [
   {
@@ -42,6 +43,48 @@ const RSS_FEEDS = [
     url: "https://www.goodnewsnetwork.org/feed/",
   },
 ];
+
+async function trimArticleQueue(env: Env) {
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/articles?select=id&status=eq.published&order=published_on_site_at.desc&offset=${MAX_ARTICLE_QUEUE_SIZE}`,
+    {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.log(`Failed to find old articles: ${response.status} ${errorText}`);
+    return;
+  }
+
+  const oldArticles = (await response.json()) as Array<{ id: string }>;
+
+  if (oldArticles.length === 0) {
+    return;
+  }
+
+  const idsToDelete = oldArticles.map((article) => article.id);
+
+  const deleteResponse = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/articles?id=in.(${idsToDelete.join(",")})`,
+    {
+      method: "DELETE",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    },
+  );
+
+  if (!deleteResponse.ok) {
+    const errorText = await deleteResponse.text();
+    console.log(`Failed to trim article queue: ${deleteResponse.status} ${errorText}`);
+  }
+}
 
 function getTagValue(itemXml: string, tagName: string): string {
   const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
@@ -264,6 +307,8 @@ async function refreshArticles(env: Env) {
       savedCount += 1;
     }
   }
+
+  await trimArticleQueue(env);
 
   return {
     fetchedCount: articles.length,
