@@ -41,6 +41,10 @@ const RSS_FEEDS = [
     source: "Good News Network",
     url: "https://www.goodnewsnetwork.org/feed/",
   },
+  {
+    source: "Positive News",
+    url: "https://www.positive.news/feed/",
+  },
 ];
 
 function getTagValue(itemXml: string, tagName: string): string {
@@ -102,6 +106,36 @@ async function fetchRssArticles(): Promise<RssArticle[]> {
   }
 
   return allArticles;
+}
+
+async function articleAlreadyExists(env: Env, url: string): Promise<boolean> {
+  if (!url) {
+    return true;
+  }
+
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/articles?select=id&original_url=eq.${encodeURIComponent(url)}&limit=1`,
+    {
+      method: "GET",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.log(`Failed to check existing article: ${response.status} ${errorText}`);
+
+    // Fail open so one Supabase check issue does not stop the whole refresh.
+    // The unique constraint will still protect against duplicates on insert.
+    return false;
+  }
+
+  const rows = (await response.json()) as Array<{ id: string }>;
+
+  return rows.length > 0;
 }
 
 async function classifyAndSummarizeArticle(
@@ -195,7 +229,7 @@ async function saveArticleToSupabase(
   env: Env,
   article: RssArticle,
   aiDecision: AiArticleDecision,
-) {
+): Promise<boolean> {
   const response = await fetch(`${env.SUPABASE_URL}/rest/v1/articles`, {
     method: "POST",
     headers: {
@@ -243,10 +277,19 @@ async function refreshArticles(env: Env) {
 
   const articles = await fetchRssArticles();
 
+  let skippedExistingCount = 0;
   let acceptedCount = 0;
   let savedCount = 0;
 
   for (const article of articles) {
+    const alreadyExists = await articleAlreadyExists(env, article.url);
+
+    if (alreadyExists) {
+      skippedExistingCount += 1;
+      console.log(`Skipped existing article: ${article.title}`);
+      continue;
+    }
+
     const aiDecision = await classifyAndSummarizeArticle(env, article);
 
     if (aiDecision.decision !== "accept") {
@@ -258,13 +301,17 @@ async function refreshArticles(env: Env) {
 
     const saved = await saveArticleToSupabase(env, article, aiDecision);
 
-    if (saved) {
-      savedCount += 1;
-    }
+if (saved) {
+  savedCount += 1;
+  console.log(
+    `Saved article: ${article.title} | Category: ${aiDecision.category} | Score: ${aiDecision.positivity_score}`,
+  );
+}
   }
 
   return {
     fetchedCount: articles.length,
+    skippedExistingCount,
     acceptedCount,
     savedCount,
   };
