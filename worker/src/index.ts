@@ -122,7 +122,7 @@ async function classifyAndSummarizeArticle(
         {
           role: "system",
           content:
-            "You are filtering articles for HappyNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept only positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, and remarkable achievement stories. Return only valid JSON.",
+            "You are filtering articles for NutsNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept only positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, and remarkable achievement stories. Return only valid JSON.",
         },
         {
           role: "user",
@@ -277,16 +277,16 @@ export default {
     const result = await refreshArticles(env);
 
     return Response.json({
-      message: "HappyNews refresh complete",
+      message: "NutsNews refresh complete",
       ...result,
     });
   },
 
   async scheduled(_event: ScheduledEvent, env: Env) {
-    console.log("HappyNews hourly refresh started");
+    console.log("NutsNews hourly refresh started");
 
     const result = await refreshArticles(env);
 
-    console.log("HappyNews hourly refresh finished", result);
+    console.log("NutsNews hourly refresh finished", result);
   },
 };
