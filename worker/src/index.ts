@@ -20,6 +20,39 @@ type AiArticleDecision = {
   reason: string;
 };
 
+type ReviewedUrlRow = {
+  original_url: string;
+};
+
+type ArticleReviewInsert = {
+  original_url: string;
+  source: string;
+  title: string;
+  decision: "accept" | "reject";
+  category: string;
+  positivity_score: number;
+  summary: string;
+  reason: string;
+  reviewed_at: string;
+};
+
+type ArticleInsert = {
+  source: string;
+  title: string;
+  original_url: string;
+  image_url: string | null;
+  published_at: string | null;
+  published_on_site_at: string;
+  original_excerpt: string;
+  ai_summary: string;
+  category: string;
+  positivity_score: number;
+  status: "published";
+};
+
+const MAX_CANDIDATES_PER_RUN = 40;
+const MAX_AI_REVIEWS_PER_RUN = 20;
+
 const RSS_FEEDS = [
   {
     source: "BBC",
@@ -88,6 +121,28 @@ function parseRss(xml: string, source: string): RssArticle[] {
   });
 }
 
+function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
+  const seenUrls = new Set<string>();
+
+  return articles.filter((article) => {
+    if (!article.url || seenUrls.has(article.url)) {
+      return false;
+    }
+
+    seenUrls.add(article.url);
+    return true;
+  });
+}
+
+function buildPostgrestInFilter(values: string[]): string {
+  const quotedValues = values.map((value) => {
+    const escapedValue = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `"${escapedValue}"`;
+  });
+
+  return `in.(${quotedValues.join(",")})`;
+}
+
 async function fetchRssArticles(): Promise<RssArticle[]> {
   const allArticles: RssArticle[] = [];
 
@@ -105,16 +160,20 @@ async function fetchRssArticles(): Promise<RssArticle[]> {
     allArticles.push(...articles);
   }
 
-  return allArticles;
+  return uniqueArticlesByUrl(allArticles);
 }
 
-async function articleAlreadyExists(env: Env, url: string): Promise<boolean> {
-  if (!url) {
-    return true;
+async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
+  if (urls.length === 0) {
+    return new Set();
   }
 
+  const inFilter = buildPostgrestInFilter(urls);
+
   const response = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/articles?select=id&original_url=eq.${encodeURIComponent(url)}&limit=1`,
+    `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?select=original_url&original_url=${encodeURIComponent(
+      inFilter,
+    )}`,
     {
       method: "GET",
       headers: {
@@ -126,16 +185,16 @@ async function articleAlreadyExists(env: Env, url: string): Promise<boolean> {
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.log(`Failed to check existing article: ${response.status} ${errorText}`);
+    console.log(`Failed to batch-check reviewed URLs: ${response.status} ${errorText}`);
 
-    // Fail open so one Supabase check issue does not stop the whole refresh.
-    // The unique constraint will still protect against duplicates on insert.
-    return false;
+    // Fail open so the refresh can continue.
+    // Duplicate protection still exists through unique constraints.
+    return new Set();
   }
 
-  const rows = (await response.json()) as Array<{ id: string }>;
+  const rows = (await response.json()) as ReviewedUrlRow[];
 
-  return rows.length > 0;
+  return new Set(rows.map((row) => row.original_url));
 }
 
 async function classifyAndSummarizeArticle(
@@ -225,37 +284,62 @@ Return JSON exactly like this:
   }
 }
 
-async function saveArticleToSupabase(
+async function saveArticleReviewsBatch(
   env: Env,
-  article: RssArticle,
-  aiDecision: AiArticleDecision,
+  reviews: ArticleReviewInsert[],
 ): Promise<boolean> {
-  const response = await fetch(`${env.SUPABASE_URL}/rest/v1/articles`, {
-    method: "POST",
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates",
+  if (reviews.length === 0) {
+    return true;
+  }
+
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?on_conflict=original_url`,
+    {
+      method: "POST",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=ignore-duplicates,return=minimal",
+      },
+      body: JSON.stringify(reviews),
     },
-    body: JSON.stringify({
-      source: article.source,
-      title: article.title,
-      original_url: article.url,
-      image_url: null,
-      published_at: article.publishedAt,
-      published_on_site_at: new Date().toISOString(),
-      original_excerpt: article.excerpt,
-      ai_summary: aiDecision.summary || article.excerpt || article.title,
-      category: aiDecision.category || "Uplifting",
-      positivity_score: aiDecision.positivity_score ?? 7,
-      status: "published",
-    }),
-  });
+  );
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.log(`Failed to save article: ${response.status} ${errorText}`);
+    console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
+    return false;
+  }
+
+  return true;
+}
+
+async function saveAcceptedArticlesBatch(
+  env: Env,
+  articles: ArticleInsert[],
+): Promise<boolean> {
+  if (articles.length === 0) {
+    return true;
+  }
+
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/articles?on_conflict=original_url`,
+    {
+      method: "POST",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "resolution=ignore-duplicates,return=minimal",
+      },
+      body: JSON.stringify(articles),
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.log(`Failed to batch-save accepted articles: ${response.status} ${errorText}`);
     return false;
   }
 
@@ -275,45 +359,103 @@ async function refreshArticles(env: Env) {
     throw new Error("Missing OPENAI_API_KEY. Check worker/.dev.vars");
   }
 
-  const articles = await fetchRssArticles();
+  const fetchedArticles = await fetchRssArticles();
+  const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
+  const candidateUrls = candidateArticles.map((article) => article.url);
 
-  let skippedExistingCount = 0;
+  console.log(
+    `Fetched ${fetchedArticles.length} unique RSS articles. Checking ${candidateArticles.length} candidates this run.`,
+  );
+
+  const reviewedUrls = await getReviewedUrls(env, candidateUrls);
+
+  const newArticles = candidateArticles
+    .filter((article) => !reviewedUrls.has(article.url))
+    .slice(0, MAX_AI_REVIEWS_PER_RUN);
+
+  console.log(
+    `Skipped ${candidateArticles.length - newArticles.length} already-reviewed or over-limit articles. Sending ${newArticles.length} articles to AI.`,
+  );
+
+  const reviewRows: ArticleReviewInsert[] = [];
+  const acceptedArticleRows: ArticleInsert[] = [];
+
   let acceptedCount = 0;
-  let savedCount = 0;
+  let rejectedCount = 0;
 
-  for (const article of articles) {
-    const alreadyExists = await articleAlreadyExists(env, article.url);
-
-    if (alreadyExists) {
-      skippedExistingCount += 1;
-      console.log(`Skipped existing article: ${article.title}`);
-      continue;
-    }
-
+  for (const article of newArticles) {
     const aiDecision = await classifyAndSummarizeArticle(env, article);
 
-    if (aiDecision.decision !== "accept") {
-      console.log(`Rejected: ${article.title} — ${aiDecision.reason}`);
+    const normalizedDecision =
+      aiDecision.decision === "accept" ? "accept" : "reject";
+
+    const normalizedCategory = aiDecision.category || "Uplifting";
+    const normalizedScore = aiDecision.positivity_score ?? 0;
+    const normalizedSummary =
+      aiDecision.summary || article.excerpt || article.title;
+    const normalizedReason = aiDecision.reason || "No reason provided";
+
+    reviewRows.push({
+      original_url: article.url,
+      source: article.source,
+      title: article.title,
+      decision: normalizedDecision,
+      category: normalizedCategory,
+      positivity_score: normalizedScore,
+      summary: normalizedSummary,
+      reason: normalizedReason,
+      reviewed_at: new Date().toISOString(),
+    });
+
+    if (normalizedDecision === "reject") {
+      rejectedCount += 1;
+      console.log(`Rejected and queued for review save: ${article.title} — ${normalizedReason}`);
       continue;
     }
 
     acceptedCount += 1;
 
-    const saved = await saveArticleToSupabase(env, article, aiDecision);
+    acceptedArticleRows.push({
+      source: article.source,
+      title: article.title,
+      original_url: article.url,
+      image_url: null,
+      published_at: article.publishedAt,
+      published_on_site_at: new Date().toISOString(),
+      original_excerpt: article.excerpt,
+      ai_summary: normalizedSummary,
+      category: normalizedCategory,
+      positivity_score: normalizedScore || 7,
+      status: "published",
+    });
 
-if (saved) {
-  savedCount += 1;
-  console.log(
-    `Saved article: ${article.title} | Category: ${aiDecision.category} | Score: ${aiDecision.positivity_score}`,
-  );
-}
+    console.log(
+      `Accepted and queued for article save: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore}`,
+    );
+  }
+
+  const reviewsSaved = await saveArticleReviewsBatch(env, reviewRows);
+  const articlesSaved = await saveAcceptedArticlesBatch(env, acceptedArticleRows);
+
+  if (reviewsSaved) {
+    console.log(`Batch-saved ${reviewRows.length} AI review records.`);
+  }
+
+  if (articlesSaved) {
+    console.log(`Batch-saved ${acceptedArticleRows.length} accepted articles.`);
   }
 
   return {
-    fetchedCount: articles.length,
-    skippedExistingCount,
+    fetchedCount: fetchedArticles.length,
+    candidateCount: candidateArticles.length,
+    alreadyReviewedCount: candidateArticles.length - newArticles.length,
+    aiReviewedCount: newArticles.length,
     acceptedCount,
-    savedCount,
+    rejectedCount,
+    reviewRowsQueued: reviewRows.length,
+    articleRowsQueued: acceptedArticleRows.length,
+    reviewsSaved,
+    articlesSaved,
   };
 }
 
