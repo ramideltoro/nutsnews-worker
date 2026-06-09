@@ -56,8 +56,7 @@ function getTagValue(itemXml: string, tagName: string): string {
 
 function decodeHtml(value: string): string {
   return value
-    .replace(/<!\[CDATA\[/g, "")
-    .replace(/\]\]>/g, "")
+    .replace(/<!\[CDATA\[|\]\]>/g, "")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
@@ -140,7 +139,7 @@ Return JSON exactly like this:
   "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }
-          `,
+`,
         },
       ],
     }),
@@ -192,7 +191,11 @@ Return JSON exactly like this:
   }
 }
 
-async function saveArticleToSupabase(env: Env, article: RssArticle) {
+async function saveArticleToSupabase(
+  env: Env,
+  article: RssArticle,
+  aiDecision: AiArticleDecision,
+) {
   const response = await fetch(`${env.SUPABASE_URL}/rest/v1/articles`, {
     method: "POST",
     headers: {
@@ -207,11 +210,11 @@ async function saveArticleToSupabase(env: Env, article: RssArticle) {
       original_url: article.url,
       image_url: null,
       published_at: article.publishedAt,
-	  published_on_site_at: new Date().toISOString(),
+      published_on_site_at: new Date().toISOString(),
       original_excerpt: article.excerpt,
-      ai_summary: article.excerpt || article.title,
-      category: "Uplifting",
-      positivity_score: 7,
+      ai_summary: aiDecision.summary || article.excerpt || article.title,
+      category: aiDecision.category || "Uplifting",
+      positivity_score: aiDecision.positivity_score ?? 7,
       status: "published",
     }),
   });
@@ -224,8 +227,6 @@ async function saveArticleToSupabase(env: Env, article: RssArticle) {
 
   return true;
 }
-
-
 
 async function refreshArticles(env: Env) {
   if (!env.SUPABASE_URL) {
@@ -255,10 +256,7 @@ async function refreshArticles(env: Env) {
 
     acceptedCount += 1;
 
-    const saved = await saveArticleToSupabase(env, {
-      ...article,
-      excerpt: aiDecision.summary,
-    });
+    const saved = await saveArticleToSupabase(env, article, aiDecision);
 
     if (saved) {
       savedCount += 1;
