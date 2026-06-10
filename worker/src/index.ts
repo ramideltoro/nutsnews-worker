@@ -65,7 +65,7 @@ const MAX_CANDIDATES_PER_RUN = 300;
 const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
 const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
-const REVIEWED_URL_BATCH_SIZE = 250;
+const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
 
 const POSITIVE_SOURCES = new Set([
   "Good News Network",
@@ -606,16 +606,6 @@ function sortArticlesForReview(articles: RssArticle[]): RssArticle[] {
   });
 }
 
-function buildPostgrestInFilter(values: string[]): string {
-  const quotedValues = values.map((value) => {
-    const escapedValue = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
-    return `"${escapedValue}"`;
-  });
-
-  return `in.(${quotedValues.join(",")})`;
-}
-
 function clampAiReviewLimit(value: number | undefined): number {
   if (!value || Number.isNaN(value)) {
     return DEFAULT_MAX_AI_REVIEWS_PER_RUN;
@@ -697,39 +687,41 @@ async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
     return new Set();
   }
 
+  const candidateUrls = new Set(urls);
   const reviewedUrls = new Set<string>();
 
-  for (let index = 0; index < urls.length; index += REVIEWED_URL_BATCH_SIZE) {
-    const urlBatch = urls.slice(index, index + REVIEWED_URL_BATCH_SIZE);
-    const inFilter = buildPostgrestInFilter(urlBatch);
-
-    const response = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?select=original_url&original_url=${encodeURIComponent(
-        inFilter,
-      )}`,
-      {
-        method: "GET",
-        headers: {
-          apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-          Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
-        },
+  const response = await fetch(
+    `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+    {
+      method: "GET",
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
       },
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.log(
+      `Failed to load recent reviewed URLs: ${response.status} ${errorText}`,
     );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log(
-        `Failed to batch-check reviewed URLs: ${response.status} ${errorText}`,
-      );
-      continue;
-    }
+    return reviewedUrls;
+  }
 
-    const rows = (await response.json()) as ReviewedUrlRow[];
+  const rows = (await response.json()) as ReviewedUrlRow[];
 
-    for (const row of rows) {
+  for (const row of rows) {
+    if (candidateUrls.has(row.original_url)) {
       reviewedUrls.add(row.original_url);
     }
   }
+
+  console.log(
+    `Loaded ${rows.length} recent AI review URLs. Matched ${reviewedUrls.size} current candidates.`,
+  );
 
   return reviewedUrls;
 }
