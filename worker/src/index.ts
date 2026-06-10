@@ -10,6 +10,7 @@ type RssArticle = {
   url: string;
   excerpt: string;
   publishedAt: string | null;
+  imageUrl: string | null;
 };
 
 type AiArticleDecision = {
@@ -88,10 +89,7 @@ const POSITIVE_SOURCES = new Set([
 ]);
 
 const RSS_FEEDS = [
-  {
-    source: "Good News Network",
-    url: "https://www.goodnewsnetwork.org/feed/",
-  },
+  { source: "Good News Network", url: "https://www.goodnewsnetwork.org/feed/" },
   {
     source: "Good News Network Animals",
     url: "https://www.goodnewsnetwork.org/category/news/animals/feed/",
@@ -120,54 +118,27 @@ const RSS_FEEDS = [
     source: "Good News Network Arts",
     url: "https://www.goodnewsnetwork.org/category/news/arts-leisure/feed/",
   },
-  {
-    source: "Positive News",
-    url: "https://www.positive.news/feed/",
-  },
+  { source: "Positive News", url: "https://www.positive.news/feed/" },
   {
     source: "Reasons to be Cheerful",
     url: "https://reasonstobecheerful.world/feed/",
   },
-  {
-    source: "YES Magazine",
-    url: "https://www.yesmagazine.org/feed",
-  },
-  {
-    source: "The Optimist Daily",
-    url: "https://www.optimistdaily.com/feed/",
-  },
+  { source: "YES Magazine", url: "https://www.yesmagazine.org/feed" },
+  { source: "The Optimist Daily", url: "https://www.optimistdaily.com/feed/" },
   {
     source: "Good Good Good",
     url: "https://www.goodgoodgood.co/articles/rss.xml",
   },
-  {
-    source: "Sunny Skyz",
-    url: "https://www.sunnyskyz.com/rss",
-  },
-  {
-    source: "The Better India",
-    url: "https://www.thebetterindia.com/feed/",
-  },
-  {
-    source: "NASA",
-    url: "https://www.nasa.gov/news-release/feed/",
-  },
-  {
-    source: "ScienceDaily",
-    url: "https://www.sciencedaily.com/rss/top.xml",
-  },
+  { source: "Sunny Skyz", url: "https://www.sunnyskyz.com/rss" },
+  { source: "The Better India", url: "https://www.thebetterindia.com/feed/" },
+  { source: "NASA", url: "https://www.nasa.gov/news-release/feed/" },
+  { source: "ScienceDaily", url: "https://www.sciencedaily.com/rss/top.xml" },
   {
     source: "Smithsonian",
     url: "https://www.smithsonianmag.com/rss/latest_articles/",
   },
-  {
-    source: "BBC Stories",
-    url: "https://feeds.bbci.co.uk/news/stories/rss.xml",
-  },
-  {
-    source: "NPR",
-    url: "https://feeds.npr.org/1001/rss.xml",
-  },
+  { source: "BBC Stories", url: "https://feeds.bbci.co.uk/news/stories/rss.xml" },
+  { source: "NPR", url: "https://feeds.npr.org/1001/rss.xml" },
 ];
 
 const POSITIVE_KEYWORDS = [
@@ -289,10 +260,10 @@ const NEGATIVE_KEYWORDS = [
 
 function decodeHtml(value: string): string {
   return value
-    .replace(/<!\[CDATA\[(.*?)\]\]>/gs, "$1")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gs, "$1")
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    .replace(/&#039;/g, "'")
     .replace(/&apos;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
@@ -307,6 +278,17 @@ function stripHtml(value: string): string {
 function getTagValue(itemXml: string, tagName: string): string {
   const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
   const match = itemXml.match(regex);
+
+  if (!match?.[1]) {
+    return "";
+  }
+
+  return decodeHtml(match[1].trim());
+}
+
+function getAttributeValue(tagXml: string, attributeName: string): string {
+  const regex = new RegExp(`${attributeName}=["']([^"']+)["']`, "i");
+  const match = tagXml.match(regex);
 
   if (!match?.[1]) {
     return "";
@@ -350,6 +332,159 @@ function normalizeUrl(url: string): string {
   }
 }
 
+function normalizeImageUrl(imageUrl: string, articleUrl: string): string | null {
+  const cleanedImageUrl = decodeHtml(imageUrl).trim();
+
+  if (
+    !cleanedImageUrl ||
+    cleanedImageUrl.startsWith("data:") ||
+    cleanedImageUrl.startsWith("blob:") ||
+    cleanedImageUrl.startsWith("javascript:")
+  ) {
+    return null;
+  }
+
+  try {
+    const absoluteImageUrl = new URL(cleanedImageUrl, articleUrl);
+    const protocol = absoluteImageUrl.protocol.toLowerCase();
+
+    if (protocol !== "http:" && protocol !== "https:") {
+      return null;
+    }
+
+    absoluteImageUrl.hash = "";
+
+    return absoluteImageUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyImageUrl(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+
+  return (
+    lowerUrl.includes(".jpg") ||
+    lowerUrl.includes(".jpeg") ||
+    lowerUrl.includes(".png") ||
+    lowerUrl.includes(".webp") ||
+    lowerUrl.includes(".gif") ||
+    lowerUrl.includes("image") ||
+    lowerUrl.includes("thumbnail") ||
+    lowerUrl.includes("media")
+  );
+}
+
+function isBadImageCandidate(imageUrl: string): boolean {
+  const lowerUrl = imageUrl.toLowerCase();
+
+  return (
+    lowerUrl.includes("logo") ||
+    lowerUrl.includes("icon") ||
+    lowerUrl.includes("sprite") ||
+    lowerUrl.includes("avatar") ||
+    lowerUrl.includes("placeholder") ||
+    lowerUrl.includes("blank") ||
+    lowerUrl.includes("transparent") ||
+    lowerUrl.includes("tracking") ||
+    lowerUrl.includes("pixel") ||
+    lowerUrl.includes("1x1") ||
+    lowerUrl.endsWith(".svg")
+  );
+}
+
+function extractImageFromHtml(html: string, articleUrl: string): string | null {
+  const imageMatch =
+    html.match(/<img[^>]+srcset=["']([^"']+)["'][^>]*>/i) ??
+    html.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i) ??
+    html.match(/<img[^>]+data-src=["']([^"']+)["'][^>]*>/i) ??
+    html.match(/<img[^>]+data-lazy-src=["']([^"']+)["'][^>]*>/i);
+
+  if (!imageMatch?.[1]) {
+    return null;
+  }
+
+  const rawImageValue = imageMatch[1].split(",")[0]?.trim().split(/\s+/)[0];
+
+  if (!rawImageValue) {
+    return null;
+  }
+
+  const normalizedUrl = normalizeImageUrl(rawImageValue, articleUrl);
+
+  if (!normalizedUrl || isBadImageCandidate(normalizedUrl)) {
+    return null;
+  }
+
+  return normalizedUrl;
+}
+
+function extractRssImageUrl(itemXml: string, articleUrl: string): string | null {
+  const mediaContentTags = itemXml.match(/<media:content[^>]*>/gi) ?? [];
+
+  for (const tag of mediaContentTags) {
+    const medium = getAttributeValue(tag, "medium").toLowerCase();
+    const type = getAttributeValue(tag, "type").toLowerCase();
+    const url = getAttributeValue(tag, "url");
+
+    if (
+      url &&
+      (medium === "image" || type.startsWith("image/") || isLikelyImageUrl(url))
+    ) {
+      const normalizedUrl = normalizeImageUrl(url, articleUrl);
+
+      if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+        return normalizedUrl;
+      }
+    }
+  }
+
+  const mediaThumbnailTags = itemXml.match(/<media:thumbnail[^>]*>/gi) ?? [];
+
+  for (const tag of mediaThumbnailTags) {
+    const url = getAttributeValue(tag, "url");
+    const normalizedUrl = normalizeImageUrl(url, articleUrl);
+
+    if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+      return normalizedUrl;
+    }
+  }
+
+  const enclosureTags = itemXml.match(/<enclosure[^>]*>/gi) ?? [];
+
+  for (const tag of enclosureTags) {
+    const type = getAttributeValue(tag, "type").toLowerCase();
+    const url = getAttributeValue(tag, "url");
+
+    if (url && (type.startsWith("image/") || isLikelyImageUrl(url))) {
+      const normalizedUrl = normalizeImageUrl(url, articleUrl);
+
+      if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+        return normalizedUrl;
+      }
+    }
+  }
+
+  const itunesImageTags = itemXml.match(/<itunes:image[^>]*>/gi) ?? [];
+
+  for (const tag of itunesImageTags) {
+    const href = getAttributeValue(tag, "href");
+    const normalizedUrl = normalizeImageUrl(href, articleUrl);
+
+    if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+      return normalizedUrl;
+    }
+  }
+
+  const description =
+    getTagValue(itemXml, "description") ||
+    getTagValue(itemXml, "summary") ||
+    getTagValue(itemXml, "content:encoded") ||
+    getTagValue(itemXml, "content");
+
+  return extractImageFromHtml(description, articleUrl);
+}
+
 function parsePublishedDate(value: string): string | null {
   if (!value) {
     return null;
@@ -373,6 +508,8 @@ function parseRss(xml: string, source: string): RssArticle[] {
     const title = stripHtml(getTagValue(itemXml, "title"));
     const rssLink = getTagValue(itemXml, "link");
     const atomLink = getAtomLink(itemXml);
+    const url = normalizeUrl(rssLink || atomLink);
+
     const description =
       getTagValue(itemXml, "description") ||
       getTagValue(itemXml, "summary") ||
@@ -387,9 +524,10 @@ function parseRss(xml: string, source: string): RssArticle[] {
     return {
       source,
       title,
-      url: normalizeUrl(rssLink || atomLink),
+      url,
       excerpt: stripHtml(description),
       publishedAt: parsePublishedDate(pubDate),
+      imageUrl: extractRssImageUrl(itemXml, url),
     };
   });
 }
@@ -403,6 +541,7 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
     }
 
     seenUrls.add(article.url);
+
     return true;
   });
 }
@@ -430,6 +569,10 @@ function scoreArticleCandidate(article: RssArticle): number {
 
   if (article.excerpt.length >= 80) {
     score += 2;
+  }
+
+  if (article.imageUrl) {
+    score += 1;
   }
 
   if (article.publishedAt) {
@@ -466,6 +609,7 @@ function sortArticlesForReview(articles: RssArticle[]): RssArticle[] {
 function buildPostgrestInFilter(values: string[]): string {
   const quotedValues = values.map((value) => {
     const escapedValue = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
     return `"${escapedValue}"`;
   });
 
@@ -526,8 +670,11 @@ async function fetchSingleFeed(feed: {
     const articles = parseRss(xml, feed.source).filter(
       (article) => article.title && article.url,
     );
+    const imageCount = articles.filter((article) => article.imageUrl).length;
 
-    console.log(`Fetched ${articles.length} articles from ${feed.source}`);
+    console.log(
+      `Fetched ${articles.length} articles from ${feed.source}. RSS images found: ${imageCount}`,
+    );
 
     return articles;
   } catch (error) {
@@ -540,7 +687,6 @@ async function fetchRssArticles(): Promise<RssArticle[]> {
   const feedResults = await Promise.all(
     RSS_FEEDS.map((feed) => fetchSingleFeed(feed)),
   );
-
   const allArticles = feedResults.flat();
 
   return sortArticlesForReview(uniqueArticlesByUrl(allArticles));
@@ -575,7 +721,6 @@ async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
       console.log(
         `Failed to batch-check reviewed URLs: ${response.status} ${errorText}`,
       );
-
       continue;
     }
 
@@ -624,7 +769,7 @@ Return JSON exactly like this:
   "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }
-          `,
+`,
         },
       ],
     }),
@@ -701,6 +846,7 @@ async function saveArticleReviewsBatch(
   if (!response.ok) {
     const errorText = await response.text();
     console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
+
     return false;
   }
 
@@ -734,6 +880,7 @@ async function saveAcceptedArticlesBatch(
     console.log(
       `Failed to batch-save accepted articles: ${response.status} ${errorText}`,
     );
+
     return false;
   }
 
@@ -750,8 +897,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
   for (const reviewedArticle of reviewedArticles) {
     const { article, aiDecision } = reviewedArticle;
 
-    const normalizedDecision =
-      aiDecision.decision === "accept" ? "accept" : "reject";
+    const normalizedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
     const normalizedCategory = aiDecision.category || "Uplifting";
     const normalizedScore = aiDecision.positivity_score ?? 0;
     const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
@@ -781,7 +927,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
       source: article.source,
       title: article.title,
       original_url: article.url,
-      image_url: null,
+      image_url: article.imageUrl,
       published_at: article.publishedAt,
       published_on_site_at: new Date().toISOString(),
       original_excerpt: article.excerpt,
@@ -792,7 +938,9 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
     });
 
     console.log(
-      `Accepted: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore}`,
+      `Accepted: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore} | Image: ${
+        article.imageUrl ? "yes" : "none"
+      }`,
     );
   }
 
@@ -818,7 +966,6 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
   }
 
   const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
-
   const fetchedArticles = await fetchRssArticles();
   const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
   const candidateUrls = candidateArticles.map((article) => article.url);
@@ -828,11 +975,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
   );
 
   const reviewedUrls = await getReviewedUrls(env, candidateUrls);
-
   const unreviewedArticles = candidateArticles.filter(
     (article) => !reviewedUrls.has(article.url),
   );
-
   const articlesForAi = unreviewedArticles.slice(0, maxAiReviews);
 
   console.log(
@@ -848,12 +993,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     }),
   );
 
-  const {
-    reviewRows,
-    acceptedArticleRows,
-    acceptedCount,
-    rejectedCount,
-  } = buildRowsFromReviewedArticles(reviewedArticles);
+  const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
+    buildRowsFromReviewedArticles(reviewedArticles);
 
   console.log(
     `AI review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
