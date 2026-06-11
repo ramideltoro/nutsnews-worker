@@ -1,3 +1,8 @@
+
+# Badges
+
+[![Better Stack Badge](https://uptime.betterstack.com/status-badges/v1/monitor/2ovb1.svg)](https://uptime.betterstack.com/?utm_source=status_badge)
+
 # NutsNews
 
 NutsNews is a calm, mobile-first news platform that collects positive stories from trusted RSS feeds, filters out stressful topics, and presents short cheerful summaries with links back to the original publishers.
