@@ -910,9 +910,7 @@ Potential improvements:
 
 ## License
 
-No license has been selected yet.
-
-If this repository becomes public open source, add a `LICENSE` file such as MIT, Apache-2.0, or another license that matches the intended reuse policy.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ---
 
