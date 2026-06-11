@@ -258,13 +258,140 @@ const NEGATIVE_KEYWORDS = [
   "fired",
 ];
 
+const STRICT_LOCAL_PREFILTER_SOURCES = new Set(["NPR", "BBC Stories"]);
+
+const HARD_NEGATIVE_KEYWORDS = [
+  "politics",
+  "political",
+  "election",
+  "elections",
+  "campaign",
+  "vote",
+  "voters",
+  "president",
+  "minister",
+  "government",
+  "congress",
+  "senate",
+  "parliament",
+  "democrat",
+  "republican",
+  "trump",
+  "biden",
+  "court",
+  "supreme court",
+  "judge",
+  "lawsuit",
+  "trial",
+  "charges",
+  "charged",
+  "convicted",
+  "prison",
+  "war",
+  "military",
+  "missile",
+  "bomb",
+  "attack",
+  "attacks",
+  "hostage",
+  "killed",
+  "dead",
+  "death",
+  "dies",
+  "murder",
+  "shooting",
+  "gun",
+  "crime",
+  "criminal",
+  "violence",
+  "violent",
+  "abuse",
+  "crash",
+  "disaster",
+  "tragedy",
+  "tragic",
+  "hurricane",
+  "flood",
+  "wildfire",
+  "earthquake",
+  "stocks",
+  "stock market",
+  "market",
+  "markets",
+  "inflation",
+  "recession",
+  "tariff",
+  "economy",
+  "business",
+  "money",
+  "bank",
+  "earnings",
+  "profit",
+  "losses",
+  "layoffs",
+  "fired",
+];
+
+const HARD_POSITIVE_ESCAPE_KEYWORDS = [
+  "rescue",
+  "rescued",
+  "reunited",
+  "reunion",
+  "healing",
+  "recovered",
+  "recovery",
+  "breakthrough",
+  "discovery",
+  "donation",
+  "donated",
+  "volunteer",
+  "volunteers",
+  "kindness",
+  "community",
+  "hero",
+  "heroes",
+  "saved",
+  "restored",
+  "restoration",
+  "conservation",
+  "wildlife",
+  "garden",
+  "school",
+  "students",
+  "teacher",
+  "science",
+  "space",
+  "nasa",
+  "art",
+  "music",
+  "creative",
+  "achievement",
+  "award",
+  "celebrate",
+  "celebration",
+  "hope",
+  "hopeful",
+];
+
+const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
+  decision: "reject",
+  category: "Uplifting",
+  positivity_score: 0,
+  summary: "",
+  reason: "Skipped before AI because the article matched hard negative local filters.",
+};
+
 function decodeHtml(value: string): string {
   return value
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/gs, "$1")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+    .replace(/&#x([a-fA-F0-9]+);/g, (_match, code) =>
+      String.fromCharCode(Number.parseInt(code, 16)),
+    )
     .replace(/&amp;/g, "&")
     .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
     .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">");
 }
@@ -548,7 +675,6 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
 
 function scoreArticleCandidate(article: RssArticle): number {
   const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
-
   let score = 0;
 
   if (POSITIVE_SOURCES.has(article.source)) {
@@ -589,6 +715,64 @@ function scoreArticleCandidate(article: RssArticle): number {
   }
 
   return score;
+}
+
+function countKeywordMatches(text: string, keywords: string[]): number {
+  return keywords.reduce((count, keyword) => {
+    return text.includes(keyword) ? count + 1 : count;
+  }, 0);
+}
+
+function shouldSkipBeforeAi(article: RssArticle): boolean {
+  const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+
+  const hardNegativeMatchCount = countKeywordMatches(
+    text,
+    HARD_NEGATIVE_KEYWORDS,
+  );
+
+  if (hardNegativeMatchCount === 0) {
+    return false;
+  }
+
+  const positiveEscapeMatchCount = countKeywordMatches(
+    text,
+    HARD_POSITIVE_ESCAPE_KEYWORDS,
+  );
+
+  /*
+   * Positive-first sources are already likely to produce acceptable stories.
+   * Only skip them locally when the article is extremely clearly negative.
+   */
+  if (POSITIVE_SOURCES.has(article.source)) {
+    return hardNegativeMatchCount >= 3 && positiveEscapeMatchCount === 0;
+  }
+
+  /*
+   * Broad news feeds like NPR and BBC Stories need a stricter local filter.
+   * This prevents obvious politics, war, crime, money, disaster, and court
+   * stories from spending OpenAI calls.
+   */
+  if (STRICT_LOCAL_PREFILTER_SOURCES.has(article.source)) {
+    return hardNegativeMatchCount >= 1 && positiveEscapeMatchCount === 0;
+  }
+
+  /*
+   * Other broad or non-positive feeds get a middle setting.
+   */
+  return hardNegativeMatchCount >= 2 && positiveEscapeMatchCount === 0;
+}
+
+function buildLocalRejectedArticles(
+  articles: RssArticle[],
+): ReviewedArticleResult[] {
+  return articles.map((article) => ({
+    article,
+    aiDecision: {
+      ...LOCAL_PREFILTER_REJECT_DECISION,
+      reason: `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+    },
+  }));
 }
 
 function sortArticlesForReview(articles: RssArticle[]): RssArticle[] {
@@ -657,9 +841,11 @@ async function fetchSingleFeed(feed: {
     }
 
     const xml = await response.text();
+
     const articles = parseRss(xml, feed.source).filter(
       (article) => article.title && article.url,
     );
+
     const imageCount = articles.filter((article) => article.imageUrl).length;
 
     console.log(
@@ -677,6 +863,7 @@ async function fetchRssArticles(): Promise<RssArticle[]> {
   const feedResults = await Promise.all(
     RSS_FEEDS.map((feed) => fetchSingleFeed(feed)),
   );
+
   const allArticles = feedResults.flat();
 
   return sortArticlesForReview(uniqueArticlesByUrl(allArticles));
@@ -838,7 +1025,6 @@ async function saveArticleReviewsBatch(
   if (!response.ok) {
     const errorText = await response.text();
     console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
-
     return false;
   }
 
@@ -869,6 +1055,7 @@ async function saveAcceptedArticlesBatch(
 
   if (!response.ok) {
     const errorText = await response.text();
+
     console.log(
       `Failed to batch-save accepted articles: ${response.status} ${errorText}`,
     );
@@ -882,13 +1069,11 @@ async function saveAcceptedArticlesBatch(
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
   const reviewRows: ArticleReviewInsert[] = [];
   const acceptedArticleRows: ArticleInsert[] = [];
-
   let acceptedCount = 0;
   let rejectedCount = 0;
 
   for (const reviewedArticle of reviewedArticles) {
     const { article, aiDecision } = reviewedArticle;
-
     const normalizedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
     const normalizedCategory = aiDecision.category || "Uplifting";
     const normalizedScore = aiDecision.positivity_score ?? 0;
@@ -967,16 +1152,30 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
   );
 
   const reviewedUrls = await getReviewedUrls(env, candidateUrls);
+
   const unreviewedArticles = candidateArticles.filter(
     (article) => !reviewedUrls.has(article.url),
   );
-  const articlesForAi = unreviewedArticles.slice(0, maxAiReviews);
 
-  console.log(
-    `Already reviewed: ${reviewedUrls.size}. Unreviewed candidates: ${unreviewedArticles.length}. Sending ${articlesForAi.length} articles to AI with concurrency ${AI_REVIEW_CONCURRENCY}.`,
+  const locallyRejectedArticles = unreviewedArticles.filter((article) =>
+    shouldSkipBeforeAi(article),
   );
 
-  const reviewedArticles = await mapWithConcurrency(
+  const articlesEligibleForAi = unreviewedArticles.filter(
+    (article) => !shouldSkipBeforeAi(article),
+  );
+
+  const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
+
+  console.log(
+    `Already reviewed: ${reviewedUrls.size}. Unreviewed candidates: ${unreviewedArticles.length}. Locally rejected before AI: ${locallyRejectedArticles.length}. Eligible for AI after local filter: ${articlesEligibleForAi.length}. Sending ${articlesForAi.length} articles to AI with concurrency ${AI_REVIEW_CONCURRENCY}.`,
+  );
+
+  const locallyReviewedArticles = buildLocalRejectedArticles(
+    locallyRejectedArticles,
+  );
+
+  const aiReviewedArticles = await mapWithConcurrency(
     articlesForAi,
     AI_REVIEW_CONCURRENCY,
     async (article) => ({
@@ -985,11 +1184,13 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     }),
   );
 
+  const reviewedArticles = [...locallyReviewedArticles, ...aiReviewedArticles];
+
   const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
     buildRowsFromReviewedArticles(reviewedArticles);
 
   console.log(
-    `AI review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
+    `Review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
   );
 
   const [reviewsSaved, articlesSaved] = await Promise.all([
@@ -1010,6 +1211,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     candidateCount: candidateArticles.length,
     alreadyReviewedCount: reviewedUrls.size,
     unreviewedCandidateCount: unreviewedArticles.length,
+    locallyRejectedBeforeAiCount: locallyRejectedArticles.length,
+    eligibleForAiCount: articlesEligibleForAi.length,
     aiReviewedCount: articlesForAi.length,
     acceptedCount,
     rejectedCount,
@@ -1021,7 +1224,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     aiReviewConcurrency: AI_REVIEW_CONCURRENCY,
     maxAiReviews,
     subrequestPlan:
-      "Free-plan safe target: RSS feeds + duplicate checks + limited OpenAI calls + Supabase batch saves",
+      "Free-plan safe target: RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
   };
 }
 
