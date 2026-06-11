@@ -1,7 +1,26 @@
+type SecretBinding = {
+  get: () => Promise<string>;
+};
+
 type Env = {
-  SUPABASE_URL: string;
-  SUPABASE_SERVICE_ROLE_KEY: string;
-  OPENAI_API_KEY: string;
+  SUPABASE_URL: SecretBinding;
+  SUPABASE_SERVICE_ROLE_KEY: SecretBinding;
+  OPENAI_API_KEY: SecretBinding;
+
+  FEED_SHARD_INDEX?: string;
+  FEEDS_PER_SHARD?: string;
+};
+
+type RuntimeConfig = {
+  supabaseUrl: string;
+  supabaseServiceRoleKey: string;
+  openAiApiKey: string;
+};
+
+type RssFeed = {
+  source: string;
+  url: string;
+  is_positive_source: boolean;
 };
 
 type RssArticle = {
@@ -66,80 +85,6 @@ const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
 const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
-
-const POSITIVE_SOURCES = new Set([
-  "Good News Network",
-  "Good News Network Animals",
-  "Good News Network Good Earth",
-  "Good News Network Heroes",
-  "Good News Network Inspiring",
-  "Good News Network Science",
-  "Good News Network Health",
-  "Good News Network Arts",
-  "Positive News",
-  "Reasons to be Cheerful",
-  "YES Magazine",
-  "The Optimist Daily",
-  "Good Good Good",
-  "NASA",
-  "ScienceDaily",
-  "Smithsonian",
-  "Sunny Skyz",
-  "The Better India",
-]);
-
-const RSS_FEEDS = [
-  { source: "Good News Network", url: "https://www.goodnewsnetwork.org/feed/" },
-  {
-    source: "Good News Network Animals",
-    url: "https://www.goodnewsnetwork.org/category/news/animals/feed/",
-  },
-  {
-    source: "Good News Network Good Earth",
-    url: "https://www.goodnewsnetwork.org/category/news/good-earth/feed/",
-  },
-  {
-    source: "Good News Network Heroes",
-    url: "https://www.goodnewsnetwork.org/category/news/heroes/feed/",
-  },
-  {
-    source: "Good News Network Inspiring",
-    url: "https://www.goodnewsnetwork.org/category/news/inspiring/feed/",
-  },
-  {
-    source: "Good News Network Science",
-    url: "https://www.goodnewsnetwork.org/category/news/science/feed/",
-  },
-  {
-    source: "Good News Network Health",
-    url: "https://www.goodnewsnetwork.org/category/news/health/feed/",
-  },
-  {
-    source: "Good News Network Arts",
-    url: "https://www.goodnewsnetwork.org/category/news/arts-leisure/feed/",
-  },
-  { source: "Positive News", url: "https://www.positive.news/feed/" },
-  {
-    source: "Reasons to be Cheerful",
-    url: "https://reasonstobecheerful.world/feed/",
-  },
-  { source: "YES Magazine", url: "https://www.yesmagazine.org/feed" },
-  { source: "The Optimist Daily", url: "https://www.optimistdaily.com/feed/" },
-  {
-    source: "Good Good Good",
-    url: "https://www.goodgoodgood.co/articles/rss.xml",
-  },
-  { source: "Sunny Skyz", url: "https://www.sunnyskyz.com/rss" },
-  { source: "The Better India", url: "https://www.thebetterindia.com/feed/" },
-  { source: "NASA", url: "https://www.nasa.gov/news-release/feed/" },
-  { source: "ScienceDaily", url: "https://www.sciencedaily.com/rss/top.xml" },
-  {
-    source: "Smithsonian",
-    url: "https://www.smithsonianmag.com/rss/latest_articles/",
-  },
-  { source: "BBC Stories", url: "https://feeds.bbci.co.uk/news/stories/rss.xml" },
-  { source: "NPR", url: "https://feeds.npr.org/1001/rss.xml" },
-];
 
 const POSITIVE_KEYWORDS = [
   "good news",
@@ -380,6 +325,80 @@ const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
   summary: "",
   reason: "Skipped before AI because the article matched hard negative local filters.",
 };
+
+async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
+  const supabaseUrl = await env.SUPABASE_URL.get();
+  const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
+  const openAiApiKey = await env.OPENAI_API_KEY.get();
+
+  if (!supabaseUrl) {
+    throw new Error("Missing SUPABASE_URL secret.");
+  }
+
+  if (!supabaseServiceRoleKey) {
+    throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY secret.");
+  }
+
+  if (!openAiApiKey) {
+    throw new Error("Missing OPENAI_API_KEY secret.");
+  }
+
+  return {
+    supabaseUrl,
+    supabaseServiceRoleKey,
+    openAiApiKey,
+  };
+}
+
+function getShardIndex(env: Env): number {
+  const shardIndex = Number(env.FEED_SHARD_INDEX ?? "0");
+
+  if (Number.isNaN(shardIndex) || shardIndex < 0) {
+    return 0;
+  }
+
+  return Math.floor(shardIndex);
+}
+
+function getFeedsPerShard(env: Env): number {
+  const feedsPerShard = Number(env.FEEDS_PER_SHARD ?? "20");
+
+  if (Number.isNaN(feedsPerShard) || feedsPerShard < 1) {
+    return 20;
+  }
+
+  return Math.floor(feedsPerShard);
+}
+
+async function getFeedsForShard(
+  env: Env,
+  config: RuntimeConfig,
+): Promise<RssFeed[]> {
+  const shardIndex = getShardIndex(env);
+  const feedsPerShard = getFeedsPerShard(env);
+  const offset = shardIndex * feedsPerShard;
+
+  const response = await fetch(
+    `${config.supabaseUrl}/rest/v1/rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${feedsPerShard}&offset=${offset}`,
+    {
+      method: "GET",
+      headers: {
+        apikey: config.supabaseServiceRoleKey,
+        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    throw new Error(
+      `Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`,
+    );
+  }
+
+  return (await response.json()) as RssFeed[];
+}
 
 function decodeHtml(value: string): string {
   return value
@@ -673,11 +692,14 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
   });
 }
 
-function scoreArticleCandidate(article: RssArticle): number {
+function scoreArticleCandidate(
+  article: RssArticle,
+  positiveSources: Set<string>,
+): number {
   const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
   let score = 0;
 
-  if (POSITIVE_SOURCES.has(article.source)) {
+  if (positiveSources.has(article.source)) {
     score += 24;
   }
 
@@ -723,7 +745,10 @@ function countKeywordMatches(text: string, keywords: string[]): number {
   }, 0);
 }
 
-function shouldSkipBeforeAi(article: RssArticle): boolean {
+function shouldSkipBeforeAi(
+  article: RssArticle,
+  positiveSources: Set<string>,
+): boolean {
   const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 
   const hardNegativeMatchCount = countKeywordMatches(
@@ -740,26 +765,14 @@ function shouldSkipBeforeAi(article: RssArticle): boolean {
     HARD_POSITIVE_ESCAPE_KEYWORDS,
   );
 
-  /*
-   * Positive-first sources are already likely to produce acceptable stories.
-   * Only skip them locally when the article is extremely clearly negative.
-   */
-  if (POSITIVE_SOURCES.has(article.source)) {
+  if (positiveSources.has(article.source)) {
     return hardNegativeMatchCount >= 3 && positiveEscapeMatchCount === 0;
   }
 
-  /*
-   * Broad news feeds like NPR and BBC Stories need a stricter local filter.
-   * This prevents obvious politics, war, crime, money, disaster, and court
-   * stories from spending OpenAI calls.
-   */
   if (STRICT_LOCAL_PREFILTER_SOURCES.has(article.source)) {
     return hardNegativeMatchCount >= 1 && positiveEscapeMatchCount === 0;
   }
 
-  /*
-   * Other broad or non-positive feeds get a middle setting.
-   */
   return hardNegativeMatchCount >= 2 && positiveEscapeMatchCount === 0;
 }
 
@@ -775,9 +788,14 @@ function buildLocalRejectedArticles(
   }));
 }
 
-function sortArticlesForReview(articles: RssArticle[]): RssArticle[] {
+function sortArticlesForReview(
+  articles: RssArticle[],
+  positiveSources: Set<string>,
+): RssArticle[] {
   return [...articles].sort((a, b) => {
-    const scoreDifference = scoreArticleCandidate(b) - scoreArticleCandidate(a);
+    const scoreDifference =
+      scoreArticleCandidate(b, positiveSources) -
+      scoreArticleCandidate(a, positiveSources);
 
     if (scoreDifference !== 0) {
       return scoreDifference;
@@ -859,17 +877,23 @@ async function fetchSingleFeed(feed: {
   }
 }
 
-async function fetchRssArticles(): Promise<RssArticle[]> {
+async function fetchRssArticles(
+  feeds: RssFeed[],
+  positiveSources: Set<string>,
+): Promise<RssArticle[]> {
   const feedResults = await Promise.all(
-    RSS_FEEDS.map((feed) => fetchSingleFeed(feed)),
+    feeds.map((feed) => fetchSingleFeed(feed)),
   );
 
   const allArticles = feedResults.flat();
 
-  return sortArticlesForReview(uniqueArticlesByUrl(allArticles));
+  return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
 }
 
-async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
+async function getReviewedUrls(
+  config: RuntimeConfig,
+  urls: string[],
+): Promise<Set<string>> {
   if (urls.length === 0) {
     return new Set();
   }
@@ -878,12 +902,12 @@ async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
   const reviewedUrls = new Set<string>();
 
   const response = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+    `${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
     {
       method: "GET",
       headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: config.supabaseServiceRoleKey,
+        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
       },
     },
   );
@@ -914,13 +938,13 @@ async function getReviewedUrls(env: Env, urls: string[]): Promise<Set<string>> {
 }
 
 async function classifyAndSummarizeArticle(
-  env: Env,
+  config: RuntimeConfig,
   article: RssArticle,
 ): Promise<AiArticleDecision> {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${config.openAiApiKey}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -1001,7 +1025,7 @@ Return JSON exactly like this:
 }
 
 async function saveArticleReviewsBatch(
-  env: Env,
+  config: RuntimeConfig,
   reviews: ArticleReviewInsert[],
 ): Promise<boolean> {
   if (reviews.length === 0) {
@@ -1009,12 +1033,12 @@ async function saveArticleReviewsBatch(
   }
 
   const response = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/article_ai_reviews?on_conflict=original_url`,
+    `${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
     {
       method: "POST",
       headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: config.supabaseServiceRoleKey,
+        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
         "Content-Type": "application/json",
         Prefer: "resolution=ignore-duplicates,return=minimal",
       },
@@ -1032,7 +1056,7 @@ async function saveArticleReviewsBatch(
 }
 
 async function saveAcceptedArticlesBatch(
-  env: Env,
+  config: RuntimeConfig,
   articles: ArticleInsert[],
 ): Promise<boolean> {
   if (articles.length === 0) {
@@ -1040,12 +1064,12 @@ async function saveAcceptedArticlesBatch(
   }
 
   const response = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/articles?on_conflict=original_url`,
+    `${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
     {
       method: "POST",
       headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+        apikey: config.supabaseServiceRoleKey,
+        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
         "Content-Type": "application/json",
         Prefer: "resolution=ignore-duplicates,return=minimal",
       },
@@ -1130,20 +1154,23 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 }
 
 async function refreshArticles(env: Env, options: RefreshOptions = {}) {
-  if (!env.SUPABASE_URL) {
-    throw new Error("Missing SUPABASE_URL. Check worker/.dev.vars");
-  }
-
-  if (!env.SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY. Check worker/.dev.vars");
-  }
-
-  if (!env.OPENAI_API_KEY) {
-    throw new Error("Missing OPENAI_API_KEY. Check worker/.dev.vars");
-  }
-
+  const config = await getRuntimeConfig(env);
   const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
-  const fetchedArticles = await fetchRssArticles();
+  const shardIndex = getShardIndex(env);
+  const feedsPerShard = getFeedsPerShard(env);
+  const shardFeeds = await getFeedsForShard(env, config);
+
+  const positiveSources = new Set(
+    shardFeeds
+      .filter((feed) => feed.is_positive_source)
+      .map((feed) => feed.source),
+  );
+
+  console.log(
+    `Worker shard ${shardIndex} loaded ${shardFeeds.length} RSS feeds. Feeds per shard: ${feedsPerShard}.`,
+  );
+
+  const fetchedArticles = await fetchRssArticles(shardFeeds, positiveSources);
   const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
   const candidateUrls = candidateArticles.map((article) => article.url);
 
@@ -1151,19 +1178,24 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     `Fetched ${fetchedArticles.length} unique RSS articles. Checking ${candidateArticles.length} sorted candidates this run.`,
   );
 
-  const reviewedUrls = await getReviewedUrls(env, candidateUrls);
+  const reviewedUrls = await getReviewedUrls(config, candidateUrls);
 
   const unreviewedArticles = candidateArticles.filter(
     (article) => !reviewedUrls.has(article.url),
   );
 
-  const locallyRejectedArticles = unreviewedArticles.filter((article) =>
-    shouldSkipBeforeAi(article),
-  );
+  const localFilterResults = unreviewedArticles.map((article) => ({
+    article,
+    shouldSkip: shouldSkipBeforeAi(article, positiveSources),
+  }));
 
-  const articlesEligibleForAi = unreviewedArticles.filter(
-    (article) => !shouldSkipBeforeAi(article),
-  );
+  const locallyRejectedArticles = localFilterResults
+    .filter((result) => result.shouldSkip)
+    .map((result) => result.article);
+
+  const articlesEligibleForAi = localFilterResults
+    .filter((result) => !result.shouldSkip)
+    .map((result) => result.article);
 
   const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
 
@@ -1180,7 +1212,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     AI_REVIEW_CONCURRENCY,
     async (article) => ({
       article,
-      aiDecision: await classifyAndSummarizeArticle(env, article),
+      aiDecision: await classifyAndSummarizeArticle(config, article),
     }),
   );
 
@@ -1194,8 +1226,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
   );
 
   const [reviewsSaved, articlesSaved] = await Promise.all([
-    saveArticleReviewsBatch(env, reviewRows),
-    saveAcceptedArticlesBatch(env, acceptedArticleRows),
+    saveArticleReviewsBatch(config, reviewRows),
+    saveAcceptedArticlesBatch(config, acceptedArticleRows),
   ]);
 
   if (reviewsSaved) {
@@ -1220,17 +1252,24 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
     articleRowsQueued: acceptedArticleRows.length,
     reviewsSaved,
     articlesSaved,
-    feedCount: RSS_FEEDS.length,
+    feedCount: shardFeeds.length,
+    feedShardIndex: shardIndex,
+    feedsPerShard,
     aiReviewConcurrency: AI_REVIEW_CONCURRENCY,
     maxAiReviews,
     subrequestPlan:
-      "Free-plan safe target: RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
+      "Free-plan safe target: sharded RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
   };
 }
 
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/favicon.ico") {
+      return new Response(null, { status: 204 });
+    }
+
     const limitParam = url.searchParams.get("limit");
     const requestedLimit = limitParam ? Number(limitParam) : undefined;
 
@@ -1245,10 +1284,10 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env) {
-    console.log("NutsNews hourly refresh started");
+    console.log("NutsNews scheduled shard refresh started");
 
     const result = await refreshArticles(env);
 
-    console.log("NutsNews hourly refresh finished", result);
+    console.log("NutsNews scheduled shard refresh finished", result);
   },
 };

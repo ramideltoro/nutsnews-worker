@@ -1,19 +1,17 @@
 {
-  "name": "worker",
-  "version": "0.0.0",
+  "name": "nutsnews-worker",
+  "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "test": "vitest",
-    "cf-typegen": "wrangler types"
+    "generate:wrangler": "node scripts/generate-wrangler-config.mjs",
+    "dev": "wrangler dev -c generated-wrangler/wrangler.shard0.jsonc",
+    "deploy:shard0": "wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
+    "deploy:all": "npm run generate:wrangler && for i in {0..24}; do echo \"Deploying shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.4",
-    "@types/node": "^25.9.2",
-    "typescript": "^5.5.2",
-    "vitest": "~3.2.0",
-    "wrangler": "^4.98.0"
+    "@cloudflare/workers-types": "^4.20260601.0",
+    "typescript": "^5.8.3",
+    "wrangler": "^4.20.0"
   }
 }

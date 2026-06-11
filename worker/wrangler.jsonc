@@ -1,48 +1,311 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
-	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "worker",
-	"main": "src/index.ts",
-	"compatibility_date": "2026-06-07",
-	"observability": {
-		"enabled": true
-	},
-	"upload_source_maps": true,
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
-	"triggers": {
- 	 "crons": ["0 * * * *"]
-	}
-	/**
-	 * Smart Placement
-	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": {  "mode": "smart" }
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-	// "vars": {  "MY_VARIABLE": "production_value" }
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": {  "directory": "./public/",  "binding": "ASSETS" }
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [  {   "binding": "MY_SERVICE",   "service": "my-service"  } ]
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nutsnews-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-10",
+  "observability": {
+    "enabled": true
+  },
+  "env": {
+    "shard0": {
+      "name": "nutsnews-worker-0",
+      "triggers": {
+        "crons": [
+          "0 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "0",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard1": {
+      "name": "nutsnews-worker-1",
+      "triggers": {
+        "crons": [
+          "2 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "1",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard2": {
+      "name": "nutsnews-worker-2",
+      "triggers": {
+        "crons": [
+          "4 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "2",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard3": {
+      "name": "nutsnews-worker-3",
+      "triggers": {
+        "crons": [
+          "6 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "3",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard4": {
+      "name": "nutsnews-worker-4",
+      "triggers": {
+        "crons": [
+          "8 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "4",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard5": {
+      "name": "nutsnews-worker-5",
+      "triggers": {
+        "crons": [
+          "10 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "5",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard6": {
+      "name": "nutsnews-worker-6",
+      "triggers": {
+        "crons": [
+          "12 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "6",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard7": {
+      "name": "nutsnews-worker-7",
+      "triggers": {
+        "crons": [
+          "14 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "7",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard8": {
+      "name": "nutsnews-worker-8",
+      "triggers": {
+        "crons": [
+          "16 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "8",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard9": {
+      "name": "nutsnews-worker-9",
+      "triggers": {
+        "crons": [
+          "18 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "9",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard10": {
+      "name": "nutsnews-worker-10",
+      "triggers": {
+        "crons": [
+          "20 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "10",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard11": {
+      "name": "nutsnews-worker-11",
+      "triggers": {
+        "crons": [
+          "22 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "11",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard12": {
+      "name": "nutsnews-worker-12",
+      "triggers": {
+        "crons": [
+          "24 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "12",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard13": {
+      "name": "nutsnews-worker-13",
+      "triggers": {
+        "crons": [
+          "26 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "13",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard14": {
+      "name": "nutsnews-worker-14",
+      "triggers": {
+        "crons": [
+          "28 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "14",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard15": {
+      "name": "nutsnews-worker-15",
+      "triggers": {
+        "crons": [
+          "30 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "15",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard16": {
+      "name": "nutsnews-worker-16",
+      "triggers": {
+        "crons": [
+          "32 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "16",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard17": {
+      "name": "nutsnews-worker-17",
+      "triggers": {
+        "crons": [
+          "34 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "17",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard18": {
+      "name": "nutsnews-worker-18",
+      "triggers": {
+        "crons": [
+          "36 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "18",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard19": {
+      "name": "nutsnews-worker-19",
+      "triggers": {
+        "crons": [
+          "38 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "19",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard20": {
+      "name": "nutsnews-worker-20",
+      "triggers": {
+        "crons": [
+          "40 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "20",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard21": {
+      "name": "nutsnews-worker-21",
+      "triggers": {
+        "crons": [
+          "42 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "21",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard22": {
+      "name": "nutsnews-worker-22",
+      "triggers": {
+        "crons": [
+          "44 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "22",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard23": {
+      "name": "nutsnews-worker-23",
+      "triggers": {
+        "crons": [
+          "46 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "23",
+        "FEEDS_PER_SHARD": "20"
+      }
+    },
+    "shard24": {
+      "name": "nutsnews-worker-24",
+      "triggers": {
+        "crons": [
+          "48 * * * *"
+        ]
+      },
+      "vars": {
+        "FEED_SHARD_INDEX": "24",
+        "FEEDS_PER_SHARD": "20"
+      }
+    }
+  }
 }

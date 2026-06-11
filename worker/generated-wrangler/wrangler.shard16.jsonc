@@ -1,0 +1,32 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "nutsnews-worker-16",
+  "main": "../src/index.ts",
+  "compatibility_date": "2026-06-10",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "FEED_SHARD_INDEX": "16",
+    "FEEDS_PER_SHARD": "20"
+  },
+  "secrets_store_secrets": [
+    {
+      "binding": "SUPABASE_URL",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "secret_name": "SUPABASE_URL"
+    },
+    {
+      "binding": "SUPABASE_SERVICE_ROLE_KEY",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "secret_name": "SUPABASE_SERVICE_ROLE_KEY"
+    },
+    {
+      "binding": "OPENAI_API_KEY",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "secret_name": "OPENAI_API_KEY"
+    }
+  ]
+}
