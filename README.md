@@ -1,8 +1,3 @@
-
-# Badges
-
-[![Better Stack Badge](https://uptime.betterstack.com/status-badges/v1/monitor/2ovb1.svg)](https://uptime.betterstack.com/?utm_source=status_badge)
-
 # NutsNews
 
 NutsNews is a calm, mobile-first news platform that collects positive stories from trusted RSS feeds, filters out stressful topics, and presents short cheerful summaries with links back to the original publishers.
@@ -34,7 +29,8 @@ The goal of NutsNews is to create a peaceful daily feed of uplifting, inspiring,
 * [CI/CD and Deployment](#cicd-and-deployment)
 * [Environment Variables and Secrets](#environment-variables-and-secrets)
 * [Local Development](#local-development)
-* [Operations, Monitoring, and Observability](#operations-monitoring-and-observability)
+* [Operations and Monitoring](#operations-and-monitoring)
+* [Sentry Observability](#sentry-observability)
 * [Current Cost Model](#current-cost-model)
 * [Project Benefits](#project-benefits)
 * [Roadmap](#roadmap)
@@ -57,7 +53,7 @@ The platform is designed to be:
 * Low-cost to operate
 * Automated end-to-end
 * Scalable across hundreds of RSS feeds
-* Observable through uptime monitoring
+* Observable through uptime checks, Cloudflare logs, and Sentry error monitoring
 
 High-level flow:
 
@@ -122,9 +118,7 @@ The Worker and OpenAI prompt are designed to reject articles that do not match t
 
 ### Mobile-first article feed
 
-The website renders a clean story feed optimized for phone screens.
-
-Each card includes:
+The website renders a clean story feed optimized for phone screens. Each card includes:
 
 * Title
 * Short AI-written summary
@@ -164,11 +158,9 @@ For example:
 
 A single controller Worker can trigger one shard at a time, reducing the need to maintain many separate cron schedules.
 
-### External uptime monitoring
+### Sentry error monitoring
 
-NutsNews has been onboarded to Better Stack Uptime for continuous external availability monitoring of the live website.
-
-The monitoring setup helps verify that the public site is reachable and provides visibility into uptime, downtime, and incident history.
+NutsNews now includes Sentry monitoring for frontend browser errors, Next.js runtime errors, and Cloudflare Worker shard failures.
 
 ---
 
@@ -196,7 +188,7 @@ Presentation Layer
 Next.js renders the public NutsNews website
   ↓
 Observability Layer
-Better Stack Uptime monitors public site availability
+Better Stack Uptime, Cloudflare observability, and Sentry monitor availability and errors
   ↓
 Distribution
 Readers click through to original publishers
@@ -204,17 +196,18 @@ Readers click through to original publishers
 
 ### Main components
 
-| Component           | Purpose                                                                     |
-| ------------------- | --------------------------------------------------------------------------- |
-| `web`               | Public Next.js website                                                      |
-| `worker`            | RSS ingestion and article review pipeline                                   |
-| `controller`        | Optional controller Worker for triggering Worker shards                     |
-| `supabase`          | Database schema and data storage                                            |
-| GitHub              | Source control                                                              |
-| Vercel              | Frontend deployment                                                         |
-| Cloudflare Workers  | Scheduled or manually-triggered backend automation                          |
-| OpenAI              | AI article classification and summary generation                            |
-| Better Stack Uptime | External uptime monitoring, availability reporting, and incident visibility |
+| Component           | Purpose                                                 |
+| ------------------- | ------------------------------------------------------- |
+| `web`               | Public Next.js website                                  |
+| `worker`            | RSS ingestion and article review pipeline               |
+| `controller`        | Optional controller Worker for triggering Worker shards |
+| `supabase`          | Database schema and data storage                        |
+| GitHub              | Source control                                          |
+| Vercel              | Frontend deployment                                     |
+| Cloudflare Workers  | Scheduled or manually-triggered backend automation      |
+| OpenAI              | AI article classification and summary generation        |
+| Sentry              | Frontend and Worker error monitoring                    |
+| Better Stack Uptime | External uptime monitoring                              |
 
 ---
 
@@ -230,11 +223,20 @@ nutsnews/
 │   │   ├── api/
 │   │   │   └── articles/
 │   │   │       └── route.ts
-│   │   └── components/
-│   │       ├── ArticleFeed.tsx
-│   │       └── SiteFooter.tsx
-│   └── lib/
-│       └── articles.ts
+│   │   ├── components/
+│   │   │   ├── ArticleFeed.tsx
+│   │   │   └── SiteFooter.tsx
+│   │   ├── global-error.tsx
+│   │   └── sentry-test/
+│   │       └── page.tsx
+│   ├── lib/
+│   │   └── articles.ts
+│   ├── instrumentation.ts
+│   ├── instrumentation-client.ts
+│   ├── sentry.server.config.ts
+│   ├── sentry.edge.config.ts
+│   ├── next.config.ts
+│   └── package.json
 │
 ├── worker/
 │   ├── src/
@@ -279,17 +281,25 @@ The `web` app is the public NutsNews website. It is built with Next.js and desig
 * Show generated fallback thumbnails when articles do not include images
 * Link every story to the original publisher
 * Provide SEO metadata and structured data
-* Serve the public website monitored by Better Stack Uptime
+* Capture frontend/browser errors through Sentry
+* Capture global Next.js runtime errors through Sentry
 
 ### Important files
 
-| File                                 | Purpose                              |
-| ------------------------------------ | ------------------------------------ |
-| `web/app/page.tsx`                   | Homepage and initial article loading |
-| `web/app/about/page.tsx`             | Project About page                   |
-| `web/app/components/ArticleFeed.tsx` | Interactive story feed component     |
-| `web/app/api/articles/route.ts`      | Paginated article API                |
-| `web/lib/articles.ts`                | Supabase data helpers                |
+| File                                 | Purpose                                     |
+| ------------------------------------ | ------------------------------------------- |
+| `web/app/page.tsx`                   | Homepage and initial article loading        |
+| `web/app/about/page.tsx`             | Project About page                          |
+| `web/app/components/ArticleFeed.tsx` | Interactive story feed component            |
+| `web/app/api/articles/route.ts`      | Paginated article API                       |
+| `web/lib/articles.ts`                | Supabase data helpers                       |
+| `web/instrumentation-client.ts`      | Sentry browser/client configuration         |
+| `web/instrumentation.ts`             | Next.js instrumentation hook for Sentry     |
+| `web/sentry.server.config.ts`        | Sentry server runtime configuration         |
+| `web/sentry.edge.config.ts`          | Sentry edge runtime configuration           |
+| `web/app/global-error.tsx`           | Captures global app errors with Sentry      |
+| `web/app/sentry-test/page.tsx`       | Local and production Sentry validation page |
+| `web/next.config.ts`                 | Next.js and Sentry build configuration      |
 
 The homepage is configured for dynamic rendering so new articles can appear without waiting for a static rebuild.
 
@@ -323,6 +333,8 @@ Send eligible articles to OpenAI
 Save all review decisions
   ↓
 Publish accepted articles
+  ↓
+Capture Worker failures and important warnings with Sentry
 ```
 
 ### Article metadata extracted from feeds
@@ -351,13 +363,31 @@ The Worker removes common tracking parameters such as:
 
 This helps reduce duplicate reviews and duplicate article rows.
 
+### Worker observability
+
+The Worker reports important failures to Sentry, including:
+
+* RSS feed fetch failures
+* Supabase review lookup failures
+* Supabase article/review save failures
+* OpenAI classification failures
+* Invalid OpenAI JSON responses
+* Scheduled Worker crashes
+* Manual Worker route crashes
+
+The Worker also includes a test route:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/sentry-test"
+```
+
+That route intentionally throws an error to validate Sentry Worker monitoring.
+
 ---
 
 ## Sharded Worker Design
 
-The platform is designed to scale across hundreds of RSS feeds.
-
-Instead of one Worker trying to read every feed, RSS sources can be split into shards.
+The platform is designed to scale across hundreds of RSS feeds. Instead of one Worker trying to read every feed, RSS sources can be split into shards.
 
 Example:
 
@@ -402,6 +432,23 @@ This allows the platform to:
 * Stay closer to free-tier limits
 * Keep process updates centralized
 * Deploy the same source code across many Worker instances
+* Monitor individual shard failures through Sentry and Cloudflare logs
+
+### Generated Wrangler configs
+
+Shard Wrangler configs are generated from:
+
+```text
+worker/scripts/generate-wrangler-config.mjs
+```
+
+The generated configs include:
+
+```jsonc
+"compatibility_flags": ["nodejs_compat"]
+```
+
+This allows the deployed Worker bundle to support required Node.js compatibility behavior.
 
 ---
 
@@ -625,18 +672,18 @@ The summary is intended to be brief, original, and not a replacement for the ful
 
 ## Tech Stack
 
-The About page describes the current stack as:
-
-| Technology            | Role                                                                              |
-| --------------------- | --------------------------------------------------------------------------------- |
-| Next.js               | Mobile-friendly website and article feed                                          |
-| GitHub → Vercel CI/CD | Every push to `main` triggers an automatic Vercel build and production deployment |
-| Vercel                | Frontend hosting, HTTPS, custom domain, and production deployment                 |
-| Supabase              | Postgres database for article storage                                             |
-| Cloudflare Workers    | Scheduled RSS ingestion and automation                                            |
-| OpenAI                | Article filtering and cheerful summary generation                                 |
-| Better Stack Uptime   | Continuous external uptime monitoring and availability reporting                  |
-| RSS Feeds             | Story sources from trusted publishers                                             |
+| Technology               | Role                                                                              |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| Next.js                  | Mobile-friendly website and article feed                                          |
+| GitHub → Vercel CI/CD    | Every push to `main` triggers an automatic Vercel build and production deployment |
+| Vercel                   | Frontend hosting, HTTPS, custom domain, and production deployment                 |
+| Supabase                 | Postgres database for article storage                                             |
+| Cloudflare Workers       | Scheduled RSS ingestion and automation                                            |
+| Cloudflare Secrets Store | Centralized secret storage for Worker shards                                      |
+| OpenAI                   | Article filtering and cheerful summary generation                                 |
+| Sentry                   | Frontend, Next.js, and Worker error monitoring                                    |
+| Better Stack Uptime      | External availability monitoring                                                  |
+| RSS Feeds                | Story sources from trusted publishers                                             |
 
 ---
 
@@ -654,14 +701,11 @@ Deployment flow:
 
 2. Vercel build
    Vercel detects the push, installs dependencies, runs the Next.js build,
-   and prepares production deployment.
+   prepares production deployment, and uploads Sentry source maps when configured.
 
 3. Production release
    If the build succeeds, Vercel automatically publishes the latest version
    to the production NutsNews domain.
-
-4. External monitoring
-   Better Stack Uptime continuously monitors the live site after deployment.
 ```
 
 ### Worker deployment
@@ -671,8 +715,16 @@ For shard Workers:
 ```bash
 cd worker
 npm install
+export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
 npm run generate:wrangler
 npm run deploy:all
+```
+
+For one shard:
+
+```bash
+cd worker
+npm run deploy:shard0
 ```
 
 For the controller Worker:
@@ -694,20 +746,42 @@ Typical frontend environment variables:
 ```env
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
+NEXT_PUBLIC_SENTRY_DSN=
+NEXT_PUBLIC_APP_ENV=production
 ```
 
-Depending on implementation, server-side Supabase variables may also be used.
+Sentry build/release variables:
+
+```env
+SENTRY_ORG=
+SENTRY_PROJECT=nutsnews
+SENTRY_AUTH_TOKEN=
+```
+
+Notes:
+
+* `NEXT_PUBLIC_SENTRY_DSN` is safe to expose to the browser.
+* `SENTRY_AUTH_TOKEN` must stay secret and should only be stored in local `.env.local` or Vercel environment variables.
+* Do not commit `.env.local`.
 
 ### Worker shards
 
-Worker shards need:
+Worker shards need these secrets:
 
 ```text
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 OPENAI_API_KEY
+SENTRY_DSN
+```
+
+Worker shards also use these generated variables:
+
+```text
 FEED_SHARD_INDEX
 FEEDS_PER_SHARD
+SENTRY_ENVIRONMENT
+SENTRY_TRACES_SAMPLE_RATE
 ```
 
 If using Cloudflare Secrets Store, secret values are read asynchronously:
@@ -716,6 +790,13 @@ If using Cloudflare Secrets Store, secret values are read asynchronously:
 const supabaseUrl = await env.SUPABASE_URL.get();
 const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
 const openAiApiKey = await env.OPENAI_API_KEY.get();
+const sentryDsn = await env.SENTRY_DSN.get();
+```
+
+The shard config generator needs this local terminal variable:
+
+```bash
+export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
 ```
 
 ### Controller Worker
@@ -729,12 +810,6 @@ SHARD_WORKER_PREFIX=nutsnews-worker
 SHARD_WORKER_SUBDOMAIN=nutsnews
 MAX_AI_REVIEWS_PER_SHARD=12
 ```
-
-### Better Stack Uptime
-
-Better Stack Uptime is configured outside this repository.
-
-It monitors the live public site from Better Stack's external monitoring infrastructure and does not require application secrets in this codebase.
 
 ---
 
@@ -754,6 +829,45 @@ Open:
 http://localhost:3000
 ```
 
+### Local frontend Sentry test
+
+Start the web app:
+
+```bash
+cd web
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:3000/sentry-test
+```
+
+Click:
+
+```text
+Capture manual error
+```
+
+or:
+
+```text
+Throw client error
+```
+
+Then check Sentry Issues for:
+
+```text
+NutsNews manually captured Sentry test error
+```
+
+or:
+
+```text
+NutsNews Sentry client test error
+```
+
 ### Worker
 
 ```bash
@@ -765,6 +879,7 @@ npm run dev
 Generate shard configs:
 
 ```bash
+export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
 npm run generate:wrangler
 ```
 
@@ -790,46 +905,27 @@ npm run deploy
 
 ---
 
-## Operations, Monitoring, and Observability
+## Operations and Monitoring
 
-NutsNews uses operational checks across the website, Worker automation, database, and external uptime monitoring.
+NutsNews uses multiple layers of monitoring:
 
-### External uptime monitoring
-
-The public NutsNews website has been onboarded to Better Stack Uptime.
-
-Better Stack Uptime is used to:
-
-* Continuously monitor whether the public site is reachable
-* Detect downtime or failed availability checks
-* Provide uptime and incident history
-* Support operational reporting
-* Give early visibility when the live site is unavailable
-
-Primary monitored site:
-
-```text
-https://nutsnew.com
-```
-
-Optional monitors that can be added as the platform grows:
-
-```text
-https://www.nutsnew.com
-https://nutsnews-controller.nutsnews.workers.dev/
-https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1
-```
-
-### Why observability matters
-
-The monitoring setup helps support the long-term goal of high availability by making outages visible quickly.
-
-Monitoring does not by itself guarantee five nines availability, but it is a required foundation for operating a reliable production service.
+* Better Stack Uptime for external availability checks
+* Cloudflare Worker logs and observability for Worker runtime visibility
+* Sentry for frontend and Worker error monitoring
+* Supabase queries for article/review verification
 
 ### Test one shard
 
 ```bash
 curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
+```
+
+### Test a few deployed shards
+
+```bash
+curl "https://nutsnews-worker-1.nutsnews.workers.dev/?limit=3"
+curl "https://nutsnews-worker-10.nutsnews.workers.dev/?limit=3"
+curl "https://nutsnews-worker-24.nutsnews.workers.dev/?limit=3"
 ```
 
 ### Test a specific shard through the controller
@@ -844,11 +940,17 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=17"
 curl "https://nutsnews-controller.nutsnews.workers.dev/"
 ```
 
+### Tail Worker logs
+
+```bash
+cd worker
+npx wrangler tail nutsnews-worker-0
+```
+
 ### Check recent review volume
 
 ```sql
-select
-  count(*) as reviews_last_hour
+select count(*) as reviews_last_hour
 from article_ai_reviews
 where reviewed_at > now() - interval '1 hour';
 ```
@@ -902,17 +1004,202 @@ where url = 'https://example.com/feed.xml';
 
 ---
 
+## Sentry Observability
+
+Sentry is used to monitor application errors across the NutsNews frontend and Worker automation.
+
+### What Sentry monitors
+
+| Area                 | What is captured                                                                                |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
+| Browser/frontend     | Client-side React and browser errors                                                            |
+| Next.js server       | Server/runtime rendering errors                                                                 |
+| Next.js edge         | Edge runtime errors                                                                             |
+| Global app errors    | Errors captured by `global-error.tsx`                                                           |
+| Worker shards        | RSS fetch failures, Supabase failures, OpenAI failures, scheduled crashes, manual route crashes |
+| Releases/source maps | Production source maps when `SENTRY_AUTH_TOKEN` is configured                                   |
+
+### Recommended Sentry projects
+
+Recommended project split:
+
+```text
+nutsnews
+nutsnews-worker
+nutsnews-controller
+```
+
+The current frontend project can be named:
+
+```text
+nutsnews
+```
+
+Worker errors can either be sent to the same project or to a dedicated project:
+
+```text
+nutsnews-worker
+```
+
+### Frontend Sentry files
+
+```text
+web/instrumentation-client.ts
+web/instrumentation.ts
+web/sentry.server.config.ts
+web/sentry.edge.config.ts
+web/app/global-error.tsx
+web/app/sentry-test/page.tsx
+web/next.config.ts
+```
+
+### Frontend Sentry environment variables
+
+```env
+NEXT_PUBLIC_SENTRY_DSN=
+NEXT_PUBLIC_APP_ENV=production
+SENTRY_ORG=
+SENTRY_PROJECT=nutsnews
+SENTRY_AUTH_TOKEN=
+```
+
+### Validate frontend Sentry locally
+
+```bash
+cd web
+npm run dev
+```
+
+Open:
+
+```text
+http://localhost:3000/sentry-test
+```
+
+Click:
+
+```text
+Capture manual error
+```
+
+Then check:
+
+```text
+Sentry → nutsnews → Issues
+```
+
+Expected issue:
+
+```text
+NutsNews manually captured Sentry test error
+```
+
+### Validate frontend Sentry in production
+
+Open:
+
+```text
+https://nutsnews.com/sentry-test
+```
+
+Click:
+
+```text
+Capture manual error
+```
+
+Then check:
+
+```text
+Sentry → nutsnews → Issues
+```
+
+### Worker Sentry secret
+
+The Worker uses:
+
+```text
+SENTRY_DSN
+```
+
+This should be stored in Cloudflare Secrets Store with the other Worker secrets.
+
+List secrets:
+
+```bash
+cd worker
+export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
+npx wrangler secrets-store secret list "$NUTSNEWS_SECRETS_STORE_ID" --remote
+```
+
+Create the secret if missing:
+
+```bash
+npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" --name SENTRY_DSN --scopes workers --remote
+```
+
+If the secret already exists, Cloudflare will return:
+
+```text
+secret_name_already_exists: SENTRY_DSN
+```
+
+That means it is already stored.
+
+### Validate Worker Sentry
+
+Trigger the Worker test route:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/sentry-test"
+```
+
+Expected terminal result:
+
+```text
+error code: 1101
+```
+
+That is expected because the route intentionally throws an error.
+
+Then check:
+
+```text
+Sentry → nutsnews-worker or nutsnews → Issues
+```
+
+Expected issue:
+
+```text
+NutsNews Worker Sentry test error
+```
+
+### Sentry source maps
+
+When `SENTRY_AUTH_TOKEN` is configured in Vercel, the production build can create releases and upload source maps.
+
+Local builds may show:
+
+```text
+No auth token provided. Will not create release.
+```
+
+That is acceptable for local development. Production should have `SENTRY_AUTH_TOKEN` configured in Vercel.
+
+---
+
 ## Current Cost Model
 
 The About page lists the current cost model as:
 
-| Item                |     Cost | Notes                                                               |
-| ------------------- | -------: | ------------------------------------------------------------------- |
-| Domain              | `$11.95` | The only paid cost so far is the NutsNews domain registration       |
-| Vercel              |     `$0` | The Next.js website is hosted on the Vercel free tier               |
-| Supabase            |     `$0` | Article storage uses the Supabase free tier                         |
-| Cloudflare Workers  |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier           |
-| Better Stack Uptime |     `$0` | Site availability monitoring uses the Better Stack Uptime free tier |
+| Item                |     Cost | Notes                                                         |
+| ------------------- | -------: | ------------------------------------------------------------- |
+| Domain              | `$11.95` | The only paid cost so far is the NutsNews domain registration |
+| Vercel              |     `$0` | The Next.js website is hosted on the Vercel free tier         |
+| Supabase            |     `$0` | Article storage uses the Supabase free tier                   |
+| Cloudflare Workers  |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier     |
+| Better Stack Uptime |     `$0` | External uptime monitoring uses the free tier                 |
+| Sentry              |     `$0` | Error monitoring uses the Sentry free tier                    |
 
 **Total current fixed cost:** `$11.95`
 
@@ -936,10 +1223,6 @@ Using free-tier cloud services keeps the project inexpensive to launch and easy 
 
 Scheduled or controller-triggered automation refreshes the article queue throughout the day.
 
-### Better production visibility
-
-Better Stack Uptime provides external uptime monitoring so the project owner can see when the public website is available or unavailable.
-
 ### Focused editorial voice
 
 AI filtering helps keep the product aligned with a peaceful, uplifting, and positive content strategy.
@@ -951,6 +1234,10 @@ The site is designed around a simple scrolling feed that feels natural on phones
 ### Scalable architecture
 
 The system separates the frontend, database, AI workflow, controller, and Worker shards so each part can grow independently.
+
+### Observable platform
+
+Better Stack, Cloudflare logs, and Sentry make it easier to detect downtime, Worker failures, frontend crashes, and production regressions.
 
 ### Fast experimentation
 
@@ -969,10 +1256,6 @@ Potential improvements:
 * Add a shared controller token so only the controller can trigger shard Workers
 * Add feed health tracking in Supabase
 * Track failed feed fetches by source
-* Add a dedicated `/health` endpoint for the website
-* Add controller and shard health endpoints
-* Add Better Stack monitors for the controller Worker and selected shard Workers
-* Add uptime/status link to the website footer or About page
 * Build an admin dashboard for RSS feed management
 * Add manual review for borderline articles
 * Improve duplicate detection across syndicated stories
@@ -986,6 +1269,9 @@ Potential improvements:
 * Add category analytics
 * Add article-level engagement analytics
 * Add a moderation queue for future editorial control
+* Add Sentry alert rules for repeated Worker shard failures
+* Add Sentry alert rules for frontend production regressions
+* Add Worker health dashboards by shard
 
 ---
 
@@ -999,4 +1285,4 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Status
 
-NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, and externally monitored site availability.
+NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, and low-cost observability.
