@@ -3,6 +3,9 @@
   "name": "nutsnews-worker-0",
   "main": "../src/index.ts",
   "compatibility_date": "2026-06-10",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "workers_dev": true,
   "preview_urls": false,
   "observability": {
@@ -10,7 +13,9 @@
   },
   "vars": {
     "FEED_SHARD_INDEX": "0",
-    "FEEDS_PER_SHARD": "20"
+    "FEEDS_PER_SHARD": "20",
+    "SENTRY_ENVIRONMENT": "production",
+    "SENTRY_TRACES_SAMPLE_RATE": "0.1"
   },
   "secrets_store_secrets": [
     {
@@ -27,6 +32,11 @@
       "binding": "OPENAI_API_KEY",
       "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "OPENAI_API_KEY"
+    },
+    {
+      "binding": "SENTRY_DSN",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "secret_name": "SENTRY_DSN"
     }
   ]
 }

@@ -1,82 +1,86 @@
+import * as Sentry from "@sentry/cloudflare";
+
 type SecretBinding = {
-  get: () => Promise<string>;
+	get: () => Promise<string>;
 };
 
 type Env = {
-  SUPABASE_URL: SecretBinding;
-  SUPABASE_SERVICE_ROLE_KEY: SecretBinding;
-  OPENAI_API_KEY: SecretBinding;
-
-  FEED_SHARD_INDEX?: string;
-  FEEDS_PER_SHARD?: string;
+	SUPABASE_URL: SecretBinding;
+	SUPABASE_SERVICE_ROLE_KEY: SecretBinding;
+	OPENAI_API_KEY: SecretBinding;
+	SENTRY_DSN: SecretBinding;
+	FEED_SHARD_INDEX?: string;
+	FEEDS_PER_SHARD?: string;
+	SENTRY_ENVIRONMENT?: string;
+	SENTRY_TRACES_SAMPLE_RATE?: string;
 };
 
 type RuntimeConfig = {
-  supabaseUrl: string;
-  supabaseServiceRoleKey: string;
-  openAiApiKey: string;
+	supabaseUrl: string;
+	supabaseServiceRoleKey: string;
+	openAiApiKey: string;
 };
 
 type RssFeed = {
-  source: string;
-  url: string;
-  is_positive_source: boolean;
+	source: string;
+	url: string;
+	is_positive_source: boolean;
 };
 
 type RssArticle = {
-  source: string;
-  title: string;
-  url: string;
-  excerpt: string;
-  publishedAt: string | null;
-  imageUrl: string | null;
+	source: string;
+	title: string;
+	url: string;
+	excerpt: string;
+	publishedAt: string | null;
+	imageUrl: string | null;
 };
 
 type AiArticleDecision = {
-  decision: "accept" | "reject";
-  category: string;
-  positivity_score: number;
-  summary: string;
-  reason: string;
+	decision: "accept" | "reject";
+	category: string;
+	positivity_score: number;
+	summary: string;
+	reason: string;
 };
 
 type ReviewedUrlRow = {
-  original_url: string;
+	original_url: string;
 };
 
 type ArticleReviewInsert = {
-  original_url: string;
-  source: string;
-  title: string;
-  decision: "accept" | "reject";
-  category: string;
-  positivity_score: number;
-  summary: string;
-  reason: string;
-  reviewed_at: string;
+	original_url: string;
+	source: string;
+	title: string;
+	decision: "accept" | "reject";
+	category: string;
+	positivity_score: number;
+	summary: string;
+	reason: string;
+	reviewed_at: string;
 };
 
 type ArticleInsert = {
-  source: string;
-  title: string;
-  original_url: string;
-  image_url: string | null;
-  published_at: string | null;
-  published_on_site_at: string;
-  original_excerpt: string;
-  ai_summary: string;
-  category: string;
-  positivity_score: number;
-  status: "published";
+	source: string;
+	title: string;
+	original_url: string;
+	image_url: string | null;
+	published_at: string | null;
+	published_on_site_at: string;
+	original_excerpt: string;
+	ai_summary: string;
+	category: string;
+	positivity_score: number;
+	status: "published";
 };
 
 type RefreshOptions = {
-  maxAiReviews?: number;
+	maxAiReviews?: number;
 };
 
 type ReviewedArticleResult = {
-  article: RssArticle;
-  aiDecision: AiArticleDecision;
+	article: RssArticle;
+	aiDecision: AiArticleDecision;
 };
 
 const MAX_ITEMS_PER_FEED = 35;
@@ -87,878 +91,904 @@ const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
 
 const POSITIVE_KEYWORDS = [
-  "good news",
-  "uplifting",
-  "inspiring",
-  "inspired",
-  "kindness",
-  "rescue",
-  "rescued",
-  "reunited",
-  "reunion",
-  "community",
-  "volunteer",
-  "volunteers",
-  "donation",
-  "donated",
-  "helping",
-  "helps",
-  "hero",
-  "achievement",
-  "breakthrough",
-  "discovery",
-  "restored",
-  "restoration",
-  "recover",
-  "recovered",
-  "healing",
-  "wellness",
-  "healthier",
-  "happiness",
-  "joy",
-  "celebrate",
-  "celebration",
-  "wins",
-  "award",
-  "remarkable",
-  "rare",
-  "beautiful",
-  "travel",
-  "animals",
-  "wildlife",
-  "conservation",
-  "garden",
-  "nature",
-  "science",
-  "space",
-  "students",
-  "teacher",
-  "school",
-  "family",
-  "friendship",
-  "creative",
-  "art",
-  "music",
-  "culture",
-  "environment",
-  "climate solution",
-  "clean energy",
-  "ocean cleanup",
-  "forest",
-  "tree",
-  "trees",
-  "young people",
-  "kids",
-  "children",
-  "happiest",
-  "hope",
-  "hopeful",
+	"good news",
+	"uplifting",
+	"inspiring",
+	"inspired",
+	"kindness",
+	"rescue",
+	"rescued",
+	"reunited",
+	"reunion",
+	"community",
+	"volunteer",
+	"volunteers",
+	"donation",
+	"donated",
+	"helping",
+	"helps",
+	"hero",
+	"achievement",
+	"breakthrough",
+	"discovery",
+	"restored",
+	"restoration",
+	"recover",
+	"recovered",
+	"healing",
+	"wellness",
+	"healthier",
+	"happiness",
+	"joy",
+	"celebrate",
+	"celebration",
+	"wins",
+	"award",
+	"remarkable",
+	"rare",
+	"beautiful",
+	"travel",
+	"animals",
+	"wildlife",
+	"conservation",
+	"garden",
+	"nature",
+	"science",
+	"space",
+	"students",
+	"teacher",
+	"school",
+	"family",
+	"friendship",
+	"creative",
+	"art",
+	"music",
+	"culture",
+	"environment",
+	"climate solution",
+	"clean energy",
+	"ocean cleanup",
+	"forest",
+	"tree",
+	"trees",
+	"young people",
+	"kids",
+	"children",
+	"happiest",
+	"hope",
+	"hopeful",
 ];
 
 const NEGATIVE_KEYWORDS = [
-  "politics",
-  "election",
-  "president",
-  "minister",
-  "government",
-  "senate",
-  "congress",
-  "parliament",
-  "war",
-  "military",
-  "missile",
-  "attack",
-  "attacks",
-  "killed",
-  "dead",
-  "death",
-  "dies",
-  "murder",
-  "crime",
-  "criminal",
-  "shooting",
-  "violence",
-  "violent",
-  "crash",
-  "disaster",
-  "tragedy",
-  "tragic",
-  "lawsuit",
-  "court",
-  "trial",
-  "stocks",
-  "market",
-  "markets",
-  "inflation",
-  "recession",
-  "tariff",
-  "economy",
-  "business",
-  "money",
-  "bank",
-  "earnings",
-  "profit",
-  "losses",
-  "layoffs",
-  "fired",
+	"politics",
+	"election",
+	"president",
+	"minister",
+	"government",
+	"senate",
+	"congress",
+	"parliament",
+	"war",
+	"military",
+	"missile",
+	"attack",
+	"attacks",
+	"killed",
+	"dead",
+	"death",
+	"dies",
+	"murder",
+	"crime",
+	"criminal",
+	"shooting",
+	"violence",
+	"violent",
+	"crash",
+	"disaster",
+	"tragedy",
+	"tragic",
+	"lawsuit",
+	"court",
+	"trial",
+	"stocks",
+	"market",
+	"markets",
+	"inflation",
+	"recession",
+	"tariff",
+	"economy",
+	"business",
+	"money",
+	"bank",
+	"earnings",
+	"profit",
+	"losses",
+	"layoffs",
+	"fired",
 ];
 
 const STRICT_LOCAL_PREFILTER_SOURCES = new Set(["NPR", "BBC Stories"]);
 
 const HARD_NEGATIVE_KEYWORDS = [
-  "politics",
-  "political",
-  "election",
-  "elections",
-  "campaign",
-  "vote",
-  "voters",
-  "president",
-  "minister",
-  "government",
-  "congress",
-  "senate",
-  "parliament",
-  "democrat",
-  "republican",
-  "trump",
-  "biden",
-  "court",
-  "supreme court",
-  "judge",
-  "lawsuit",
-  "trial",
-  "charges",
-  "charged",
-  "convicted",
-  "prison",
-  "war",
-  "military",
-  "missile",
-  "bomb",
-  "attack",
-  "attacks",
-  "hostage",
-  "killed",
-  "dead",
-  "death",
-  "dies",
-  "murder",
-  "shooting",
-  "gun",
-  "crime",
-  "criminal",
-  "violence",
-  "violent",
-  "abuse",
-  "crash",
-  "disaster",
-  "tragedy",
-  "tragic",
-  "hurricane",
-  "flood",
-  "wildfire",
-  "earthquake",
-  "stocks",
-  "stock market",
-  "market",
-  "markets",
-  "inflation",
-  "recession",
-  "tariff",
-  "economy",
-  "business",
-  "money",
-  "bank",
-  "earnings",
-  "profit",
-  "losses",
-  "layoffs",
-  "fired",
+	"politics",
+	"political",
+	"election",
+	"elections",
+	"campaign",
+	"vote",
+	"voters",
+	"president",
+	"minister",
+	"government",
+	"congress",
+	"senate",
+	"parliament",
+	"democrat",
+	"republican",
+	"trump",
+	"biden",
+	"court",
+	"supreme court",
+	"judge",
+	"lawsuit",
+	"trial",
+	"charges",
+	"charged",
+	"convicted",
+	"prison",
+	"war",
+	"military",
+	"missile",
+	"bomb",
+	"attack",
+	"attacks",
+	"hostage",
+	"killed",
+	"dead",
+	"death",
+	"dies",
+	"murder",
+	"shooting",
+	"gun",
+	"crime",
+	"criminal",
+	"violence",
+	"violent",
+	"abuse",
+	"crash",
+	"disaster",
+	"tragedy",
+	"tragic",
+	"hurricane",
+	"flood",
+	"wildfire",
+	"earthquake",
+	"stocks",
+	"stock market",
+	"market",
+	"markets",
+	"inflation",
+	"recession",
+	"tariff",
+	"economy",
+	"business",
+	"money",
+	"bank",
+	"earnings",
+	"profit",
+	"losses",
+	"layoffs",
+	"fired",
 ];
 
 const HARD_POSITIVE_ESCAPE_KEYWORDS = [
-  "rescue",
-  "rescued",
-  "reunited",
-  "reunion",
-  "healing",
-  "recovered",
-  "recovery",
-  "breakthrough",
-  "discovery",
-  "donation",
-  "donated",
-  "volunteer",
-  "volunteers",
-  "kindness",
-  "community",
-  "hero",
-  "heroes",
-  "saved",
-  "restored",
-  "restoration",
-  "conservation",
-  "wildlife",
-  "garden",
-  "school",
-  "students",
-  "teacher",
-  "science",
-  "space",
-  "nasa",
-  "art",
-  "music",
-  "creative",
-  "achievement",
-  "award",
-  "celebrate",
-  "celebration",
-  "hope",
-  "hopeful",
+	"rescue",
+	"rescued",
+	"reunited",
+	"reunion",
+	"healing",
+	"recovered",
+	"recovery",
+	"breakthrough",
+	"discovery",
+	"donation",
+	"donated",
+	"volunteer",
+	"volunteers",
+	"kindness",
+	"community",
+	"hero",
+	"heroes",
+	"saved",
+	"restored",
+	"restoration",
+	"conservation",
+	"wildlife",
+	"garden",
+	"school",
+	"students",
+	"teacher",
+	"science",
+	"space",
+	"nasa",
+	"art",
+	"music",
+	"creative",
+	"achievement",
+	"award",
+	"celebrate",
+	"celebration",
+	"hope",
+	"hopeful",
 ];
 
 const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
-  decision: "reject",
-  category: "Uplifting",
-  positivity_score: 0,
-  summary: "",
-  reason: "Skipped before AI because the article matched hard negative local filters.",
+	decision: "reject",
+	category: "Uplifting",
+	positivity_score: 0,
+	summary: "",
+	reason: "Skipped before AI because the article matched hard negative local filters.",
 };
 
 async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
-  const supabaseUrl = await env.SUPABASE_URL.get();
-  const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
-  const openAiApiKey = await env.OPENAI_API_KEY.get();
+	const supabaseUrl = await env.SUPABASE_URL.get();
+	const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
+	const openAiApiKey = await env.OPENAI_API_KEY.get();
 
-  if (!supabaseUrl) {
-    throw new Error("Missing SUPABASE_URL secret.");
-  }
+	if (!supabaseUrl) {
+		throw new Error("Missing SUPABASE_URL secret.");
+	}
 
-  if (!supabaseServiceRoleKey) {
-    throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY secret.");
-  }
+	if (!supabaseServiceRoleKey) {
+		throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY secret.");
+	}
 
-  if (!openAiApiKey) {
-    throw new Error("Missing OPENAI_API_KEY secret.");
-  }
+	if (!openAiApiKey) {
+		throw new Error("Missing OPENAI_API_KEY secret.");
+	}
 
-  return {
-    supabaseUrl,
-    supabaseServiceRoleKey,
-    openAiApiKey,
-  };
+	return {
+		supabaseUrl,
+		supabaseServiceRoleKey,
+		openAiApiKey,
+	};
 }
 
 function getShardIndex(env: Env): number {
-  const shardIndex = Number(env.FEED_SHARD_INDEX ?? "0");
+	const shardIndex = Number(env.FEED_SHARD_INDEX ?? "0");
 
-  if (Number.isNaN(shardIndex) || shardIndex < 0) {
-    return 0;
-  }
+	if (Number.isNaN(shardIndex) || shardIndex < 0) {
+		return 0;
+	}
 
-  return Math.floor(shardIndex);
+	return Math.floor(shardIndex);
 }
 
 function getFeedsPerShard(env: Env): number {
-  const feedsPerShard = Number(env.FEEDS_PER_SHARD ?? "20");
+	const feedsPerShard = Number(env.FEEDS_PER_SHARD ?? "20");
 
-  if (Number.isNaN(feedsPerShard) || feedsPerShard < 1) {
-    return 20;
-  }
+	if (Number.isNaN(feedsPerShard) || feedsPerShard < 1) {
+		return 20;
+	}
 
-  return Math.floor(feedsPerShard);
+	return Math.floor(feedsPerShard);
 }
 
 async function getFeedsForShard(
-  env: Env,
-  config: RuntimeConfig,
+	env: Env,
+	config: RuntimeConfig,
 ): Promise<RssFeed[]> {
-  const shardIndex = getShardIndex(env);
-  const feedsPerShard = getFeedsPerShard(env);
-  const offset = shardIndex * feedsPerShard;
+	const shardIndex = getShardIndex(env);
+	const feedsPerShard = getFeedsPerShard(env);
+	const offset = shardIndex * feedsPerShard;
 
-  const response = await fetch(
-    `${config.supabaseUrl}/rest/v1/rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${feedsPerShard}&offset=${offset}`,
-    {
-      method: "GET",
-      headers: {
-        apikey: config.supabaseServiceRoleKey,
-        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-      },
-    },
-  );
+	const response = await fetch(
+		`${config.supabaseUrl}/rest/v1/rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${feedsPerShard}&offset=${offset}`,
+		{
+			method: "GET",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+			},
+		},
+	);
 
-  if (!response.ok) {
-    const errorText = await response.text();
+	if (!response.ok) {
+		const errorText = await response.text();
 
-    throw new Error(
-      `Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`,
-    );
-  }
+		throw new Error(
+			`Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`,
+		);
+	}
 
-  return (await response.json()) as RssFeed[];
+	return (await response.json()) as RssFeed[];
 }
 
 function decodeHtml(value: string): string {
-  return value
-    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
-    .replace(/&#x([a-fA-F0-9]+);/g, (_match, code) =>
-      String.fromCharCode(Number.parseInt(code, 16)),
-    )
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+	return value
+		.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+		.replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+		.replace(/&#x([a-fA-F0-9]+);/g, (_match, code) =>
+			String.fromCharCode(Number.parseInt(code, 16)),
+		)
+		.replace(/&amp;/g, "&")
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&#39;/g, "'")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">");
 }
 
 function stripHtml(value: string): string {
-  return decodeHtml(value.replace(/<[^>]*>/g, " "))
-    .replace(/\s+/g, " ")
-    .trim();
+	return decodeHtml(value.replace(/<[^>]*>/g, " "))
+		.replace(/\s+/g, " ")
+		.trim();
 }
 
 function getTagValue(itemXml: string, tagName: string): string {
-  const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
-  const match = itemXml.match(regex);
+	const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+	const match = itemXml.match(regex);
 
-  if (!match?.[1]) {
-    return "";
-  }
+	if (!match?.[1]) {
+		return "";
+	}
 
-  return decodeHtml(match[1].trim());
+	return decodeHtml(match[1].trim());
 }
 
 function getAttributeValue(tagXml: string, attributeName: string): string {
-  const regex = new RegExp(`${attributeName}=["']([^"']+)["']`, "i");
-  const match = tagXml.match(regex);
+	const regex = new RegExp(`${attributeName}=["']([^"']+)["']`, "i");
+	const match = tagXml.match(regex);
 
-  if (!match?.[1]) {
-    return "";
-  }
+	if (!match?.[1]) {
+		return "";
+	}
 
-  return decodeHtml(match[1].trim());
+	return decodeHtml(match[1].trim());
 }
 
 function getAtomLink(itemXml: string): string {
-  const hrefMatch = itemXml.match(/<link[^>]*href=["']([^"']+)["'][^>]*>/i);
+	const hrefMatch = itemXml.match(/<link[^>]*href=["']([^"']+)["'][^>]*>/i);
 
-  if (!hrefMatch?.[1]) {
-    return "";
-  }
+	if (!hrefMatch?.[1]) {
+		return "";
+	}
 
-  return decodeHtml(hrefMatch[1].trim());
+	return decodeHtml(hrefMatch[1].trim());
 }
 
 function normalizeUrl(url: string): string {
-  try {
-    const parsedUrl = new URL(url.trim());
+	try {
+		const parsedUrl = new URL(url.trim());
 
-    [
-      "utm_source",
-      "utm_medium",
-      "utm_campaign",
-      "utm_term",
-      "utm_content",
-      "utm_id",
-      "fbclid",
-      "gclid",
-      "mc_cid",
-      "mc_eid",
-    ].forEach((param) => parsedUrl.searchParams.delete(param));
+		[
+			"utm_source",
+			"utm_medium",
+			"utm_campaign",
+			"utm_term",
+			"utm_content",
+			"utm_id",
+			"fbclid",
+			"gclid",
+			"mc_cid",
+			"mc_eid",
+		].forEach((param) => parsedUrl.searchParams.delete(param));
 
-    parsedUrl.hash = "";
+		parsedUrl.hash = "";
 
-    return parsedUrl.toString();
-  } catch {
-    return url.trim();
-  }
+		return parsedUrl.toString();
+	} catch {
+		return url.trim();
+	}
 }
 
 function normalizeImageUrl(imageUrl: string, articleUrl: string): string | null {
-  const cleanedImageUrl = decodeHtml(imageUrl).trim();
+	const cleanedImageUrl = decodeHtml(imageUrl).trim();
 
-  if (
-    !cleanedImageUrl ||
-    cleanedImageUrl.startsWith("data:") ||
-    cleanedImageUrl.startsWith("blob:") ||
-    cleanedImageUrl.startsWith("javascript:")
-  ) {
-    return null;
-  }
+	if (
+		!cleanedImageUrl ||
+		cleanedImageUrl.startsWith("data:") ||
+		cleanedImageUrl.startsWith("blob:") ||
+		cleanedImageUrl.startsWith("javascript:")
+	) {
+		return null;
+	}
 
-  try {
-    const absoluteImageUrl = new URL(cleanedImageUrl, articleUrl);
-    const protocol = absoluteImageUrl.protocol.toLowerCase();
+	try {
+		const absoluteImageUrl = new URL(cleanedImageUrl, articleUrl);
+		const protocol = absoluteImageUrl.protocol.toLowerCase();
 
-    if (protocol !== "http:" && protocol !== "https:") {
-      return null;
-    }
+		if (protocol !== "http:" && protocol !== "https:") {
+			return null;
+		}
 
-    absoluteImageUrl.hash = "";
+		absoluteImageUrl.hash = "";
 
-    return absoluteImageUrl.toString();
-  } catch {
-    return null;
-  }
+		return absoluteImageUrl.toString();
+	} catch {
+		return null;
+	}
 }
 
 function isLikelyImageUrl(url: string): boolean {
-  const lowerUrl = url.toLowerCase();
+	const lowerUrl = url.toLowerCase();
 
-  return (
-    lowerUrl.includes(".jpg") ||
-    lowerUrl.includes(".jpeg") ||
-    lowerUrl.includes(".png") ||
-    lowerUrl.includes(".webp") ||
-    lowerUrl.includes(".gif") ||
-    lowerUrl.includes("image") ||
-    lowerUrl.includes("thumbnail") ||
-    lowerUrl.includes("media")
-  );
+	return (
+		lowerUrl.includes(".jpg") ||
+		lowerUrl.includes(".jpeg") ||
+		lowerUrl.includes(".png") ||
+		lowerUrl.includes(".webp") ||
+		lowerUrl.includes(".gif") ||
+		lowerUrl.includes("image") ||
+		lowerUrl.includes("thumbnail") ||
+		lowerUrl.includes("media")
+	);
 }
 
 function isBadImageCandidate(imageUrl: string): boolean {
-  const lowerUrl = imageUrl.toLowerCase();
+	const lowerUrl = imageUrl.toLowerCase();
 
-  return (
-    lowerUrl.includes("logo") ||
-    lowerUrl.includes("icon") ||
-    lowerUrl.includes("sprite") ||
-    lowerUrl.includes("avatar") ||
-    lowerUrl.includes("placeholder") ||
-    lowerUrl.includes("blank") ||
-    lowerUrl.includes("transparent") ||
-    lowerUrl.includes("tracking") ||
-    lowerUrl.includes("pixel") ||
-    lowerUrl.includes("1x1") ||
-    lowerUrl.endsWith(".svg")
-  );
+	return (
+		lowerUrl.includes("logo") ||
+		lowerUrl.includes("icon") ||
+		lowerUrl.includes("sprite") ||
+		lowerUrl.includes("avatar") ||
+		lowerUrl.includes("placeholder") ||
+		lowerUrl.includes("blank") ||
+		lowerUrl.includes("transparent") ||
+		lowerUrl.includes("tracking") ||
+		lowerUrl.includes("pixel") ||
+		lowerUrl.includes("1x1") ||
+		lowerUrl.endsWith(".svg")
+	);
 }
 
 function extractImageFromHtml(html: string, articleUrl: string): string | null {
-  const imageMatch =
-    html.match(/<img[^>]+srcset=["']([^"']+)["'][^>]*>/i) ??
-    html.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i) ??
-    html.match(/<img[^>]+data-src=["']([^"']+)["'][^>]*>/i) ??
-    html.match(/<img[^>]+data-lazy-src=["']([^"']+)["'][^>]*>/i);
+	const imageMatch =
+		html.match(/<img[^>]+srcset=["']([^"']+)["'][^>]*>/i) ??
+		html.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i) ??
+		html.match(/<img[^>]+data-src=["']([^"']+)["'][^>]*>/i) ??
+		html.match(/<img[^>]+data-lazy-src=["']([^"']+)["'][^>]*>/i);
 
-  if (!imageMatch?.[1]) {
-    return null;
-  }
+	if (!imageMatch?.[1]) {
+		return null;
+	}
 
-  const rawImageValue = imageMatch[1].split(",")[0]?.trim().split(/\s+/)[0];
+	const rawImageValue = imageMatch[1].split(",")[0]?.trim().split(/\s+/)[0];
 
-  if (!rawImageValue) {
-    return null;
-  }
+	if (!rawImageValue) {
+		return null;
+	}
 
-  const normalizedUrl = normalizeImageUrl(rawImageValue, articleUrl);
+	const normalizedUrl = normalizeImageUrl(rawImageValue, articleUrl);
 
-  if (!normalizedUrl || isBadImageCandidate(normalizedUrl)) {
-    return null;
-  }
+	if (!normalizedUrl || isBadImageCandidate(normalizedUrl)) {
+		return null;
+	}
 
-  return normalizedUrl;
+	return normalizedUrl;
 }
 
 function extractRssImageUrl(itemXml: string, articleUrl: string): string | null {
-  const mediaContentTags = itemXml.match(/<media:content[^>]*>/gi) ?? [];
+	const mediaContentTags = itemXml.match(/<media:content[^>]*>/gi) ?? [];
 
-  for (const tag of mediaContentTags) {
-    const medium = getAttributeValue(tag, "medium").toLowerCase();
-    const type = getAttributeValue(tag, "type").toLowerCase();
-    const url = getAttributeValue(tag, "url");
+	for (const tag of mediaContentTags) {
+		const medium = getAttributeValue(tag, "medium").toLowerCase();
+		const type = getAttributeValue(tag, "type").toLowerCase();
+		const url = getAttributeValue(tag, "url");
 
-    if (
-      url &&
-      (medium === "image" || type.startsWith("image/") || isLikelyImageUrl(url))
-    ) {
-      const normalizedUrl = normalizeImageUrl(url, articleUrl);
+		if (
+			url &&
+			(medium === "image" || type.startsWith("image/") || isLikelyImageUrl(url))
+		) {
+			const normalizedUrl = normalizeImageUrl(url, articleUrl);
 
-      if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-        return normalizedUrl;
-      }
-    }
-  }
+			if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+				return normalizedUrl;
+			}
+		}
+	}
 
-  const mediaThumbnailTags = itemXml.match(/<media:thumbnail[^>]*>/gi) ?? [];
+	const mediaThumbnailTags = itemXml.match(/<media:thumbnail[^>]*>/gi) ?? [];
 
-  for (const tag of mediaThumbnailTags) {
-    const url = getAttributeValue(tag, "url");
-    const normalizedUrl = normalizeImageUrl(url, articleUrl);
+	for (const tag of mediaThumbnailTags) {
+		const url = getAttributeValue(tag, "url");
+		const normalizedUrl = normalizeImageUrl(url, articleUrl);
 
-    if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-      return normalizedUrl;
-    }
-  }
+		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+			return normalizedUrl;
+		}
+	}
 
-  const enclosureTags = itemXml.match(/<enclosure[^>]*>/gi) ?? [];
+	const enclosureTags = itemXml.match(/<enclosure[^>]*>/gi) ?? [];
 
-  for (const tag of enclosureTags) {
-    const type = getAttributeValue(tag, "type").toLowerCase();
-    const url = getAttributeValue(tag, "url");
+	for (const tag of enclosureTags) {
+		const type = getAttributeValue(tag, "type").toLowerCase();
+		const url = getAttributeValue(tag, "url");
 
-    if (url && (type.startsWith("image/") || isLikelyImageUrl(url))) {
-      const normalizedUrl = normalizeImageUrl(url, articleUrl);
+		if (url && (type.startsWith("image/") || isLikelyImageUrl(url))) {
+			const normalizedUrl = normalizeImageUrl(url, articleUrl);
 
-      if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-        return normalizedUrl;
-      }
-    }
-  }
+			if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+				return normalizedUrl;
+			}
+		}
+	}
 
-  const itunesImageTags = itemXml.match(/<itunes:image[^>]*>/gi) ?? [];
+	const itunesImageTags = itemXml.match(/<itunes:image[^>]*>/gi) ?? [];
 
-  for (const tag of itunesImageTags) {
-    const href = getAttributeValue(tag, "href");
-    const normalizedUrl = normalizeImageUrl(href, articleUrl);
+	for (const tag of itunesImageTags) {
+		const href = getAttributeValue(tag, "href");
+		const normalizedUrl = normalizeImageUrl(href, articleUrl);
 
-    if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-      return normalizedUrl;
-    }
-  }
+		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+			return normalizedUrl;
+		}
+	}
 
-  const description =
-    getTagValue(itemXml, "description") ||
-    getTagValue(itemXml, "summary") ||
-    getTagValue(itemXml, "content:encoded") ||
-    getTagValue(itemXml, "content");
+	const description =
+		getTagValue(itemXml, "description") ||
+		getTagValue(itemXml, "summary") ||
+		getTagValue(itemXml, "content:encoded") ||
+		getTagValue(itemXml, "content");
 
-  return extractImageFromHtml(description, articleUrl);
+	return extractImageFromHtml(description, articleUrl);
 }
 
 function parsePublishedDate(value: string): string | null {
-  if (!value) {
-    return null;
-  }
+	if (!value) {
+		return null;
+	}
 
-  const timestamp = Date.parse(value);
+	const timestamp = Date.parse(value);
 
-  if (Number.isNaN(timestamp)) {
-    return null;
-  }
+	if (Number.isNaN(timestamp)) {
+		return null;
+	}
 
-  return new Date(timestamp).toISOString();
+	return new Date(timestamp).toISOString();
 }
 
 function parseRss(xml: string, source: string): RssArticle[] {
-  const itemMatches = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
-  const entryMatches = xml.match(/<entry[\s\S]*?<\/entry>/gi) ?? [];
-  const matches = itemMatches.length > 0 ? itemMatches : entryMatches;
+	const itemMatches = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
+	const entryMatches = xml.match(/<entry[\s\S]*?<\/entry>/gi) ?? [];
+	const matches = itemMatches.length > 0 ? itemMatches : entryMatches;
 
-  return matches.slice(0, MAX_ITEMS_PER_FEED).map((itemXml) => {
-    const title = stripHtml(getTagValue(itemXml, "title"));
-    const rssLink = getTagValue(itemXml, "link");
-    const atomLink = getAtomLink(itemXml);
-    const url = normalizeUrl(rssLink || atomLink);
+	return matches.slice(0, MAX_ITEMS_PER_FEED).map((itemXml) => {
+		const title = stripHtml(getTagValue(itemXml, "title"));
+		const rssLink = getTagValue(itemXml, "link");
+		const atomLink = getAtomLink(itemXml);
+		const url = normalizeUrl(rssLink || atomLink);
+		const description =
+			getTagValue(itemXml, "description") ||
+			getTagValue(itemXml, "summary") ||
+			getTagValue(itemXml, "content:encoded") ||
+			getTagValue(itemXml, "content");
+		const pubDate =
+			getTagValue(itemXml, "pubDate") ||
+			getTagValue(itemXml, "published") ||
+			getTagValue(itemXml, "updated");
 
-    const description =
-      getTagValue(itemXml, "description") ||
-      getTagValue(itemXml, "summary") ||
-      getTagValue(itemXml, "content:encoded") ||
-      getTagValue(itemXml, "content");
-
-    const pubDate =
-      getTagValue(itemXml, "pubDate") ||
-      getTagValue(itemXml, "published") ||
-      getTagValue(itemXml, "updated");
-
-    return {
-      source,
-      title,
-      url,
-      excerpt: stripHtml(description),
-      publishedAt: parsePublishedDate(pubDate),
-      imageUrl: extractRssImageUrl(itemXml, url),
-    };
-  });
+		return {
+			source,
+			title,
+			url,
+			excerpt: stripHtml(description),
+			publishedAt: parsePublishedDate(pubDate),
+			imageUrl: extractRssImageUrl(itemXml, url),
+		};
+	});
 }
 
 function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
-  const seenUrls = new Set<string>();
+	const seenUrls = new Set<string>();
 
-  return articles.filter((article) => {
-    if (!article.url || seenUrls.has(article.url)) {
-      return false;
-    }
+	return articles.filter((article) => {
+		if (!article.url || seenUrls.has(article.url)) {
+			return false;
+		}
 
-    seenUrls.add(article.url);
+		seenUrls.add(article.url);
 
-    return true;
-  });
+		return true;
+	});
 }
 
 function scoreArticleCandidate(
-  article: RssArticle,
-  positiveSources: Set<string>,
+	article: RssArticle,
+	positiveSources: Set<string>,
 ): number {
-  const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
-  let score = 0;
+	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+	let score = 0;
 
-  if (positiveSources.has(article.source)) {
-    score += 24;
-  }
+	if (positiveSources.has(article.source)) {
+		score += 24;
+	}
 
-  for (const keyword of POSITIVE_KEYWORDS) {
-    if (text.includes(keyword)) {
-      score += 3;
-    }
-  }
+	for (const keyword of POSITIVE_KEYWORDS) {
+		if (text.includes(keyword)) {
+			score += 3;
+		}
+	}
 
-  for (const keyword of NEGATIVE_KEYWORDS) {
-    if (text.includes(keyword)) {
-      score -= 7;
-    }
-  }
+	for (const keyword of NEGATIVE_KEYWORDS) {
+		if (text.includes(keyword)) {
+			score -= 7;
+		}
+	}
 
-  if (article.excerpt.length >= 80) {
-    score += 2;
-  }
+	if (article.excerpt.length >= 80) {
+		score += 2;
+	}
 
-  if (article.imageUrl) {
-    score += 1;
-  }
+	if (article.imageUrl) {
+		score += 1;
+	}
 
-  if (article.publishedAt) {
-    const ageInHours =
-      (Date.now() - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
+	if (article.publishedAt) {
+		const ageInHours =
+			(Date.now() - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
 
-    if (ageInHours <= 24) {
-      score += 6;
-    } else if (ageInHours <= 72) {
-      score += 3;
-    } else if (ageInHours <= 168) {
-      score += 1;
-    }
-  }
+		if (ageInHours <= 24) {
+			score += 6;
+		} else if (ageInHours <= 72) {
+			score += 3;
+		} else if (ageInHours <= 168) {
+			score += 1;
+		}
+	}
 
-  return score;
+	return score;
 }
 
 function countKeywordMatches(text: string, keywords: string[]): number {
-  return keywords.reduce((count, keyword) => {
-    return text.includes(keyword) ? count + 1 : count;
-  }, 0);
+	return keywords.reduce((count, keyword) => {
+		return text.includes(keyword) ? count + 1 : count;
+	}, 0);
 }
 
 function shouldSkipBeforeAi(
-  article: RssArticle,
-  positiveSources: Set<string>,
+	article: RssArticle,
+	positiveSources: Set<string>,
 ): boolean {
-  const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 
-  const hardNegativeMatchCount = countKeywordMatches(
-    text,
-    HARD_NEGATIVE_KEYWORDS,
-  );
+	const hardNegativeMatchCount = countKeywordMatches(
+		text,
+		HARD_NEGATIVE_KEYWORDS,
+	);
 
-  if (hardNegativeMatchCount === 0) {
-    return false;
-  }
+	if (hardNegativeMatchCount === 0) {
+		return false;
+	}
 
-  const positiveEscapeMatchCount = countKeywordMatches(
-    text,
-    HARD_POSITIVE_ESCAPE_KEYWORDS,
-  );
+	const positiveEscapeMatchCount = countKeywordMatches(
+		text,
+		HARD_POSITIVE_ESCAPE_KEYWORDS,
+	);
 
-  if (positiveSources.has(article.source)) {
-    return hardNegativeMatchCount >= 3 && positiveEscapeMatchCount === 0;
-  }
+	if (positiveSources.has(article.source)) {
+		return hardNegativeMatchCount >= 3 && positiveEscapeMatchCount === 0;
+	}
 
-  if (STRICT_LOCAL_PREFILTER_SOURCES.has(article.source)) {
-    return hardNegativeMatchCount >= 1 && positiveEscapeMatchCount === 0;
-  }
+	if (STRICT_LOCAL_PREFILTER_SOURCES.has(article.source)) {
+		return hardNegativeMatchCount >= 1 && positiveEscapeMatchCount === 0;
+	}
 
-  return hardNegativeMatchCount >= 2 && positiveEscapeMatchCount === 0;
+	return hardNegativeMatchCount >= 2 && positiveEscapeMatchCount === 0;
 }
 
 function buildLocalRejectedArticles(
-  articles: RssArticle[],
+	articles: RssArticle[],
 ): ReviewedArticleResult[] {
-  return articles.map((article) => ({
-    article,
-    aiDecision: {
-      ...LOCAL_PREFILTER_REJECT_DECISION,
-      reason: `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
-    },
-  }));
+	return articles.map((article) => ({
+		article,
+		aiDecision: {
+			...LOCAL_PREFILTER_REJECT_DECISION,
+			reason: `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+		},
+	}));
 }
 
 function sortArticlesForReview(
-  articles: RssArticle[],
-  positiveSources: Set<string>,
+	articles: RssArticle[],
+	positiveSources: Set<string>,
 ): RssArticle[] {
-  return [...articles].sort((a, b) => {
-    const scoreDifference =
-      scoreArticleCandidate(b, positiveSources) -
-      scoreArticleCandidate(a, positiveSources);
+	return [...articles].sort((a, b) => {
+		const scoreDifference =
+			scoreArticleCandidate(b, positiveSources) -
+			scoreArticleCandidate(a, positiveSources);
 
-    if (scoreDifference !== 0) {
-      return scoreDifference;
-    }
+		if (scoreDifference !== 0) {
+			return scoreDifference;
+		}
 
-    const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
-    const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+		const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+		const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
 
-    return bTime - aTime;
-  });
+		return bTime - aTime;
+	});
 }
 
 function clampAiReviewLimit(value: number | undefined): number {
-  if (!value || Number.isNaN(value)) {
-    return DEFAULT_MAX_AI_REVIEWS_PER_RUN;
-  }
+	if (!value || Number.isNaN(value)) {
+		return DEFAULT_MAX_AI_REVIEWS_PER_RUN;
+	}
 
-  return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
+	return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
 }
 
 async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  mapper: (item: T, index: number) => Promise<R>,
+	items: T[],
+	concurrency: number,
+	mapper: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results: R[] = [];
-  let nextIndex = 0;
+	const results: R[] = [];
+	let nextIndex = 0;
 
-  async function worker() {
-    while (nextIndex < items.length) {
-      const currentIndex = nextIndex;
-      nextIndex += 1;
-      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
-    }
-  }
+	async function worker() {
+		while (nextIndex < items.length) {
+			const currentIndex = nextIndex;
+			nextIndex += 1;
+			results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+		}
+	}
 
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    () => worker(),
-  );
+	const workers = Array.from(
+		{ length: Math.min(concurrency, items.length) },
+		() => worker(),
+	);
 
-  await Promise.all(workers);
+	await Promise.all(workers);
 
-  return results;
+	return results;
 }
 
 async function fetchSingleFeed(feed: {
-  source: string;
-  url: string;
+	source: string;
+	url: string;
 }): Promise<RssArticle[]> {
-  try {
-    const response = await fetch(feed.url, {
-      headers: {
-        "User-Agent": "NutsNewsBot/1.0",
-      },
-    });
+	try {
+		const response = await fetch(feed.url, {
+			headers: {
+				"User-Agent": "NutsNewsBot/1.0",
+			},
+		});
 
-    if (!response.ok) {
-      console.log(`Failed to fetch ${feed.source}: ${response.status}`);
-      return [];
-    }
+		if (!response.ok) {
+			console.log(`Failed to fetch ${feed.source}: ${response.status}`);
 
-    const xml = await response.text();
+			Sentry.captureMessage(`Failed to fetch RSS feed: ${feed.source}`, {
+				level: "warning",
+				tags: {
+					source: feed.source,
+					status: String(response.status),
+				},
+			});
 
-    const articles = parseRss(xml, feed.source).filter(
-      (article) => article.title && article.url,
-    );
+			return [];
+		}
 
-    const imageCount = articles.filter((article) => article.imageUrl).length;
+		const xml = await response.text();
+		const articles = parseRss(xml, feed.source).filter(
+			(article) => article.title && article.url,
+		);
+		const imageCount = articles.filter((article) => article.imageUrl).length;
 
-    console.log(
-      `Fetched ${articles.length} articles from ${feed.source}. RSS images found: ${imageCount}`,
-    );
+		console.log(
+			`Fetched ${articles.length} articles from ${feed.source}. RSS images found: ${imageCount}`,
+		);
 
-    return articles;
-  } catch (error) {
-    console.log(`Failed to fetch ${feed.source}`, error);
-    return [];
-  }
+		return articles;
+	} catch (error) {
+		console.log(`Failed to fetch ${feed.source}`, error);
+
+		Sentry.captureException(error, {
+			tags: {
+				area: "rss_fetch",
+				source: feed.source,
+			},
+			extra: {
+				feedUrl: feed.url,
+			},
+		});
+
+		return [];
+	}
 }
 
 async function fetchRssArticles(
-  feeds: RssFeed[],
-  positiveSources: Set<string>,
+	feeds: RssFeed[],
+	positiveSources: Set<string>,
 ): Promise<RssArticle[]> {
-  const feedResults = await Promise.all(
-    feeds.map((feed) => fetchSingleFeed(feed)),
-  );
+	const feedResults = await Promise.all(
+		feeds.map((feed) => fetchSingleFeed(feed)),
+	);
+	const allArticles = feedResults.flat();
 
-  const allArticles = feedResults.flat();
-
-  return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
+	return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
 }
 
 async function getReviewedUrls(
-  config: RuntimeConfig,
-  urls: string[],
+	config: RuntimeConfig,
+	urls: string[],
 ): Promise<Set<string>> {
-  if (urls.length === 0) {
-    return new Set();
-  }
+	if (urls.length === 0) {
+		return new Set();
+	}
 
-  const candidateUrls = new Set(urls);
-  const reviewedUrls = new Set<string>();
+	const candidateUrls = new Set(urls);
+	const reviewedUrls = new Set<string>();
 
-  const response = await fetch(
-    `${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
-    {
-      method: "GET",
-      headers: {
-        apikey: config.supabaseServiceRoleKey,
-        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-      },
-    },
-  );
+	const response = await fetch(
+		`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+		{
+			method: "GET",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+			},
+		},
+	);
 
-  if (!response.ok) {
-    const errorText = await response.text();
+	if (!response.ok) {
+		const errorText = await response.text();
 
-    console.log(
-      `Failed to load recent reviewed URLs: ${response.status} ${errorText}`,
-    );
+		console.log(
+			`Failed to load recent reviewed URLs: ${response.status} ${errorText}`,
+		);
 
-    return reviewedUrls;
-  }
+		Sentry.captureMessage("Failed to load recent reviewed URLs from Supabase", {
+			level: "warning",
+			tags: {
+				area: "supabase_review_lookup",
+				status: String(response.status),
+			},
+			extra: {
+				errorText,
+			},
+		});
 
-  const rows = (await response.json()) as ReviewedUrlRow[];
+		return reviewedUrls;
+	}
 
-  for (const row of rows) {
-    if (candidateUrls.has(row.original_url)) {
-      reviewedUrls.add(row.original_url);
-    }
-  }
+	const rows = (await response.json()) as ReviewedUrlRow[];
 
-  console.log(
-    `Loaded ${rows.length} recent AI review URLs. Matched ${reviewedUrls.size} current candidates.`,
-  );
+	for (const row of rows) {
+		if (candidateUrls.has(row.original_url)) {
+			reviewedUrls.add(row.original_url);
+		}
+	}
 
-  return reviewedUrls;
+	console.log(
+		`Loaded ${rows.length} recent AI review URLs. Matched ${reviewedUrls.size} current candidates.`,
+	);
+
+	return reviewedUrls;
 }
 
 async function classifyAndSummarizeArticle(
-  config: RuntimeConfig,
-  article: RssArticle,
+	config: RuntimeConfig,
+	article: RssArticle,
 ): Promise<AiArticleDecision> {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.openAiApiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are filtering articles for NutsNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories. Be selective, but do not reject a clearly positive article just because it comes from a broad news source. Return only valid JSON.",
-        },
-        {
-          role: "user",
-          content: `
+	const response = await fetch("https://api.openai.com/v1/chat/completions", {
+		method: "POST",
+		headers: {
+			Authorization: `Bearer ${config.openAiApiKey}`,
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({
+			model: "gpt-4o-mini",
+			response_format: { type: "json_object" },
+			messages: [
+				{
+					role: "system",
+					content:
+						"You are filtering articles for NutsNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories. Be selective, but do not reject a clearly positive article just because it comes from a broad news source. Return only valid JSON.",
+				},
+				{
+					role: "user",
+					content: `
 Article:
 Source: ${article.source}
 Title: ${article.title}
@@ -972,322 +1002,413 @@ Return JSON exactly like this:
   "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }
-`,
-        },
-      ],
-    }),
-  });
+          `,
+				},
+			],
+		}),
+	});
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.log(`OpenAI error: ${response.status} ${errorText}`);
+	if (!response.ok) {
+		const errorText = await response.text();
 
-    return {
-      decision: "reject",
-      category: "Uplifting",
-      positivity_score: 0,
-      summary: "",
-      reason: "OpenAI request failed",
-    };
-  }
+		console.log(`OpenAI error: ${response.status} ${errorText}`);
 
-  const data = (await response.json()) as {
-    choices?: Array<{
-      message?: {
-        content?: string;
-      };
-    }>;
-  };
+		Sentry.captureMessage("OpenAI article classification failed", {
+			level: "warning",
+			tags: {
+				area: "openai_classification",
+				source: article.source,
+				status: String(response.status),
+			},
+			extra: {
+				title: article.title,
+				originalUrl: article.url,
+				errorText,
+			},
+		});
 
-  const content = data.choices?.[0]?.message?.content;
+		return {
+			decision: "reject",
+			category: "Uplifting",
+			positivity_score: 0,
+			summary: "",
+			reason: "OpenAI request failed",
+		};
+	}
 
-  if (!content) {
-    return {
-      decision: "reject",
-      category: "Uplifting",
-      positivity_score: 0,
-      summary: "",
-      reason: "OpenAI returned empty content",
-    };
-  }
+	const data = (await response.json()) as {
+		choices?: Array<{
+			message?: {
+				content?: string;
+			};
+		}>;
+	};
 
-  try {
-    return JSON.parse(content) as AiArticleDecision;
-  } catch {
-    return {
-      decision: "reject",
-      category: "Uplifting",
-      positivity_score: 0,
-      summary: "",
-      reason: "OpenAI returned invalid JSON",
-    };
-  }
+	const content = data.choices?.[0]?.message?.content;
+
+	if (!content) {
+		return {
+			decision: "reject",
+			category: "Uplifting",
+			positivity_score: 0,
+			summary: "",
+			reason: "OpenAI returned empty content",
+		};
+	}
+
+	try {
+		return JSON.parse(content) as AiArticleDecision;
+	} catch (error) {
+		Sentry.captureException(error, {
+			tags: {
+				area: "openai_json_parse",
+				source: article.source,
+			},
+			extra: {
+				title: article.title,
+				originalUrl: article.url,
+				content,
+			},
+		});
+
+		return {
+			decision: "reject",
+			category: "Uplifting",
+			positivity_score: 0,
+			summary: "",
+			reason: "OpenAI returned invalid JSON",
+		};
+	}
 }
 
 async function saveArticleReviewsBatch(
-  config: RuntimeConfig,
-  reviews: ArticleReviewInsert[],
+	config: RuntimeConfig,
+	reviews: ArticleReviewInsert[],
 ): Promise<boolean> {
-  if (reviews.length === 0) {
-    return true;
-  }
+	if (reviews.length === 0) {
+		return true;
+	}
 
-  const response = await fetch(
-    `${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
-    {
-      method: "POST",
-      headers: {
-        apikey: config.supabaseServiceRoleKey,
-        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=ignore-duplicates,return=minimal",
-      },
-      body: JSON.stringify(reviews),
-    },
-  );
+	const response = await fetch(
+		`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
+		{
+			method: "POST",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				"Content-Type": "application/json",
+				Prefer: "resolution=ignore-duplicates,return=minimal",
+			},
+			body: JSON.stringify(reviews),
+		},
+	);
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
-    return false;
-  }
+	if (!response.ok) {
+		const errorText = await response.text();
 
-  return true;
+		console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
+
+		Sentry.captureMessage("Failed to batch-save AI reviews", {
+			level: "error",
+			tags: {
+				area: "supabase_save_reviews",
+				status: String(response.status),
+			},
+			extra: {
+				errorText,
+				reviewCount: reviews.length,
+			},
+		});
+
+		return false;
+	}
+
+	return true;
 }
 
 async function saveAcceptedArticlesBatch(
-  config: RuntimeConfig,
-  articles: ArticleInsert[],
+	config: RuntimeConfig,
+	articles: ArticleInsert[],
 ): Promise<boolean> {
-  if (articles.length === 0) {
-    return true;
-  }
+	if (articles.length === 0) {
+		return true;
+	}
 
-  const response = await fetch(
-    `${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
-    {
-      method: "POST",
-      headers: {
-        apikey: config.supabaseServiceRoleKey,
-        Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-        "Content-Type": "application/json",
-        Prefer: "resolution=ignore-duplicates,return=minimal",
-      },
-      body: JSON.stringify(articles),
-    },
-  );
+	const response = await fetch(
+		`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
+		{
+			method: "POST",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				"Content-Type": "application/json",
+				Prefer: "resolution=ignore-duplicates,return=minimal",
+			},
+			body: JSON.stringify(articles),
+		},
+	);
 
-  if (!response.ok) {
-    const errorText = await response.text();
+	if (!response.ok) {
+		const errorText = await response.text();
 
-    console.log(
-      `Failed to batch-save accepted articles: ${response.status} ${errorText}`,
-    );
+		console.log(
+			`Failed to batch-save accepted articles: ${response.status} ${errorText}`,
+		);
 
-    return false;
-  }
+		Sentry.captureMessage("Failed to batch-save accepted articles", {
+			level: "error",
+			tags: {
+				area: "supabase_save_articles",
+				status: String(response.status),
+			},
+			extra: {
+				errorText,
+				articleCount: articles.length,
+			},
+		});
 
-  return true;
+		return false;
+	}
+
+	return true;
 }
 
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
-  const reviewRows: ArticleReviewInsert[] = [];
-  const acceptedArticleRows: ArticleInsert[] = [];
-  let acceptedCount = 0;
-  let rejectedCount = 0;
+	const reviewRows: ArticleReviewInsert[] = [];
+	const acceptedArticleRows: ArticleInsert[] = [];
+	let acceptedCount = 0;
+	let rejectedCount = 0;
 
-  for (const reviewedArticle of reviewedArticles) {
-    const { article, aiDecision } = reviewedArticle;
-    const normalizedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
-    const normalizedCategory = aiDecision.category || "Uplifting";
-    const normalizedScore = aiDecision.positivity_score ?? 0;
-    const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
-    const normalizedReason = aiDecision.reason || "No reason provided";
+	for (const reviewedArticle of reviewedArticles) {
+		const { article, aiDecision } = reviewedArticle;
+		const normalizedDecision =
+			aiDecision.decision === "accept" ? "accept" : "reject";
+		const normalizedCategory = aiDecision.category || "Uplifting";
+		const normalizedScore = aiDecision.positivity_score ?? 0;
+		const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
+		const normalizedReason = aiDecision.reason || "No reason provided";
 
-    reviewRows.push({
-      original_url: article.url,
-      source: article.source,
-      title: article.title,
-      decision: normalizedDecision,
-      category: normalizedCategory,
-      positivity_score: normalizedScore,
-      summary: normalizedSummary,
-      reason: normalizedReason,
-      reviewed_at: new Date().toISOString(),
-    });
+		reviewRows.push({
+			original_url: article.url,
+			source: article.source,
+			title: article.title,
+			decision: normalizedDecision,
+			category: normalizedCategory,
+			positivity_score: normalizedScore,
+			summary: normalizedSummary,
+			reason: normalizedReason,
+			reviewed_at: new Date().toISOString(),
+		});
 
-    if (normalizedDecision === "reject") {
-      rejectedCount += 1;
-      console.log(`Rejected: ${article.title} — ${normalizedReason}`);
-      continue;
-    }
+		if (normalizedDecision === "reject") {
+			rejectedCount += 1;
+			console.log(`Rejected: ${article.title} — ${normalizedReason}`);
+			continue;
+		}
 
-    acceptedCount += 1;
+		acceptedCount += 1;
 
-    acceptedArticleRows.push({
-      source: article.source,
-      title: article.title,
-      original_url: article.url,
-      image_url: article.imageUrl,
-      published_at: article.publishedAt,
-      published_on_site_at: new Date().toISOString(),
-      original_excerpt: article.excerpt,
-      ai_summary: normalizedSummary,
-      category: normalizedCategory,
-      positivity_score: normalizedScore || 7,
-      status: "published",
-    });
+		acceptedArticleRows.push({
+			source: article.source,
+			title: article.title,
+			original_url: article.url,
+			image_url: article.imageUrl,
+			published_at: article.publishedAt,
+			published_on_site_at: new Date().toISOString(),
+			original_excerpt: article.excerpt,
+			ai_summary: normalizedSummary,
+			category: normalizedCategory,
+			positivity_score: normalizedScore || 7,
+			status: "published",
+		});
 
-    console.log(
-      `Accepted: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore} | Image: ${
-        article.imageUrl ? "yes" : "none"
-      }`,
-    );
-  }
+		console.log(
+			`Accepted: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore} | Image: ${
+				article.imageUrl ? "yes" : "none"
+			}`,
+		);
+	}
 
-  return {
-    reviewRows,
-    acceptedArticleRows,
-    acceptedCount,
-    rejectedCount,
-  };
+	return {
+		reviewRows,
+		acceptedArticleRows,
+		acceptedCount,
+		rejectedCount,
+	};
 }
 
 async function refreshArticles(env: Env, options: RefreshOptions = {}) {
-  const config = await getRuntimeConfig(env);
-  const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
-  const shardIndex = getShardIndex(env);
-  const feedsPerShard = getFeedsPerShard(env);
-  const shardFeeds = await getFeedsForShard(env, config);
+	const config = await getRuntimeConfig(env);
+	const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
+	const shardIndex = getShardIndex(env);
+	const feedsPerShard = getFeedsPerShard(env);
 
-  const positiveSources = new Set(
-    shardFeeds
-      .filter((feed) => feed.is_positive_source)
-      .map((feed) => feed.source),
-  );
+	Sentry.setTag("nutsnews.worker.shard", String(shardIndex));
 
-  console.log(
-    `Worker shard ${shardIndex} loaded ${shardFeeds.length} RSS feeds. Feeds per shard: ${feedsPerShard}.`,
-  );
+	const shardFeeds = await getFeedsForShard(env, config);
+	const positiveSources = new Set(
+		shardFeeds
+			.filter((feed) => feed.is_positive_source)
+			.map((feed) => feed.source),
+	);
 
-  const fetchedArticles = await fetchRssArticles(shardFeeds, positiveSources);
-  const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
-  const candidateUrls = candidateArticles.map((article) => article.url);
+	console.log(
+		`Worker shard ${shardIndex} loaded ${shardFeeds.length} RSS feeds. Feeds per shard: ${feedsPerShard}.`,
+	);
 
-  console.log(
-    `Fetched ${fetchedArticles.length} unique RSS articles. Checking ${candidateArticles.length} sorted candidates this run.`,
-  );
+	const fetchedArticles = await fetchRssArticles(shardFeeds, positiveSources);
+	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
+	const candidateUrls = candidateArticles.map((article) => article.url);
 
-  const reviewedUrls = await getReviewedUrls(config, candidateUrls);
+	console.log(
+		`Fetched ${fetchedArticles.length} unique RSS articles. Checking ${candidateArticles.length} sorted candidates this run.`,
+	);
 
-  const unreviewedArticles = candidateArticles.filter(
-    (article) => !reviewedUrls.has(article.url),
-  );
+	const reviewedUrls = await getReviewedUrls(config, candidateUrls);
+	const unreviewedArticles = candidateArticles.filter(
+		(article) => !reviewedUrls.has(article.url),
+	);
 
-  const localFilterResults = unreviewedArticles.map((article) => ({
-    article,
-    shouldSkip: shouldSkipBeforeAi(article, positiveSources),
-  }));
+	const localFilterResults = unreviewedArticles.map((article) => ({
+		article,
+		shouldSkip: shouldSkipBeforeAi(article, positiveSources),
+	}));
 
-  const locallyRejectedArticles = localFilterResults
-    .filter((result) => result.shouldSkip)
-    .map((result) => result.article);
+	const locallyRejectedArticles = localFilterResults
+		.filter((result) => result.shouldSkip)
+		.map((result) => result.article);
 
-  const articlesEligibleForAi = localFilterResults
-    .filter((result) => !result.shouldSkip)
-    .map((result) => result.article);
+	const articlesEligibleForAi = localFilterResults
+		.filter((result) => !result.shouldSkip)
+		.map((result) => result.article);
 
-  const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
+	const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
 
-  console.log(
-    `Already reviewed: ${reviewedUrls.size}. Unreviewed candidates: ${unreviewedArticles.length}. Locally rejected before AI: ${locallyRejectedArticles.length}. Eligible for AI after local filter: ${articlesEligibleForAi.length}. Sending ${articlesForAi.length} articles to AI with concurrency ${AI_REVIEW_CONCURRENCY}.`,
-  );
+	console.log(
+		`Already reviewed: ${reviewedUrls.size}. Unreviewed candidates: ${unreviewedArticles.length}. Locally rejected before AI: ${locallyRejectedArticles.length}. Eligible for AI after local filter: ${articlesEligibleForAi.length}. Sending ${articlesForAi.length} articles to AI with concurrency ${AI_REVIEW_CONCURRENCY}.`,
+	);
 
-  const locallyReviewedArticles = buildLocalRejectedArticles(
-    locallyRejectedArticles,
-  );
+	const locallyReviewedArticles = buildLocalRejectedArticles(
+		locallyRejectedArticles,
+	);
 
-  const aiReviewedArticles = await mapWithConcurrency(
-    articlesForAi,
-    AI_REVIEW_CONCURRENCY,
-    async (article) => ({
-      article,
-      aiDecision: await classifyAndSummarizeArticle(config, article),
-    }),
-  );
+	const aiReviewedArticles = await mapWithConcurrency(
+		articlesForAi,
+		AI_REVIEW_CONCURRENCY,
+		async (article) => ({
+			article,
+			aiDecision: await classifyAndSummarizeArticle(config, article),
+		}),
+	);
 
-  const reviewedArticles = [...locallyReviewedArticles, ...aiReviewedArticles];
+	const reviewedArticles = [...locallyReviewedArticles, ...aiReviewedArticles];
 
-  const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
-    buildRowsFromReviewedArticles(reviewedArticles);
+	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
+		buildRowsFromReviewedArticles(reviewedArticles);
 
-  console.log(
-    `Review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
-  );
+	console.log(
+		`Review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
+	);
 
-  const [reviewsSaved, articlesSaved] = await Promise.all([
-    saveArticleReviewsBatch(config, reviewRows),
-    saveAcceptedArticlesBatch(config, acceptedArticleRows),
-  ]);
+	const [reviewsSaved, articlesSaved] = await Promise.all([
+		saveArticleReviewsBatch(config, reviewRows),
+		saveAcceptedArticlesBatch(config, acceptedArticleRows),
+	]);
 
-  if (reviewsSaved) {
-    console.log(`Saved ${reviewRows.length} AI review records.`);
-  }
+	if (reviewsSaved) {
+		console.log(`Saved ${reviewRows.length} AI review records.`);
+	}
 
-  if (articlesSaved) {
-    console.log(`Saved ${acceptedArticleRows.length} accepted article records.`);
-  }
+	if (articlesSaved) {
+		console.log(`Saved ${acceptedArticleRows.length} accepted article records.`);
+	}
 
-  return {
-    fetchedCount: fetchedArticles.length,
-    candidateCount: candidateArticles.length,
-    alreadyReviewedCount: reviewedUrls.size,
-    unreviewedCandidateCount: unreviewedArticles.length,
-    locallyRejectedBeforeAiCount: locallyRejectedArticles.length,
-    eligibleForAiCount: articlesEligibleForAi.length,
-    aiReviewedCount: articlesForAi.length,
-    acceptedCount,
-    rejectedCount,
-    reviewRowsQueued: reviewRows.length,
-    articleRowsQueued: acceptedArticleRows.length,
-    reviewsSaved,
-    articlesSaved,
-    feedCount: shardFeeds.length,
-    feedShardIndex: shardIndex,
-    feedsPerShard,
-    aiReviewConcurrency: AI_REVIEW_CONCURRENCY,
-    maxAiReviews,
-    subrequestPlan:
-      "Free-plan safe target: sharded RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
-  };
+	const result = {
+		fetchedCount: fetchedArticles.length,
+		candidateCount: candidateArticles.length,
+		alreadyReviewedCount: reviewedUrls.size,
+		unreviewedCandidateCount: unreviewedArticles.length,
+		locallyRejectedBeforeAiCount: locallyRejectedArticles.length,
+		eligibleForAiCount: articlesEligibleForAi.length,
+		aiReviewedCount: articlesForAi.length,
+		acceptedCount,
+		rejectedCount,
+		reviewRowsQueued: reviewRows.length,
+		articleRowsQueued: acceptedArticleRows.length,
+		reviewsSaved,
+		articlesSaved,
+		feedCount: shardFeeds.length,
+		feedShardIndex: shardIndex,
+		feedsPerShard,
+		aiReviewConcurrency: AI_REVIEW_CONCURRENCY,
+		maxAiReviews,
+		subrequestPlan:
+			"Free-plan safe target: sharded RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
+	};
+
+	Sentry.setContext("nutsnews.worker.refresh", result);
+
+	if (!reviewsSaved || !articlesSaved) {
+		Sentry.captureMessage("NutsNews Worker completed with failed database saves", {
+			level: "warning",
+			tags: {
+				area: "refresh_articles",
+				shard: String(shardIndex),
+			},
+			extra: result,
+		});
+	}
+
+	return result;
 }
 
-export default {
-  async fetch(request: Request, env: Env) {
-    const url = new URL(request.url);
+const workerHandler: ExportedHandler<Env> = {
+	async fetch(request: Request, env: Env) {
+		const url = new URL(request.url);
 
-    if (url.pathname === "/favicon.ico") {
-      return new Response(null, { status: 204 });
-    }
+		if (url.pathname === "/favicon.ico") {
+			return new Response(null, { status: 204 });
+		}
 
-    const limitParam = url.searchParams.get("limit");
-    const requestedLimit = limitParam ? Number(limitParam) : undefined;
+		if (url.pathname === "/sentry-test") {
+			throw new Error("NutsNews Worker Sentry test error");
+		}
 
-    const result = await refreshArticles(env, {
-      maxAiReviews: requestedLimit,
-    });
+		const limitParam = url.searchParams.get("limit");
+		const requestedLimit = limitParam ? Number(limitParam) : undefined;
 
-    return Response.json({
-      message: "NutsNews refresh complete",
-      ...result,
-    });
-  },
+		const result = await refreshArticles(env, {
+			maxAiReviews: requestedLimit,
+		});
 
-  async scheduled(_event: ScheduledEvent, env: Env) {
-    console.log("NutsNews scheduled shard refresh started");
+		return Response.json({
+			message: "NutsNews refresh complete",
+			...result,
+		});
+	},
 
-    const result = await refreshArticles(env);
+	async scheduled(_event: ScheduledEvent, env: Env) {
+		console.log("NutsNews scheduled shard refresh started");
 
-    console.log("NutsNews scheduled shard refresh finished", result);
-  },
+		const result = await refreshArticles(env);
+
+		console.log("NutsNews scheduled shard refresh finished", result);
+	},
 };
+
+export default Sentry.withSentry(
+	async (env: Env) => ({
+		dsn: await env.SENTRY_DSN.get(),
+		environment: env.SENTRY_ENVIRONMENT ?? "production",
+		tracesSampleRate: Number(env.SENTRY_TRACES_SAMPLE_RATE ?? "0.1"),
+		beforeSend(event) {
+			if (event.request?.headers) {
+				delete event.request.headers.authorization;
+				delete event.request.headers.cookie;
+			}
+
+			return event;
+		},
+	}),
+	workerHandler,
+);
