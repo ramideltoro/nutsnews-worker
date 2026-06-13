@@ -19,6 +19,7 @@ The goal of NutsNews is to create a peaceful daily feed of uplifting, inspiring,
 * [Architecture](#architecture)
 * [Repository Structure](#repository-structure)
 * [Frontend Web App](#frontend-web-app)
+* [Cloudflare CDN and Cache Optimization](#cloudflare-cdn-and-cache-optimization)
 * [RSS Ingestion Worker](#rss-ingestion-worker)
 * [Sharded Worker Design](#sharded-worker-design)
 * [Controller Worker](#controller-worker)
@@ -53,6 +54,7 @@ The platform is designed to be:
 * Low-cost to operate
 * Automated end-to-end
 * Scalable across hundreds of RSS feeds
+* CDN-friendly for public pages and article APIs
 * Observable through uptime checks, Cloudflare logs, and Sentry error monitoring
 
 High-level flow:
@@ -68,7 +70,9 @@ OpenAI Review
   ↓
 Supabase Postgres
   ↓
-Next.js Website
+Next.js Website on Vercel
+  ↓
+Cloudflare CDN
   ↓
 Reader clicks through to the original publisher
 ```
@@ -77,7 +81,9 @@ Reader clicks through to the original publisher
 
 ## Mission
 
-Most news feeds are optimized for urgency, conflict, fear, and attention. NutsNews is designed to offer the opposite experience.
+Most news feeds are optimized for urgency, conflict, fear, and attention.
+
+NutsNews is designed to offer the opposite experience.
 
 NutsNews focuses on:
 
@@ -118,7 +124,9 @@ The Worker and OpenAI prompt are designed to reject articles that do not match t
 
 ### Mobile-first article feed
 
-The website renders a clean story feed optimized for phone screens. Each card includes:
+The website renders a clean story feed optimized for phone screens.
+
+Each card includes:
 
 * Title
 * Short AI-written summary
@@ -140,9 +148,16 @@ RSS feeds provide the article candidate pool. The system can ingest from positiv
 
 The Worker stores accepted and rejected review decisions so the same article is not sent to OpenAI repeatedly.
 
+This helps reduce:
+
+* OpenAI cost
+* Duplicate database rows
+* Repeated Worker work
+* Repeated review of rejected stories
+
 ### Source-friendly links
 
-NutsNews does not republish full copyrighted articles. It links readers back to the original publisher.
+NutsNews does not republish full copyrighted articles. It creates short summaries and links readers back to the original publisher.
 
 ### Scalable sharding
 
@@ -158,9 +173,25 @@ For example:
 
 A single controller Worker can trigger one shard at a time, reducing the need to maintain many separate cron schedules.
 
+### Cloudflare CDN optimization
+
+NutsNews can run behind Cloudflare CDN for public page and API caching.
+
+This helps:
+
+* Reduce repeated origin requests to Vercel
+* Improve response time for repeat visitors
+* Add Cloudflare edge protection
+* Reduce load during traffic spikes
+* Cache stable public pages while keeping content reasonably fresh
+
 ### Sentry error monitoring
 
-NutsNews now includes Sentry monitoring for frontend browser errors, Next.js runtime errors, and Cloudflare Worker shard failures.
+NutsNews includes Sentry monitoring for frontend browser errors, Next.js runtime errors, and Cloudflare Worker shard failures.
+
+### Better Stack uptime monitoring
+
+Better Stack Uptime monitors whether the public site is reachable and provides external availability reporting.
 
 ---
 
@@ -185,7 +216,10 @@ Data Layer
 Supabase Postgres stores review records and approved articles
   ↓
 Presentation Layer
-Next.js renders the public NutsNews website
+Next.js renders the public NutsNews website on Vercel
+  ↓
+CDN Layer
+Cloudflare proxies and caches public content where eligible
   ↓
 Observability Layer
 Better Stack Uptime, Cloudflare observability, and Sentry monitor availability and errors
@@ -204,6 +238,7 @@ Readers click through to original publishers
 | `supabase`          | Database schema and data storage                        |
 | GitHub              | Source control                                          |
 | Vercel              | Frontend deployment                                     |
+| Cloudflare CDN      | DNS, proxy, cache, and edge protection                  |
 | Cloudflare Workers  | Scheduled or manually-triggered backend automation      |
 | OpenAI              | AI article classification and summary generation        |
 | Sentry              | Frontend and Worker error monitoring                    |
@@ -218,8 +253,13 @@ nutsnews/
 ├── web/
 │   ├── app/
 │   │   ├── page.tsx
+│   │   ├── layout.tsx
+│   │   ├── globals.css
 │   │   ├── about/
 │   │   │   └── page.tsx
+│   │   ├── articles/
+│   │   │   └── [id]/
+│   │   │       └── page.tsx
 │   │   ├── api/
 │   │   │   └── articles/
 │   │   │       └── route.ts
@@ -231,6 +271,7 @@ nutsnews/
 │   │       └── page.tsx
 │   ├── lib/
 │   │   └── articles.ts
+│   ├── public/
 │   ├── instrumentation.ts
 │   ├── instrumentation-client.ts
 │   ├── sentry.server.config.ts
@@ -276,6 +317,7 @@ The `web` app is the public NutsNews website. It is built with Next.js and desig
 * Load available categories
 * Render the homepage
 * Render the About page
+* Render individual article pages
 * Support category filtering
 * Support infinite scrolling
 * Show generated fallback thumbnails when articles do not include images
@@ -283,25 +325,368 @@ The `web` app is the public NutsNews website. It is built with Next.js and desig
 * Provide SEO metadata and structured data
 * Capture frontend/browser errors through Sentry
 * Capture global Next.js runtime errors through Sentry
+* Send cache-friendly headers for public content
 
 ### Important files
 
-| File                                 | Purpose                                     |
-| ------------------------------------ | ------------------------------------------- |
-| `web/app/page.tsx`                   | Homepage and initial article loading        |
-| `web/app/about/page.tsx`             | Project About page                          |
-| `web/app/components/ArticleFeed.tsx` | Interactive story feed component            |
-| `web/app/api/articles/route.ts`      | Paginated article API                       |
-| `web/lib/articles.ts`                | Supabase data helpers                       |
-| `web/instrumentation-client.ts`      | Sentry browser/client configuration         |
-| `web/instrumentation.ts`             | Next.js instrumentation hook for Sentry     |
-| `web/sentry.server.config.ts`        | Sentry server runtime configuration         |
-| `web/sentry.edge.config.ts`          | Sentry edge runtime configuration           |
-| `web/app/global-error.tsx`           | Captures global app errors with Sentry      |
-| `web/app/sentry-test/page.tsx`       | Local and production Sentry validation page |
-| `web/next.config.ts`                 | Next.js and Sentry build configuration      |
+| File                                 | Purpose                                         |
+| ------------------------------------ | ----------------------------------------------- |
+| `web/app/page.tsx`                   | Homepage and initial article loading            |
+| `web/app/about/page.tsx`             | Project About page                              |
+| `web/app/articles/[id]/page.tsx`     | Individual article page                         |
+| `web/app/components/ArticleFeed.tsx` | Interactive story feed component                |
+| `web/app/api/articles/route.ts`      | Paginated article API                           |
+| `web/lib/articles.ts`                | Supabase data helpers                           |
+| `web/instrumentation-client.ts`      | Sentry browser/client configuration             |
+| `web/instrumentation.ts`             | Next.js instrumentation hook for Sentry         |
+| `web/sentry.server.config.ts`        | Sentry server runtime configuration             |
+| `web/sentry.edge.config.ts`          | Sentry edge runtime configuration               |
+| `web/app/global-error.tsx`           | Captures global app errors with Sentry          |
+| `web/app/sentry-test/page.tsx`       | Local and production Sentry validation page     |
+| `web/next.config.ts`                 | Next.js, Sentry, and cache header configuration |
 
-The homepage is configured for dynamic rendering so new articles can appear without waiting for a static rebuild.
+### Rendering and caching model
+
+The homepage and article API are configured to avoid `force-dynamic` and avoid `no-store` cache headers.
+
+The public content uses short revalidation windows so the site stays fresh while still allowing CDN caching:
+
+```text
+Homepage: /                         revalidate = 300
+Article API: /api/articles          revalidate = 300
+Article pages: /articles/[id]       revalidate = 3600
+```
+
+This supports Cloudflare caching while keeping the feed updated regularly.
+
+---
+
+## Cloudflare CDN and Cache Optimization
+
+NutsNews can use Cloudflare in front of the Vercel-hosted frontend.
+
+The CDN setup is intended to cache public pages and public article API responses while bypassing monitoring and non-cacheable routes.
+
+### Important Vercel note
+
+Vercel already has its own global edge network. Putting Cloudflare in front of Vercel is a reverse-proxy setup. This can work, but if it causes domain, firewall, bot protection, or cache issues, switch Cloudflare DNS records from `Proxied` to `DNS only`.
+
+NutsNews uses Cloudflare intentionally for:
+
+* DNS management
+* CDN cache rules
+* Edge protection
+* Cache analytics
+* Faster repeat responses for public pages
+* Reduced repeated hits to Vercel origin
+
+### Cloudflare request flow
+
+```text
+Reader Browser
+  ↓
+Cloudflare DNS and CDN
+  ↓
+Cloudflare Cache Rule
+  ↓
+Vercel Edge / Next.js
+  ↓
+Supabase, only when server-rendered data is needed
+```
+
+### DNS records
+
+In Cloudflare:
+
+```text
+Cloudflare
+→ nutsnews.com
+→ DNS
+→ Records
+```
+
+Recommended records:
+
+```text
+Type: A
+Name: @
+IPv4 address: 76.76.21.21
+Proxy status: Proxied
+TTL: Auto
+```
+
+```text
+Type: CNAME
+Name: www
+Target: cname.vercel-dns-0.com
+Proxy status: Proxied
+TTL: Auto
+```
+
+Use the exact values shown in Vercel if they differ:
+
+```text
+Vercel
+→ Project
+→ Settings
+→ Domains
+```
+
+Do not delete email records such as:
+
+```text
+MX
+TXT
+SPF
+DKIM
+DMARC
+```
+
+### SSL/TLS settings
+
+In Cloudflare:
+
+```text
+SSL/TLS
+→ Overview
+```
+
+Use:
+
+```text
+Full (strict)
+```
+
+Then go to:
+
+```text
+SSL/TLS
+→ Edge Certificates
+```
+
+Enable:
+
+```text
+Always Use HTTPS: On
+Automatic HTTPS Rewrites: On
+```
+
+If Cloudflare returns a `526` error, the origin certificate is not being validated by Cloudflare. Confirm the domain is correctly configured in Vercel and that Vercel has issued a certificate for the domain.
+
+### Cacheable routes
+
+These routes are safe to cache for short periods:
+
+```text
+/
+/about
+/articles/*
+/api/articles*
+```
+
+The article API response changes as new articles are published, so it uses a short TTL and stale-while-revalidate behavior.
+
+### Routes to bypass
+
+These routes should not be cached:
+
+```text
+/monitoring*
+```
+
+The `/monitoring` route is used by the Sentry tunnel and should remain uncached.
+
+Future private/admin/auth routes should also bypass CDN cache.
+
+Examples:
+
+```text
+/admin*
+/login*
+/api/private*
+/api/admin*
+```
+
+### Cloudflare Cache Rule: public content
+
+Create this rule in:
+
+```text
+Cloudflare
+→ nutsnews.com
+→ Caching
+→ Cache Rules
+→ Create rule
+```
+
+Rule name:
+
+```text
+Cache NutsNews public content
+```
+
+Expression:
+
+```text
+(http.host in {"nutsnews.com" "www.nutsnews.com"} and (http.request.uri.path eq "/" or http.request.uri.path eq "/about" or starts_with(http.request.uri.path, "/articles/") or starts_with(http.request.uri.path, "/api/articles")))
+```
+
+Settings:
+
+```text
+Cache eligibility: Eligible for cache
+Edge TTL: Use cache-control header if present, bypass cache if not
+Browser TTL: Respect origin
+```
+
+### Cloudflare Cache Rule: bypass monitoring
+
+Create this rule above the public cache rule.
+
+Rule name:
+
+```text
+Bypass monitoring routes
+```
+
+Expression:
+
+```text
+(http.host in {"nutsnews.com" "www.nutsnews.com"} and starts_with(http.request.uri.path, "/monitoring"))
+```
+
+Settings:
+
+```text
+Cache eligibility: Bypass cache
+```
+
+### App cache headers
+
+The frontend should send public cache headers for cacheable routes.
+
+Recommended header:
+
+```text
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+```
+
+For the article API, also send CDN-specific headers:
+
+```text
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+CDN-Cache-Control: public, max-age=300, stale-while-revalidate=3600
+Vercel-CDN-Cache-Control: public, s-maxage=300, stale-while-revalidate=3600
+```
+
+Do not use these on public routes that should be cached:
+
+```text
+private
+no-cache
+no-store
+must-revalidate
+```
+
+If the response includes `private, no-cache, no-store`, Cloudflare will bypass cache.
+
+### Relevant source files for CDN caching
+
+| File                             | CDN-related purpose                                            |
+| -------------------------------- | -------------------------------------------------------------- |
+| `web/app/page.tsx`               | Removes `force-dynamic`, sets `revalidate = 300`               |
+| `web/app/api/articles/route.ts`  | Removes `no-store`, sets public API cache headers              |
+| `web/app/articles/[id]/page.tsx` | Sets article page `revalidate = 3600`                          |
+| `web/next.config.ts`             | Adds cache headers for public pages and static metadata routes |
+
+### Validate Cloudflare CDN
+
+After deployment and Cloudflare cache purge, run:
+
+```bash
+curl -I https://www.nutsnews.com/
+```
+
+Expected healthy signs:
+
+```text
+server: cloudflare
+cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+```
+
+First request may show:
+
+```text
+cf-cache-status: MISS
+```
+
+After repeat requests, the goal is:
+
+```text
+cf-cache-status: HIT
+```
+
+Test the article API:
+
+```bash
+curl -I "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Good result:
+
+```text
+cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+cf-cache-status: HIT
+```
+
+Bad result:
+
+```text
+cache-control: private, no-cache, no-store, max-age=0, must-revalidate
+cf-cache-status: BYPASS
+```
+
+If that bad result appears, check for these in the Next.js code:
+
+```text
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+Cache-Control: no-store
+```
+
+### Purge Cloudflare cache after deploys
+
+After cache-related deploys:
+
+```text
+Cloudflare
+→ nutsnews.com
+→ Caching
+→ Purge Cache
+→ Purge Everything
+```
+
+For smaller changes, purge only:
+
+```text
+https://www.nutsnews.com/
+https://www.nutsnews.com/about
+https://www.nutsnews.com/api/articles?page=0
+```
+
+### Helpful Cloudflare speed settings
+
+Recommended free settings:
+
+```text
+Speed → Optimization:
+Brotli / Compression: On
+Early Hints: On
+HTTP/3: On
+
+Caching → Tiered Cache:
+Tiered Cache: On
+```
 
 ---
 
@@ -387,7 +772,9 @@ That route intentionally throws an error to validate Sentry Worker monitoring.
 
 ## Sharded Worker Design
 
-The platform is designed to scale across hundreds of RSS feeds. Instead of one Worker trying to read every feed, RSS sources can be split into shards.
+The platform is designed to scale across hundreds of RSS feeds.
+
+Instead of one Worker trying to read every feed, RSS sources can be split into shards.
 
 Example:
 
@@ -646,7 +1033,9 @@ The prompt rejects stories involving:
 
 Before using OpenAI, the Worker can locally reject obviously negative stories.
 
-This protects cost and reduces unnecessary AI calls. Broad sources such as NPR, BBC, and Google News RSS feeds can be filtered more strictly than positive-first sources.
+This protects cost and reduces unnecessary AI calls.
+
+Broad sources such as NPR, BBC, and Google News RSS feeds can be filtered more strictly than positive-first sources.
 
 ---
 
@@ -678,6 +1067,7 @@ The summary is intended to be brief, original, and not a replacement for the ful
 | GitHub → Vercel CI/CD    | Every push to `main` triggers an automatic Vercel build and production deployment |
 | Vercel                   | Frontend hosting, HTTPS, custom domain, and production deployment                 |
 | Supabase                 | Postgres database for article storage                                             |
+| Cloudflare CDN           | DNS, proxy, caching, and edge protection                                          |
 | Cloudflare Workers       | Scheduled RSS ingestion and automation                                            |
 | Cloudflare Secrets Store | Centralized secret storage for Worker shards                                      |
 | OpenAI                   | Article filtering and cheerful summary generation                                 |
@@ -706,6 +1096,20 @@ Deployment flow:
 3. Production release
    If the build succeeds, Vercel automatically publishes the latest version
    to the production NutsNews domain.
+
+4. Cloudflare CDN
+   Public traffic flows through Cloudflare, which caches eligible public
+   pages and API responses.
+```
+
+After CDN-related deploys, purge Cloudflare cache:
+
+```text
+Cloudflare
+→ nutsnews.com
+→ Caching
+→ Purge Cache
+→ Purge Everything
 ```
 
 ### Worker deployment
@@ -911,6 +1315,7 @@ NutsNews uses multiple layers of monitoring:
 
 * Better Stack Uptime for external availability checks
 * Cloudflare Worker logs and observability for Worker runtime visibility
+* Cloudflare CDN cache status for public route caching
 * Sentry for frontend and Worker error monitoring
 * Supabase queries for article/review verification
 
@@ -938,6 +1343,21 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=17"
 
 ```bash
 curl "https://nutsnews-controller.nutsnews.workers.dev/"
+```
+
+### Test Cloudflare CDN cache
+
+```bash
+curl -I https://www.nutsnews.com/
+curl -I "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Look for:
+
+```text
+server: cloudflare
+cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+cf-cache-status: HIT
 ```
 
 ### Tail Worker logs
@@ -987,8 +1407,7 @@ order by count desc;
 ```sql
 insert into rss_feeds (source, url, is_positive_source)
 values ('Example Source', 'https://example.com/feed.xml', false)
-on conflict (url)
-do update set
+on conflict (url) do update set
   source = excluded.source,
   is_positive_source = excluded.is_positive_source,
   is_active = true;
@@ -1184,7 +1603,9 @@ Local builds may show:
 No auth token provided. Will not create release.
 ```
 
-That is acceptable for local development. Production should have `SENTRY_AUTH_TOKEN` configured in Vercel.
+That is acceptable for local development.
+
+Production should have `SENTRY_AUTH_TOKEN` configured in Vercel.
 
 ---
 
@@ -1198,6 +1619,7 @@ The About page lists the current cost model as:
 | Vercel              |     `$0` | The Next.js website is hosted on the Vercel free tier         |
 | Supabase            |     `$0` | Article storage uses the Supabase free tier                   |
 | Cloudflare Workers  |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier     |
+| Cloudflare CDN      |     `$0` | DNS/proxy/cache can run on the Cloudflare free tier           |
 | Better Stack Uptime |     `$0` | External uptime monitoring uses the free tier                 |
 | Sentry              |     `$0` | Error monitoring uses the Sentry free tier                    |
 
@@ -1223,6 +1645,10 @@ Using free-tier cloud services keeps the project inexpensive to launch and easy 
 
 Scheduled or controller-triggered automation refreshes the article queue throughout the day.
 
+### CDN-assisted delivery
+
+Cloudflare can cache public pages and article API responses to make repeat visits faster and reduce origin traffic.
+
 ### Focused editorial voice
 
 AI filtering helps keep the product aligned with a peaceful, uplifting, and positive content strategy.
@@ -1237,7 +1663,7 @@ The system separates the frontend, database, AI workflow, controller, and Worker
 
 ### Observable platform
 
-Better Stack, Cloudflare logs, and Sentry make it easier to detect downtime, Worker failures, frontend crashes, and production regressions.
+Better Stack, Cloudflare logs, Cloudflare cache status, and Sentry make it easier to detect downtime, Worker failures, frontend crashes, cache problems, and production regressions.
 
 ### Fast experimentation
 
@@ -1272,6 +1698,8 @@ Potential improvements:
 * Add Sentry alert rules for repeated Worker shard failures
 * Add Sentry alert rules for frontend production regressions
 * Add Worker health dashboards by shard
+* Add Cloudflare cache HIT ratio review
+* Add automated cache purge workflow after production deploys
 
 ---
 
@@ -1285,4 +1713,4 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Status
 
-NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, and low-cost observability.
+NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, CDN-assisted delivery, and low-cost observability.
