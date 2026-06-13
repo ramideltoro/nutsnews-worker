@@ -1,69 +1,122 @@
 # NutsNews
 
-NutsNews is a calm, mobile-first news platform that collects positive stories from trusted RSS feeds, filters out stressful topics, and presents short cheerful summaries with links back to the original publishers.
+**A calm, mobile-first positive news platform powered by automation, AI curation, serverless infrastructure, CDN caching, and centralized observability.**
 
-The goal of NutsNews is to create a peaceful daily feed of uplifting, inspiring, human-interest, science, culture, travel, wellness, community, animal, nature, space, creativity, and achievement stories.
+NutsNews collects uplifting stories from trusted RSS feeds, filters out stressful topics, creates short cheerful summaries, and links readers back to the original publishers.
 
-**Media Owner:** Rami Del Toro
-**Editor-in-Chief:** OpenAI
-**Managing Editor:** OpenAI
+The project is designed to be simple to use, inexpensive to operate, easy to maintain, and scalable enough to grow from a small experiment into a fully automated positive-news platform.
 
 ---
 
-## Table of Contents
+## Project Snapshot
 
-* [Overview](#overview)
-* [Mission](#mission)
-* [What NutsNews Avoids](#what-nutsnews-avoids)
-* [Key Features](#key-features)
-* [Architecture](#architecture)
-* [Repository Structure](#repository-structure)
-* [Frontend Web App](#frontend-web-app)
-* [Cloudflare CDN and Cache Optimization](#cloudflare-cdn-and-cache-optimization)
-* [Centralized Logging with Better Stack](#centralized-logging-with-better-stack)
-* [RSS Ingestion Worker](#rss-ingestion-worker)
-* [Sharded Worker Design](#sharded-worker-design)
-* [Controller Worker](#controller-worker)
-* [Database Design](#database-design)
-* [AI Curation Workflow](#ai-curation-workflow)
-* [Source-Friendly Publishing](#source-friendly-publishing)
-* [Tech Stack](#tech-stack)
-* [CI/CD and Deployment](#cicd-and-deployment)
-* [Environment Variables and Secrets](#environment-variables-and-secrets)
-* [Local Development](#local-development)
-* [Operations and Monitoring](#operations-and-monitoring)
-* [Sentry Observability](#sentry-observability)
-* [Current Cost Model](#current-cost-model)
-* [Project Benefits](#project-benefits)
-* [Roadmap](#roadmap)
-* [License](#license)
-* [Status](#status)
+| Area          | Highlight                                                                        |
+| ------------- | -------------------------------------------------------------------------------- |
+| Product       | Mobile-first positive news feed                                                  |
+| Mission       | Give readers a calmer alternative to stressful news                              |
+| Content model | RSS discovery, AI-assisted filtering, short summaries, source links              |
+| Frontend      | Next.js website hosted on Vercel                                                 |
+| Automation    | Cloudflare Workers process RSS feeds                                             |
+| AI            | OpenAI classifies, scores, and summarizes candidate articles                     |
+| Database      | Supabase Postgres stores articles and review history                             |
+| CDN           | Cloudflare caches public pages and API responses                                 |
+| Logging       | Better Stack centralizes structured logs                                         |
+| Monitoring    | Sentry tracks application errors; Better Stack tracks uptime                     |
+| Cost model    | Designed around free-tier cloud services, with the domain as the main fixed cost |
 
 ---
 
-## Overview
+## The Story Behind NutsNews
 
-NutsNews is an automated uplifting-news platform.
+Most news products are built around urgency. They compete for attention with conflict, fear, politics, money, and breaking events.
 
-It discovers story candidates from RSS feeds, uses automation and AI to review them, stores approved stories in Supabase, and displays them through a mobile-friendly Next.js website.
+NutsNews takes a different direction.
 
-The platform is designed to be:
+The goal is to create a peaceful place where readers can quickly find stories that feel encouraging, warm, interesting, and human. Instead of replacing publishers, NutsNews helps readers discover positive stories and then sends them back to the original source.
 
-* Calm and uplifting
-* Mobile-first
-* Source-friendly
-* Low-cost to operate
-* Automated end-to-end
-* Scalable across hundreds of RSS feeds
-* CDN-friendly for public pages and article APIs
-* Observable through uptime checks, Cloudflare logs, Sentry error monitoring, and Better Stack centralized logs
+A reader should be able to open NutsNews and immediately understand the feeling of the product:
 
-High-level flow:
+> “Here is something good happening in the world.”
+
+That product idea drives the technical design.
+
+The platform is built to automatically discover articles, filter them, summarize them, publish them, cache them, monitor them, and log what happened — all while staying inexpensive and easy to extend.
+
+---
+
+## Mission
+
+NutsNews exists to make positive stories easier to find.
+
+The platform focuses on stories about:
+
+* Community
+* Wellness
+* Science
+* Culture
+* Animals
+* Travel
+* Lifestyle
+* Nature
+* Space
+* Creativity
+* Human achievement
+* Inspiring people
+* Helpful discoveries
+* Remarkable moments
+
+The goal is not to become a traditional newsroom. The goal is to become a fully automated positive-news discovery layer that helps readers find uplifting stories from around the web.
+
+---
+
+## What NutsNews Avoids
+
+NutsNews intentionally avoids content that creates stress or conflict.
+
+The platform is designed to filter out stories mainly focused on:
+
+* Politics
+* War
+* Crime
+* Tragedy
+* Violence
+* Fear
+* Market panic
+* Financial stress
+* Election conflict
+* Government conflict
+* Outrage-driven news
+
+This editorial direction keeps the product focused and gives the site a clear identity.
+
+---
+
+## Product Experience
+
+NutsNews is designed for quick mobile reading.
+
+Each story card gives the reader:
+
+* A clear title
+* A short cheerful summary
+* A source label
+* A published date
+* Category badges
+* A story image or fallback visual
+* A link to the original publisher
+
+The reading experience is intentionally simple. The homepage behaves like a calm feed of uplifting stories rather than a noisy news portal.
+
+---
+
+## Architecture Overview
+
+NutsNews uses a serverless architecture. Each part of the system has a focused role.
 
 ```text
-RSS Feeds
+RSS Sources
   ↓
-Cloudflare Workers
+Cloudflare Worker Shards
   ↓
 Local Filtering
   ↓
@@ -75,218 +128,399 @@ Next.js Website on Vercel
   ↓
 Cloudflare CDN
   ↓
-Reader clicks through to the original publisher
+Reader
 ```
 
-High-level observability flow:
+The observability flow runs beside the product flow:
 
 ```text
-Next.js Web App
+Next.js App
 Cloudflare Worker Shards
 Controller Worker
   ↓
-Structured JSON logs
+Structured Logs
   ↓
-Better Stack Telemetry source: nutsnews
+Better Stack Telemetry
   ↓
-Search by service, level, event, shardIndex, route, durationMs
+Search by service, level, event, shard, duration, status
 ```
 
----
-
-## Mission
-
-Most news feeds are optimized for urgency, conflict, fear, and attention.
-
-NutsNews is designed to offer the opposite experience.
-
-NutsNews focuses on:
-
-* Positive stories
-* Inspiring people
-* Community wins
-* Wellness and lifestyle
-* Science and health breakthroughs
-* Nature and animal stories
-* Travel and culture
-* Creativity and art
-* Remarkable achievements
-* Human-interest stories that feel encouraging
-
-The product goal is not to replace journalism. It is to help readers discover uplifting stories and then send them back to the original publishers.
-
----
-
-## What NutsNews Avoids
-
-The platform intentionally filters out stressful topics such as:
-
-* Politics
-* War
-* Money and markets
-* Crime
-* Fear-driven stories
-* Violent or tragic stories
-* Conflict-heavy content
-* Election and government coverage
-* Inflation, stocks, business, and financial stress stories
-
-The Worker and OpenAI prompt are designed to reject articles that do not match the calm editorial direction of the site.
-
----
-
-## Key Features
-
-### Mobile-first article feed
-
-The website renders a clean story feed optimized for phone screens.
-
-Each card includes:
-
-* Title
-* Short AI-written summary
-* Source label
-* Published date
-* Category badges
-* Image or generated fallback thumbnail
-* Link to the original article
-
-### AI-assisted story selection
-
-OpenAI is used to classify story candidates, reject unsuitable articles, assign categories, score positivity, and produce short calm summaries.
-
-### RSS-based discovery
-
-RSS feeds provide the article candidate pool. The system can ingest from positive-news publishers, general publishers, and topic-based RSS feeds.
-
-### Duplicate protection
-
-The Worker stores accepted and rejected review decisions so the same article is not sent to OpenAI repeatedly.
-
-This helps reduce:
-
-* OpenAI cost
-* Duplicate database rows
-* Repeated Worker work
-* Repeated review of rejected stories
-
-### Source-friendly links
-
-NutsNews does not republish full copyrighted articles. It creates short summaries and links readers back to the original publisher.
-
-### Scalable sharding
-
-The platform can split feeds across many Cloudflare Worker shards.
-
-For example:
+And application errors are monitored through:
 
 ```text
-500 RSS feeds ÷ 20 feeds per Worker = 25 Worker shards
+Frontend Errors
+Worker Errors
+Runtime Failures
+  ↓
+Sentry
 ```
 
-### Controller Worker
+This keeps the platform lightweight while still giving visibility into what is happening.
 
-A single controller Worker can trigger one shard at a time, reducing the need to maintain many separate cron schedules.
+---
 
-### Cloudflare CDN optimization
+## Key Design Principles
 
-NutsNews can run behind Cloudflare CDN for public page and API caching.
+### 1. Keep the reader experience calm
+
+The website is mobile-first, visually simple, and focused on one job: showing uplifting stories.
+
+### 2. Keep the system automated
+
+The platform automatically discovers, reviews, stores, and publishes stories with minimal manual work.
+
+### 3. Keep operating costs low
+
+The project is built around free or low-cost cloud services.
+
+### 4. Keep the architecture modular
+
+The frontend, database, AI workflow, Workers, controller, logging, and monitoring are separated so each layer can improve independently.
+
+### 5. Keep publishers respected
+
+NutsNews does not republish full articles. It uses short summaries and sends readers to the original publishers.
+
+### 6. Keep the system observable
+
+Centralized logs, uptime monitoring, CDN visibility, and error tracking make it easier to understand the health of the platform.
+
+---
+
+## Performance Highlights
+
+Performance is handled at several layers.
+
+### Cloudflare CDN
+
+Cloudflare sits in front of the public site and caches eligible public pages and API responses.
 
 This helps:
 
-* Reduce repeated origin requests to Vercel
-* Improve response time for repeat visitors
-* Add Cloudflare edge protection
-* Reduce load during traffic spikes
-* Cache stable public pages while keeping content reasonably fresh
+* Reduce repeated hits to Vercel
+* Improve repeat response speed
+* Lower origin load
+* Handle traffic spikes better
+* Serve common requests from the edge
 
-### Centralized Better Stack logging
+### Cache-friendly frontend
 
-NutsNews sends structured JSON logs to Better Stack so application activity is searchable in one place.
+The public pages and article API are configured with cache-friendly headers.
 
-Logs include searchable fields such as:
+Important public routes include:
 
-* `level`
-* `service`
-* `environment`
-* `event`
-* `message`
-* `route`
-* `status`
-* `durationMs`
-* `shardIndex`
-* `articleCount`
-* `acceptedCount`
-* `rejectedCount`
+* Homepage
+* About page
+* Article pages
+* Public article API
 
-Current services:
+The homepage and API can stay fresh while still allowing short-term CDN caching.
 
-```text
-nutsnews-web
-nutsnews-worker
-nutsnews-controller
-```
+### Vercel edge delivery
 
-### Sentry error monitoring
+The Next.js app runs on Vercel, which provides fast global delivery for the frontend.
 
-NutsNews includes Sentry monitoring for frontend browser errors, Next.js runtime errors, and Cloudflare Worker shard failures.
+### Smaller server workload
 
-### Better Stack uptime monitoring
-
-Better Stack Uptime monitors whether the public site is reachable and provides external availability reporting.
+Because Cloudflare can return cached responses, the application does not need to recompute or reload the same public feed for every visitor.
 
 ---
 
-## Architecture
+## Resiliency Highlights
 
-### Current platform architecture
+NutsNews is designed so one failure does not bring down the whole system.
+
+### Serverless infrastructure
+
+The system avoids traditional always-on servers. The website, automation, and controller are deployed on managed serverless platforms.
+
+### Worker sharding
+
+RSS processing can be split across many Cloudflare Worker shards.
+
+Instead of one Worker trying to process every feed, the work is divided.
+
+Example:
 
 ```text
-Content Sources
-BBC / NPR / Positive News / Good News Network / Google News RSS / Other RSS Feeds
-  ↓
-Automation Layer
-Cloudflare Workers fetch and parse RSS feeds
-  ↓
-Filtering Layer
-Local negative prefilter removes obvious unsuitable stories
-  ↓
-AI Curation Layer
-OpenAI filters, classifies, scores, and summarizes article candidates
-  ↓
-Data Layer
-Supabase Postgres stores review records and approved articles
-  ↓
-Presentation Layer
-Next.js renders the public NutsNews website on Vercel
-  ↓
-CDN Layer
-Cloudflare proxies and caches public content where eligible
-  ↓
-Observability Layer
-Better Stack Uptime, Better Stack centralized logs, Cloudflare observability, and Sentry monitor availability and errors
-  ↓
-Distribution
-Readers click through to original publishers
+500 RSS feeds
+20 feeds per shard
+25 Worker shards
 ```
 
-### Main components
+This makes the system easier to scale and reduces the chance that one large workload overwhelms a single Worker.
 
-| Component                   | Purpose                                                 |
-| --------------------------- | ------------------------------------------------------- |
-| `web`                       | Public Next.js website                                  |
-| `worker`                    | RSS ingestion and article review pipeline               |
-| `controller`                | Optional controller Worker for triggering Worker shards |
-| `supabase`                  | Database schema and data storage                        |
-| GitHub                      | Source control                                          |
-| Vercel                      | Frontend deployment                                     |
-| Cloudflare CDN              | DNS, proxy, cache, and edge protection                  |
-| Cloudflare Workers          | Scheduled or manually-triggered backend automation      |
-| Cloudflare Secrets Store    | Shared secret storage for Worker shards                 |
-| OpenAI                      | AI article classification and summary generation        |
-| Sentry                      | Frontend and Worker error monitoring                    |
-| Better Stack Uptime         | External uptime monitoring                              |
-| Better Stack Telemetry Logs | Centralized structured logging                          |
+### Controller Worker
+
+A controller Worker can trigger one shard at a time.
+
+This allows the system to spread work across time instead of running every shard at once.
+
+### Duplicate review protection
+
+NutsNews stores article review history.
+
+That means previously reviewed stories do not need to be sent back to OpenAI repeatedly.
+
+This improves reliability and reduces cost.
+
+### Rejected article tracking
+
+Rejected stories are also tracked.
+
+This prevents the system from spending money and compute reviewing the same bad-fit article over and over.
+
+### External uptime monitoring
+
+Better Stack Uptime checks whether the public site is reachable from outside the platform.
+
+### Application error monitoring
+
+Sentry tracks frontend, runtime, and Worker errors so failures can be investigated quickly.
+
+### Structured centralized logs
+
+Better Stack logs provide a searchable record of what the web app, Worker shards, and controller are doing.
+
+---
+
+## Cost Highlights
+
+NutsNews is intentionally designed to be inexpensive to run.
+
+The architecture uses free-tier or low-cost services where possible.
+
+| Service             | Role                            | Cost Goal         |
+| ------------------- | ------------------------------- | ----------------- |
+| Vercel              | Hosts the Next.js website       | Free tier         |
+| Cloudflare CDN      | DNS, cache, and edge protection | Free tier         |
+| Cloudflare Workers  | RSS automation and controller   | Free tier         |
+| Supabase            | Postgres database               | Free tier         |
+| Better Stack Uptime | External uptime monitoring      | Free tier         |
+| Better Stack Logs   | Centralized structured logs     | Free tier         |
+| Sentry              | Error monitoring                | Free tier         |
+| GitHub              | Source control                  | Free              |
+| OpenAI              | AI review and summaries         | Usage-based       |
+| Domain              | Public site domain              | Fixed yearly cost |
+
+The current fixed cost is designed to stay very low, with the domain as the main predictable expense.
+
+OpenAI is the main variable cost, so the system includes several protections:
+
+* Local filtering before AI
+* Duplicate URL detection
+* Accepted article review caching
+* Rejected article review caching
+* Shard-level review limits
+* Batch database operations
+
+These choices help keep the platform affordable even as the number of RSS feeds grows.
+
+---
+
+## Maintenance Highlights
+
+NutsNews is structured so the system can be maintained without constantly changing core code.
+
+### RSS feeds live in the database
+
+RSS feed configuration can be stored in Supabase.
+
+This makes it possible to add, disable, or adjust feeds without rewriting the ingestion engine.
+
+### Worker shards share one codebase
+
+Each Worker shard runs the same source code.
+
+Only the shard configuration changes.
+
+This keeps the automation easier to maintain because improvements can be made once and deployed across all shards.
+
+### Generated Worker configs
+
+Shard Wrangler configs are generated from a script.
+
+This avoids manually maintaining many nearly identical Cloudflare Worker configuration files.
+
+### Secrets are centralized
+
+Worker secrets can be stored in Cloudflare Secrets Store.
+
+This allows the same secret values to be reused across many Worker shards without manually copying them into each Worker.
+
+### Logs are structured
+
+Structured logs make maintenance easier because events can be searched by known fields like:
+
+* `service`
+* `level`
+* `event`
+* `shardIndex`
+* `durationMs`
+* `status`
+
+This is much easier to search than plain text logs.
+
+### Monitoring is layered
+
+NutsNews uses multiple observability layers:
+
+* Better Stack Uptime for availability
+* Better Stack Logs for centralized activity logs
+* Sentry for application errors
+* Cloudflare for CDN and Worker visibility
+* Vercel for deployment visibility
+* Supabase for database visibility
+
+Each tool answers a different operational question.
+
+---
+
+## Extendability Highlights
+
+The project is built to grow gradually.
+
+### Add more RSS feeds
+
+The platform can expand by adding more sources.
+
+As the source list grows, feeds can be spread across additional Worker shards.
+
+### Add more categories
+
+The AI classification workflow can support new editorial categories over time.
+
+Possible future categories include:
+
+* Good deeds
+* Education
+* Family
+* Local heroes
+* Environment
+* Health breakthroughs
+* Arts and creativity
+
+### Add newsletters
+
+The same article data can power a daily or weekly positive-news email digest.
+
+### Add topic pages
+
+Categories can become landing pages for readers who prefer specific types of uplifting stories.
+
+### Add personalization
+
+Future versions could allow readers to prefer topics like animals, science, travel, or wellness.
+
+### Add social publishing
+
+Approved stories could be repurposed into short posts for social channels.
+
+### Add an editorial dashboard
+
+A future dashboard could allow manual review, feed management, source scoring, and article moderation.
+
+### Add multi-language support
+
+The platform could eventually translate summaries or support uplifting stories from other regions.
+
+The important point is that the current architecture does not lock the project into one narrow use case. It creates a foundation.
+
+---
+
+## Tech Stack
+
+### Frontend
+
+| Technology   | Purpose                          |
+| ------------ | -------------------------------- |
+| Next.js      | Public website and article pages |
+| React        | Interactive feed experience      |
+| TypeScript   | Safer application code           |
+| Tailwind CSS | Mobile-first styling             |
+| Vercel       | Frontend hosting and deployment  |
+
+### Automation
+
+| Technology               | Purpose                                  |
+| ------------------------ | ---------------------------------------- |
+| Cloudflare Workers       | RSS ingestion and automation             |
+| Cloudflare Worker Shards | Split RSS processing across many workers |
+| Controller Worker        | Coordinates shard execution              |
+| Wrangler                 | Worker deployment and configuration      |
+| Cloudflare Secrets Store | Shared secrets for Worker shards         |
+
+### Data
+
+| Technology        | Purpose                           |
+| ----------------- | --------------------------------- |
+| Supabase          | Hosted Postgres database          |
+| Postgres          | Article, feed, and review storage |
+| Supabase REST API | Worker-to-database communication  |
+
+### AI
+
+| Technology | Purpose                                                                |
+| ---------- | ---------------------------------------------------------------------- |
+| OpenAI     | Article filtering, scoring, category selection, and summary generation |
+
+### Performance and Delivery
+
+| Technology          | Purpose                            |
+| ------------------- | ---------------------------------- |
+| Cloudflare CDN      | Public caching and edge delivery   |
+| Vercel Edge Network | Frontend delivery                  |
+| Cache headers       | Control freshness and CDN behavior |
+
+### Observability
+
+| Technology                  | Purpose                                    |
+| --------------------------- | ------------------------------------------ |
+| Better Stack Uptime         | External uptime monitoring                 |
+| Better Stack Telemetry Logs | Centralized structured logging             |
+| Sentry                      | Application error monitoring               |
+| Cloudflare Analytics        | CDN, security, and Worker visibility       |
+| Vercel Logs                 | Deployment and frontend runtime visibility |
+
+### Source Control
+
+| Technology | Purpose                                        |
+| ---------- | ---------------------------------------------- |
+| GitHub     | Repository, collaboration, and version history |
+
+---
+
+## Core Components
+
+### `web`
+
+The public website.
+
+It presents the mobile feed, article pages, About page, SEO metadata, structured data, CDN-friendly responses, frontend error tracking, and web application logs.
+
+### `worker`
+
+The automated ingestion engine.
+
+It fetches RSS feeds, parses articles, filters unsuitable candidates, calls OpenAI for review, stores review decisions, publishes accepted articles, and logs structured activity.
+
+### `controller`
+
+The orchestration layer.
+
+It can trigger Worker shards in a controlled way so the system does not need every shard to run at once.
+
+### `supabase`
+
+The data layer.
+
+It stores RSS feeds, AI review history, accepted articles, rejected articles, categories, summaries, timestamps, and source links.
+
+### `README.md`
+
+The project guide.
+
+It explains what NutsNews is, why it exists, how it is designed, and what makes the platform valuable.
 
 ---
 
@@ -296,51 +530,19 @@ Readers click through to original publishers
 nutsnews/
 ├── web/
 │   ├── app/
-│   │   ├── page.tsx
-│   │   ├── layout.tsx
-│   │   ├── globals.css
-│   │   ├── about/
-│   │   │   └── page.tsx
-│   │   ├── articles/
-│   │   │   └── [id]/
-│   │   │       └── page.tsx
-│   │   ├── api/
-│   │   │   ├── articles/
-│   │   │   │   └── route.ts
-│   │   │   └── log-test/
-│   │   │       └── route.ts
-│   │   ├── components/
-│   │   │   ├── ArticleFeed.tsx
-│   │   │   └── SiteFooter.tsx
-│   │   ├── global-error.tsx
-│   │   └── sentry-test/
-│   │       └── page.tsx
 │   ├── lib/
-│   │   ├── articles.ts
-│   │   ├── logger.ts
-│   │   └── supabase.ts
 │   ├── public/
-│   ├── instrumentation.ts
-│   ├── instrumentation-client.ts
-│   ├── sentry.server.config.ts
-│   ├── sentry.edge.config.ts
 │   ├── next.config.ts
 │   └── package.json
 │
 ├── worker/
 │   ├── src/
-│   │   ├── index.ts
-│   │   └── logger.ts
 │   ├── scripts/
-│   │   └── generate-wrangler-config.mjs
 │   ├── generated-wrangler/
-│   │   └── wrangler.shard*.jsonc
 │   └── package.json
 │
 ├── controller/
 │   ├── src/
-│   │   ├── index.ts
-│   │   └── logger.ts
 │   ├── wrangler.jsonc
 │   └── package.json
 │
@@ -351,415 +553,118 @@ nutsnews/
 └── README.md
 ```
 
-Some deployed Worker/controller files may exist locally before being pushed to GitHub.
+---
 
-The intended long-term structure keeps shared logic in one codebase and uses configuration for scaling.
+## Data Model Summary
+
+NutsNews uses a simple data model.
+
+### RSS feeds
+
+Stores the sources that the platform reads from.
+
+This allows feeds to be added, disabled, or organized without changing the whole system.
+
+### Article AI reviews
+
+Stores the AI decision for each reviewed article.
+
+This includes whether the article was accepted or rejected, why it was classified that way, what category it belongs to, and what positivity score it received.
+
+This is important because it prevents repeated AI review for the same story.
+
+### Published articles
+
+Stores the stories shown on the public website.
+
+Each published article keeps the original source URL so readers can go back to the publisher.
 
 ---
 
-## Frontend Web App
+## AI Curation Model
 
-The `web` app is the public NutsNews website. It is built with Next.js and designed around a mobile-first article feed.
+AI is used as a focused editorial assistant.
 
-### Responsibilities
+For each eligible article, the system asks whether the article fits the NutsNews mission.
 
-* Load published articles from Supabase
-* Load available categories
-* Render the homepage
-* Render the About page
-* Render individual article pages
-* Support category filtering
-* Support infinite scrolling
-* Show generated fallback thumbnails when articles do not include images
-* Link every story to the original publisher
-* Provide SEO metadata and structured data
-* Capture frontend/browser errors through Sentry
-* Capture global Next.js runtime errors through Sentry
-* Send cache-friendly headers for public content
-* Send structured application logs to Better Stack
+The AI helps decide:
 
-### Important files
+* Should this article be accepted?
+* What category does it belong to?
+* How positive is it?
+* What short summary should appear on the site?
+* Why was it accepted or rejected?
 
-| File                                 | Purpose                                         |
-| ------------------------------------ | ----------------------------------------------- |
-| `web/app/page.tsx`                   | Homepage and initial article loading            |
-| `web/app/about/page.tsx`             | Project About page                              |
-| `web/app/articles/[id]/page.tsx`     | Individual article page                         |
-| `web/app/components/ArticleFeed.tsx` | Interactive story feed component                |
-| `web/app/api/articles/route.ts`      | Paginated article API with structured logs      |
-| `web/app/api/log-test/route.ts`      | Better Stack logging test endpoint              |
-| `web/lib/articles.ts`                | Supabase data helpers with structured logs      |
-| `web/lib/logger.ts`                  | Better Stack structured logger                  |
-| `web/lib/supabase.ts`                | Supabase client                                 |
-| `web/instrumentation-client.ts`      | Sentry browser/client configuration             |
-| `web/instrumentation.ts`             | Next.js instrumentation hook for Sentry         |
-| `web/sentry.server.config.ts`        | Sentry server runtime configuration             |
-| `web/sentry.edge.config.ts`          | Sentry edge runtime configuration               |
-| `web/app/global-error.tsx`           | Captures global app errors with Sentry          |
-| `web/app/sentry-test/page.tsx`       | Local and production Sentry validation page     |
-| `web/next.config.ts`                 | Next.js, Sentry, and cache header configuration |
-
-### Rendering and caching model
-
-The homepage and article API are configured to avoid `force-dynamic` and avoid `no-store` cache headers.
-
-The public content uses short revalidation windows so the site stays fresh while still allowing CDN caching:
-
-```text
-Homepage: /                         revalidate = 300
-Article API: /api/articles          revalidate = 300
-Article pages: /articles/[id]       revalidate = 3600
-```
-
-This supports Cloudflare caching while keeping the feed updated regularly.
+The AI is not used to copy full publisher articles. It is used to create short original summaries and support discovery.
 
 ---
 
-## Cloudflare CDN and Cache Optimization
+## Source-Friendly Publishing
 
-NutsNews can use Cloudflare in front of the Vercel-hosted frontend.
+NutsNews is intentionally source-friendly.
 
-The CDN setup is intended to cache public pages and public article API responses while bypassing monitoring and non-cacheable routes.
+The platform does not try to replace the original article.
 
-### Important Vercel note
+It stores and displays:
 
-Vercel already has its own global edge network. Putting Cloudflare in front of Vercel is a reverse-proxy setup. This can work, but if it causes domain, firewall, bot protection, or cache issues, switch Cloudflare DNS records from `Proxied` to `DNS only`.
+* The original title
+* The source name
+* A short original summary
+* The category
+* The article image when available
+* The link back to the original publisher
 
-NutsNews uses Cloudflare intentionally for:
-
-* DNS management
-* CDN cache rules
-* Edge protection
-* Cache analytics
-* Faster repeat responses for public pages
-* Reduced repeated hits to Vercel origin
-
-### Cloudflare request flow
-
-```text
-Reader Browser
-  ↓
-Cloudflare DNS and CDN
-  ↓
-Cloudflare Cache Rule
-  ↓
-Vercel Edge / Next.js
-  ↓
-Supabase, only when server-rendered data is needed
-```
-
-### DNS records
-
-In Cloudflare:
-
-```text
-Cloudflare
-→ nutsnews.com
-→ DNS
-→ Records
-```
-
-Recommended records:
-
-```text
-Type: A
-Name: @
-IPv4 address: 76.76.21.21
-Proxy status: Proxied
-TTL: Auto
-```
-
-```text
-Type: CNAME
-Name: www
-Target: cname.vercel-dns-0.com
-Proxy status: Proxied
-TTL: Auto
-```
-
-Use the exact values shown in Vercel if they differ:
-
-```text
-Vercel
-→ Project
-→ Settings
-→ Domains
-```
-
-Do not delete email records such as:
-
-```text
-MX
-TXT
-SPF
-DKIM
-DMARC
-```
-
-### SSL/TLS settings
-
-In Cloudflare:
-
-```text
-SSL/TLS
-→ Overview
-```
-
-Use:
-
-```text
-Full (strict)
-```
-
-Then go to:
-
-```text
-SSL/TLS
-→ Edge Certificates
-```
-
-Enable:
-
-```text
-Always Use HTTPS: On
-Automatic HTTPS Rewrites: On
-```
-
-If Cloudflare returns a `526` error, the origin certificate is not being validated by Cloudflare. Confirm the domain is correctly configured in Vercel and that Vercel has issued a certificate for the domain.
-
-### Cacheable routes
-
-These routes are safe to cache for short periods:
-
-```text
-/
-/about
-/articles/*
-/api/articles*
-```
-
-The article API response changes as new articles are published, so it uses a short TTL and stale-while-revalidate behavior.
-
-### Routes to bypass
-
-These routes should not be cached:
-
-```text
-/monitoring*
-/api/log-test*
-```
-
-The `/monitoring` route is used by the Sentry tunnel and should remain uncached.
-
-The `/api/log-test` route is used to validate Better Stack logging and should remain uncached.
-
-Future private/admin/auth routes should also bypass CDN cache.
-
-Examples:
-
-```text
-/admin*
-/login*
-/api/private*
-/api/admin*
-```
-
-### Cloudflare Cache Rule: public content
-
-Create this rule in:
-
-```text
-Cloudflare
-→ nutsnews.com
-→ Caching
-→ Cache Rules
-→ Create rule
-```
-
-Rule name:
-
-```text
-Cache NutsNews public content
-```
-
-Expression:
-
-```text
-(http.host in {"nutsnews.com" "www.nutsnews.com"} and (http.request.uri.path eq "/" or http.request.uri.path eq "/about" or starts_with(http.request.uri.path, "/articles/") or starts_with(http.request.uri.path, "/api/articles")))
-```
-
-Settings:
-
-```text
-Cache eligibility: Eligible for cache
-Edge TTL: Use cache-control header if present, bypass cache if not
-Browser TTL: Respect origin
-```
-
-### Cloudflare Cache Rule: bypass monitoring and log test routes
-
-Create this rule above the public cache rule.
-
-Rule name:
-
-```text
-Bypass monitoring and log test routes
-```
-
-Expression:
-
-```text
-(http.host in {"nutsnews.com" "www.nutsnews.com"} and (starts_with(http.request.uri.path, "/monitoring") or starts_with(http.request.uri.path, "/api/log-test")))
-```
-
-Settings:
-
-```text
-Cache eligibility: Bypass cache
-```
-
-### App cache headers
-
-The frontend should send public cache headers for cacheable routes.
-
-Recommended header:
-
-```text
-Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
-```
-
-For the article API, also send CDN-specific headers:
-
-```text
-Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
-CDN-Cache-Control: public, max-age=300, stale-while-revalidate=3600
-Vercel-CDN-Cache-Control: public, s-maxage=300, stale-while-revalidate=3600
-```
-
-Do not use these on public routes that should be cached:
-
-```text
-private
-no-cache
-no-store
-must-revalidate
-```
-
-If the response includes `private, no-cache, no-store`, Cloudflare will bypass cache.
-
-### Relevant source files for CDN caching
-
-| File                             | CDN-related purpose                                            |
-| -------------------------------- | -------------------------------------------------------------- |
-| `web/app/page.tsx`               | Removes `force-dynamic`, sets `revalidate = 300`               |
-| `web/app/api/articles/route.ts`  | Removes `no-store`, sets public API cache headers              |
-| `web/app/articles/[id]/page.tsx` | Sets article page `revalidate = 3600`                          |
-| `web/next.config.ts`             | Adds cache headers for public pages and static metadata routes |
-
-### Validate Cloudflare CDN
-
-After deployment and Cloudflare cache purge, run:
-
-```bash
-curl -I https://www.nutsnews.com/
-```
-
-Expected healthy signs:
-
-```text
-server: cloudflare
-cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
-```
-
-First request may show:
-
-```text
-cf-cache-status: MISS
-```
-
-After repeat requests, the goal is:
-
-```text
-cf-cache-status: HIT
-```
-
-Test the article API:
-
-```bash
-curl -I "https://www.nutsnews.com/api/articles?page=0"
-```
-
-Good result:
-
-```text
-cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
-cf-cache-status: HIT
-```
-
-Bad result:
-
-```text
-cache-control: private, no-cache, no-store, max-age=0, must-revalidate
-cf-cache-status: BYPASS
-```
-
-If that bad result appears, check for these in the Next.js code:
-
-```text
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
-Cache-Control: no-store
-```
-
-### Purge Cloudflare cache after deploys
-
-After cache-related deploys:
-
-```text
-Cloudflare
-→ nutsnews.com
-→ Caching
-→ Purge Cache
-→ Purge Everything
-```
-
-For smaller changes, purge only:
-
-```text
-https://www.nutsnews.com/
-https://www.nutsnews.com/about
-https://www.nutsnews.com/api/articles?page=0
-```
-
-### Helpful Cloudflare speed settings
-
-Recommended free settings:
-
-```text
-Speed → Optimization:
-Brotli / Compression: On
-Early Hints: On
-HTTP/3: On
-
-Caching → Tiered Cache:
-Tiered Cache: On
-```
+This approach supports discovery while respecting the original publisher’s role.
 
 ---
 
-## Centralized Logging with Better Stack
+## Observability Story
 
-NutsNews uses Better Stack Telemetry Logs as a centralized logging destination.
+NutsNews is built with observability from the start.
 
-The current Better Stack source/resource is:
+A fully automated system needs visibility. If no human is manually publishing every article, the platform needs to explain what it is doing.
 
-```text
-nutsnews
-```
+That is why NutsNews uses:
 
-All services can send logs into the same Better Stack source. The structured `service` field separates logs by runtime.
+### Better Stack Uptime
 
-Current service names:
+To answer:
+
+> Is the site reachable?
+
+### Better Stack Logs
+
+To answer:
+
+> What happened inside the app, Worker, or controller?
+
+### Sentry
+
+To answer:
+
+> What errors happened in production?
+
+### Cloudflare
+
+To answer:
+
+> Is traffic being cached? Are Workers running? Are edge errors happening?
+
+### Supabase
+
+To answer:
+
+> What data was stored? Which articles were reviewed or published?
+
+Together, these tools make the platform easier to operate and improve.
+
+---
+
+## Centralized Logging
+
+NutsNews sends structured logs to Better Stack.
+
+The current logging model separates services with a `service` field:
 
 ```text
 nutsnews-web
@@ -767,1659 +672,201 @@ nutsnews-worker
 nutsnews-controller
 ```
 
-### Why centralized logs were added
-
-Centralized logs help answer questions like:
-
-* Did the Worker run?
-* Which shard failed?
-* How many articles were fetched?
-* How many articles were accepted or rejected?
-* Did Supabase return an error?
-* Did OpenAI return invalid JSON?
-* Did the article API fail?
-* Did the controller call the correct shard?
-* How long did each step take?
-* Are warnings or errors increasing?
-
-### Structured log format
-
-Logs are sent as JSON.
-
-Example Worker log:
-
-```json
-{
-  "dt": "2026-06-13T12:00:00.000Z",
-  "level": "info",
-  "service": "nutsnews-worker",
-  "environment": "production",
-  "event": "worker.refresh.completed",
-  "message": "NutsNews Worker refresh completed",
-  "shardIndex": "0",
-  "feedCount": 20,
-  "fetchedCount": 120,
-  "candidateCount": 120,
-  "alreadyReviewedCount": 80,
-  "unreviewedCount": 40,
-  "locallyRejectedCount": 10,
-  "eligibleForAiCount": 30,
-  "aiReviewedCount": 12,
-  "acceptedCount": 4,
-  "rejectedCount": 18,
-  "durationMs": 8421
-}
-```
-
-Example web log:
-
-```json
-{
-  "dt": "2026-06-13T12:00:00.000Z",
-  "level": "info",
-  "service": "nutsnews-web",
-  "environment": "production",
-  "event": "api.articles.request_completed",
-  "message": "Articles API request completed",
-  "route": "/api/articles",
-  "method": "GET",
-  "status": 200,
-  "page": 0,
-  "category": "all",
-  "articleCount": 5,
-  "durationMs": 143
-}
-```
-
-Example controller log:
-
-```json
-{
-  "dt": "2026-06-13T12:00:00.000Z",
-  "level": "info",
-  "service": "nutsnews-controller",
-  "environment": "production",
-  "event": "controller.shard.call_completed",
-  "message": "Controller shard call completed",
-  "requestId": "example-request-id",
-  "shardIndex": 17,
-  "shardUrl": "https://nutsnews-worker-17.nutsnews.workers.dev/?limit=12",
-  "ok": true,
-  "status": 200,
-  "durationMs": 2734
-}
-```
-
-### Log levels
-
-The platform uses these log levels:
-
-| Level   | Meaning                                |
-| ------- | -------------------------------------- |
-| `debug` | Extra detail for debugging             |
-| `info`  | Normal successful activity             |
-| `warn`  | Recoverable issue or unexpected status |
-| `error` | Failed operation or thrown exception   |
-
-### Better Stack search examples
-
-In Better Stack Live tail or Explore, search by service:
-
-```text
-service:nutsnews-web
-service:nutsnews-worker
-service:nutsnews-controller
-```
-
-Search for Worker errors:
-
-```text
-service:nutsnews-worker level:error
-```
-
-Search for Worker warnings:
-
-```text
-service:nutsnews-worker level:warn
-```
-
-Search for a specific shard:
-
-```text
-service:nutsnews-worker shardIndex:0
-```
-
-Search for completed Worker refreshes:
-
-```text
-event:worker.refresh.completed
-```
-
-Search for failed Worker refreshes:
-
-```text
-event:worker.request.failed
-event:worker.scheduled.failed
-event:worker.refresh.failed
-```
-
-Search for web article API requests:
-
-```text
-service:nutsnews-web event:api.articles.request_completed
-```
-
-Search for Supabase article load errors:
-
-```text
-event:supabase.articles.load_failed
-```
-
-Search for controller shard calls:
-
-```text
-service:nutsnews-controller event:controller.shard.call_completed
-```
-
-Search all production errors:
-
-```text
-environment:production level:error
-```
-
-### Logging source files
-
-| File                                          | Purpose                                                                                     |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `web/lib/logger.ts`                           | Sends structured web logs to Better Stack                                                   |
-| `web/lib/articles.ts`                         | Logs Supabase article/category/sitemap load success and failure                             |
-| `web/app/api/articles/route.ts`               | Logs article API request lifecycle                                                          |
-| `web/app/api/log-test/route.ts`               | Emits test web logs                                                                         |
-| `worker/src/logger.ts`                        | Sends structured Worker logs to Better Stack                                                |
-| `worker/src/index.ts`                         | Logs RSS fetches, filtering, OpenAI review, Supabase saves, manual runs, and scheduled runs |
-| `worker/scripts/generate-wrangler-config.mjs` | Binds Better Stack Secrets Store values into every shard config                             |
-| `controller/src/logger.ts`                    | Sends structured controller logs to Better Stack                                            |
-| `controller/src/index.ts`                     | Logs controller requests, shard calls, scheduled runs, and failures                         |
-
-### Better Stack environment variables
-
-The web app, Worker shards, and controller need:
-
-```env
-BETTER_STACK_SOURCE_TOKEN=
-BETTER_STACK_INGESTING_HOST=
-```
-
-Do not prefix these with `NEXT_PUBLIC_`.
-
-Do not include `Bearer` in `BETTER_STACK_SOURCE_TOKEN`.
-
-The ingesting host can be stored like:
-
-```env
-BETTER_STACK_INGESTING_HOST=s123456.eu-nbg-2.betterstackdata.com
-```
-
-The logger supports the host with or without `https://`.
-
-### Web app setup
-
-In Vercel:
-
-```text
-Vercel
-→ NutsNews project
-→ Settings
-→ Environment Variables
-```
-
-Add:
-
-```env
-BETTER_STACK_SOURCE_TOKEN=your_source_token
-BETTER_STACK_INGESTING_HOST=your_ingesting_host
-```
-
-Then redeploy the site.
-
-Test:
-
-```bash
-curl https://www.nutsnews.com/api/log-test
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-web
-event:api.log_test.completed
-level:info
-```
-
-### Worker Secrets Store setup
-
-Worker shards use Cloudflare Secrets Store.
-
-Set the store ID locally:
-
-```bash
-cd worker
-export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
-```
-
-Create the Better Stack secrets:
-
-```bash
-npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" \
-  --name BETTER_STACK_SOURCE_TOKEN \
-  --scopes workers \
-  --remote
-```
-
-```bash
-npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" \
-  --name BETTER_STACK_INGESTING_HOST \
-  --scopes workers \
-  --remote
-```
-
-If the secrets already exist, edit them in:
-
-```text
-Cloudflare
-→ Secrets Store
-→ BETTER_STACK_SOURCE_TOKEN
-→ Edit
-```
-
-and:
-
-```text
-Cloudflare
-→ Secrets Store
-→ BETTER_STACK_INGESTING_HOST
-→ Edit
-```
-
-Regenerate Worker shard configs:
-
-```bash
-npm run generate:wrangler
-```
-
-Verify Better Stack bindings exist:
-
-```bash
-grep -n "BETTER_STACK" generated-wrangler/wrangler.shard0.jsonc
-```
-
-Expected result:
-
-```text
-BETTER_STACK_SOURCE_TOKEN
-BETTER_STACK_INGESTING_HOST
-```
-
-Deploy all Worker shards:
-
-```bash
-npm run deploy:all
-```
-
-Test Worker logging:
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-worker
-event:worker.log_test.completed
-level:info
-shardIndex:0
-```
-
-### Controller setup
-
-The controller can use regular Cloudflare Worker secrets or Secrets Store, depending on the deployed config.
-
-Using regular Worker secrets:
-
-```bash
-cd controller
-npx wrangler secret put BETTER_STACK_SOURCE_TOKEN
-npx wrangler secret put BETTER_STACK_INGESTING_HOST
-npm run deploy
-```
-
-Test:
-
-```bash
-curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-controller
-event:controller.request_completed
-```
-
-### Local logging test
-
-For local web logs, create:
-
-```text
-web/.env.local
-```
-
-Add:
-
-```env
-BETTER_STACK_SOURCE_TOKEN=your_source_token
-BETTER_STACK_INGESTING_HOST=your_ingesting_host
-NEXT_PUBLIC_APP_ENV=local
-```
-
-Run:
-
-```bash
-cd web
-npm run dev
-```
-
-Test:
-
-```bash
-curl http://localhost:3000/api/log-test
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-web environment:local
-event:api.log_test.completed
-```
-
-For local Worker logs, create:
-
-```text
-worker/.dev.vars
-```
-
-Add:
-
-```env
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-OPENAI_API_KEY=your_openai_key
-BETTER_STACK_SOURCE_TOKEN=your_source_token
-BETTER_STACK_INGESTING_HOST=your_ingesting_host
-FEED_SHARD_INDEX=0
-FEEDS_PER_SHARD=20
-```
-
-Run:
-
-```bash
-cd worker
-npm run dev
-```
-
-Test:
-
-```bash
-curl http://localhost:8787/log-test
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-worker
-event:worker.log_test.completed
-```
-
-Do not commit:
-
-```text
-web/.env.local
-worker/.dev.vars
-controller/.dev.vars
-```
-
-### Troubleshooting Better Stack logs
-
-If `/log-test` returns OK but logs do not appear in Better Stack:
-
-1. Make sure you are looking inside the `nutsnews` Better Stack source.
-2. Search for `service:nutsnews-worker`, not a separate resource name.
-3. Check the time range is recent or use Live tail.
-4. Run:
-
-```bash
-cd worker
-npx wrangler tail nutsnews-worker-0
-```
-
-Then call:
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
-```
-
-Look for:
-
-```text
-better_stack.delivery_failed
-```
-
-If that appears, the Worker could not send to Better Stack.
-
-Common causes:
-
-* Wrong Better Stack source token
-* Wrong ingesting host
-* Missing Secrets Store binding in generated Wrangler config
-* Worker shard was not redeployed after config generation
-* Looking in the wrong Better Stack source or time range
+This makes it easy to search for logs by application area.
+
+Important log fields include:
+
+| Field           | Purpose                                    |
+| --------------- | ------------------------------------------ |
+| `level`         | Severity such as info, warn, or error      |
+| `service`       | Which part of the platform created the log |
+| `event`         | What happened                              |
+| `message`       | Human-readable summary                     |
+| `environment`   | Production, preview, or local              |
+| `shardIndex`    | Which Worker shard produced the log        |
+| `durationMs`    | How long an operation took                 |
+| `status`        | Request or operation status                |
+| `acceptedCount` | Number of accepted articles                |
+| `rejectedCount` | Number of rejected articles                |
+
+This makes the system much easier to troubleshoot than plain text logs.
 
 ---
 
-## RSS Ingestion Worker
+## Performance Story
 
-The ingestion Worker is responsible for discovering, filtering, reviewing, and saving articles.
+Performance is not handled by one tool. It is handled by the whole design.
 
-### Main workflow
+NutsNews improves performance by:
 
-```text
-Fetch RSS feeds
-  ↓
-Parse RSS or Atom XML
-  ↓
-Extract title, URL, excerpt, date, and image
-  ↓
-Normalize article URLs
-  ↓
-Remove duplicate URLs
-  ↓
-Score candidates
-  ↓
-Check previously reviewed URLs
-  ↓
-Apply local hard-negative filter
-  ↓
-Send eligible articles to OpenAI
-  ↓
-Save all review decisions
-  ↓
-Publish accepted articles
-  ↓
-Emit structured Better Stack logs
-  ↓
-Capture Worker failures and important warnings with Sentry/Cloudflare logs
-```
+* Caching public pages at Cloudflare
+* Using Vercel for frontend delivery
+* Keeping the mobile UI lightweight
+* Avoiding unnecessary repeated AI calls
+* Avoiding repeated database inserts
+* Splitting RSS processing across Worker shards
+* Returning cached API responses when possible
 
-### Article metadata extracted from feeds
-
-The Worker attempts to extract:
-
-* Source name
-* Article title
-* Original URL
-* Excerpt or description
-* Published date
-* RSS image or thumbnail URL
-
-### URL normalization
-
-The Worker removes common tracking parameters such as:
-
-* `utm_source`
-* `utm_medium`
-* `utm_campaign`
-* `utm_content`
-* `fbclid`
-* `gclid`
-* `mc_cid`
-* `mc_eid`
-
-This helps reduce duplicate reviews and duplicate article rows.
-
-### Worker observability
-
-The Worker reports important events and failures to Better Stack, including:
-
-* Manual request start/completion/failure
-* Scheduled request start/completion/failure
-* RSS feed fetch success/failure
-* Supabase review lookup success/failure
-* Supabase article/review save success/failure
-* OpenAI classification success/failure
-* Invalid OpenAI JSON responses
-* Local filter counts
-* Accepted/rejected article counts
-* Shard index
-* Duration in milliseconds
-
-The Worker also includes a test route:
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
-```
-
-The Worker Sentry test route remains:
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/sentry-test"
-```
-
-That route intentionally throws an error to validate Worker error monitoring.
+The result is a site that can stay simple while still being prepared for more traffic.
 
 ---
 
-## Sharded Worker Design
+## Resiliency Story
 
-The platform is designed to scale across hundreds of RSS feeds.
+Resiliency means the platform can keep working even when one part has a problem.
 
-Instead of one Worker trying to read every feed, RSS sources can be split into shards.
+NutsNews improves resiliency by:
 
-Example:
+* Using managed hosting instead of self-managed servers
+* Splitting RSS processing into Worker shards
+* Tracking reviewed URLs to avoid repeated work
+* Using a controller to coordinate shard execution
+* Monitoring uptime externally
+* Capturing application errors
+* Logging Worker activity centrally
+* Keeping the public website cacheable
 
-```text
-500 feeds
-20 feeds per shard
-25 Worker shards
-```
-
-Each shard runs the same code.
-
-Only these variables change:
-
-```text
-FEED_SHARD_INDEX
-FEEDS_PER_SHARD
-```
-
-### Shard math
-
-```text
-offset = FEED_SHARD_INDEX × FEEDS_PER_SHARD
-limit = FEEDS_PER_SHARD
-```
-
-Examples:
-
-```text
-shard 0  → feeds 1–20
-shard 1  → feeds 21–40
-shard 2  → feeds 41–60
-shard 17 → feeds 341–360
-shard 24 → feeds 481–500
-```
-
-### Why this design matters
-
-This allows the platform to:
-
-* Add more RSS feeds without changing core Worker logic
-* Avoid overloading a single Worker invocation
-* Stay closer to free-tier limits
-* Keep process updates centralized
-* Deploy the same source code across many Worker instances
-* Monitor individual shard failures through Sentry, Cloudflare logs, and Better Stack logs
-
-### Generated Wrangler configs
-
-Shard Wrangler configs are generated from:
-
-```text
-worker/scripts/generate-wrangler-config.mjs
-```
-
-The generated configs include:
-
-```jsonc
-"compatibility_flags": ["nodejs_compat"]
-```
-
-The generated configs also include Secrets Store bindings for:
-
-```text
-SUPABASE_URL
-SUPABASE_SERVICE_ROLE_KEY
-OPENAI_API_KEY
-BETTER_STACK_SOURCE_TOKEN
-BETTER_STACK_INGESTING_HOST
-```
-
-This allows every shard to access the same account-level Cloudflare Secrets Store values.
+The platform does not depend on one long-running server or one manual publishing process.
 
 ---
 
-## Controller Worker
+## Cost Story
 
-The controller Worker is an optional orchestration layer.
+NutsNews is designed to stay affordable.
 
-Instead of giving every shard its own cron trigger, the controller can run on a schedule and call one shard per run.
+The platform uses free-tier-friendly services wherever possible:
 
-### Controller flow
+* Vercel for the website
+* Cloudflare Workers for automation
+* Cloudflare CDN for caching
+* Supabase for the database
+* Better Stack for uptime and logs
+* Sentry for error monitoring
+* GitHub for source control
 
-```text
-Controller receives request or scheduled event
-  ↓
-Determines which shard should run
-  ↓
-Builds shard URL
-  ↓
-Calls nutsnews-worker-{index}.workers.dev
-  ↓
-Logs structured controller and shard-call data to Better Stack
-  ↓
-Returns or logs the shard result
-```
+OpenAI is the main usage-based cost, so the system is designed to reduce unnecessary AI calls.
 
-### Example controller URL
+The key cost-saving idea is simple:
 
-```text
-https://nutsnews-controller.nutsnews.workers.dev/
-```
-
-### Manual shard test
-
-```bash
-curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=17"
-```
-
-### Automatic shard selection
-
-Automatic mode selects a shard based on time:
-
-```text
-shardIndex = floor(currentTime / interval) % shardCount
-```
-
-With 25 shards and a 5-minute interval:
-
-```text
-25 shards × 5 minutes = each shard runs about every 125 minutes
-```
-
-### Worker-to-Worker fetch
-
-When the controller calls public `workers.dev` shard URLs from another Worker, the controller may need the Cloudflare compatibility flag:
-
-```jsonc
-"compatibility_flags": ["global_fetch_strictly_public"]
-```
+> Review each article once, remember the decision, and avoid paying to review the same story again.
 
 ---
 
-## Database Design
+## Maintenance Story
 
-NutsNews uses Supabase Postgres.
+NutsNews is meant to be maintainable by a small team or even one person.
 
-### `rss_feeds`
+The system supports this by:
 
-Stores RSS feed configuration.
+* Keeping the frontend separate from the ingestion pipeline
+* Keeping feed configuration in the database
+* Using one Worker codebase for many shards
+* Generating shard configs automatically
+* Centralizing Worker secrets
+* Centralizing logs
+* Monitoring errors through Sentry
+* Monitoring uptime through Better Stack
+* Keeping the public site source-friendly and simple
 
-Suggested schema:
-
-```sql
-create table if not exists rss_feeds (
-  id bigserial primary key,
-  source text not null,
-  url text not null unique,
-  is_active boolean not null default true,
-  is_positive_source boolean not null default false,
-  created_at timestamptz not null default now()
-);
-
-create index if not exists rss_feeds_active_id_idx
-on rss_feeds (is_active, id);
-```
-
-Purpose:
-
-* Store RSS feeds outside source code
-* Add feeds without redeploying Worker code
-* Disable feeds without deleting them
-* Mark known positive sources
-* Support shard loading with `limit` and `offset`
-
-### `article_ai_reviews`
-
-Stores every article review decision.
-
-Common fields:
-
-* `original_url`
-* `source`
-* `title`
-* `decision`
-* `category`
-* `positivity_score`
-* `summary`
-* `reason`
-* `reviewed_at`
-
-Purpose:
-
-* Avoid repeated OpenAI calls for the same article
-* Track accepted and rejected articles
-* Support debugging and quality review
-* Reduce AI cost over time
-
-### `articles`
-
-Stores accepted stories shown on the public site.
-
-Common fields:
-
-* `source`
-* `title`
-* `original_url`
-* `image_url`
-* `published_at`
-* `published_on_site_at`
-* `original_excerpt`
-* `ai_summary`
-* `category`
-* `positivity_score`
-* `status`
-
-Purpose:
-
-* Power the public article feed
-* Keep published story records separate from rejected reviews
-* Store short summaries rather than full article text
-* Link readers back to the original source
+The goal is not to create a complicated platform. The goal is to create a clean system that can run mostly on its own.
 
 ---
 
-## AI Curation Workflow
-
-OpenAI is used as the editorial filter and summary generator.
-
-For each eligible article, the AI returns:
-
-```json
-{
-  "decision": "accept or reject",
-  "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting | Nature | Space | Creativity",
-  "positivity_score": 1,
-  "summary": "A calm 2-3 sentence summary.",
-  "reason": "Short reason for the decision."
-}
-```
-
-### Accepted story types
-
-The prompt accepts stories about:
-
-* Positive human-interest moments
-* Wellness and lifestyle
-* Science
-* Culture
-* Animals
-* Travel
-* Community
-* Nature
-* Space
-* Creativity
-* Remarkable achievements
-
-### Rejected story types
-
-The prompt rejects stories involving:
-
-* Politics
-* War
-* Money
-* Crime
-* Tragedy
-* Fear
-* Conflict
-* Elections
-* Government
-* Markets
-* Inflation
-* Business
-* Stocks
-* Military
-* Violence
-
-### Local negative prefilter
-
-Before using OpenAI, the Worker can locally reject obviously negative stories.
-
-This protects cost and reduces unnecessary AI calls.
-
-Broad sources such as NPR, BBC, and Google News RSS feeds can be filtered more strictly than positive-first sources.
-
----
-
-## Source-Friendly Publishing
-
-NutsNews does not republish full copyrighted articles.
-
-The site stores and displays:
-
-* Original title
-* Source name
-* Source link
-* Article metadata
-* Short AI-written summary
-* Category
-* Positivity score
-
-Every card links back to the original publisher.
-
-The summary is intended to be brief, original, and not a replacement for the full article.
-
----
-
-## Tech Stack
-
-| Technology                  | Role                                                                              |
-| --------------------------- | --------------------------------------------------------------------------------- |
-| Next.js                     | Mobile-friendly website and article feed                                          |
-| GitHub → Vercel CI/CD       | Every push to `main` triggers an automatic Vercel build and production deployment |
-| Vercel                      | Frontend hosting, HTTPS, custom domain, and production deployment                 |
-| Supabase                    | Postgres database for article storage                                             |
-| Cloudflare CDN              | DNS, proxy, caching, and edge protection                                          |
-| Cloudflare Workers          | Scheduled RSS ingestion and automation                                            |
-| Cloudflare Secrets Store    | Centralized secret storage for Worker shards                                      |
-| OpenAI                      | Article filtering and cheerful summary generation                                 |
-| Sentry                      | Frontend, Next.js, and Worker error monitoring                                    |
-| Better Stack Uptime         | External availability monitoring                                                  |
-| Better Stack Telemetry Logs | Centralized structured logs                                                       |
-| RSS Feeds                   | Story sources from trusted publishers                                             |
-
----
-
-## CI/CD and Deployment
-
-### Website deployment
-
-The web app is deployed through GitHub and Vercel.
-
-Deployment flow:
-
-```text
-1. Code commit
-   Changes are committed locally and pushed to GitHub on the main branch.
-
-2. Vercel build
-   Vercel detects the push, installs dependencies, runs the Next.js build,
-   prepares production deployment, and uploads Sentry source maps when configured.
-
-3. Production release
-   If the build succeeds, Vercel automatically publishes the latest version
-   to the production NutsNews domain.
-
-4. Cloudflare CDN
-   Public traffic flows through Cloudflare, which caches eligible public
-   pages and API responses.
-
-5. Better Stack logs
-   Runtime application logs are sent to the Better Stack nutsnews source.
-```
-
-After CDN-related deploys, purge Cloudflare cache:
-
-```text
-Cloudflare
-→ nutsnews.com
-→ Caching
-→ Purge Cache
-→ Purge Everything
-```
-
-### Worker deployment
-
-For shard Workers:
-
-```bash
-cd worker
-npm install
-export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
-npm run generate:wrangler
-npm run deploy:all
-```
-
-For one shard:
-
-```bash
-cd worker
-npx wrangler deploy --config generated-wrangler/wrangler.shard0.jsonc
-```
-
-For the controller Worker:
-
-```bash
-cd controller
-npm install
-npm run deploy
-```
-
----
-
-## Environment Variables and Secrets
-
-### Web app
-
-Typical frontend environment variables:
-
-```env
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-NEXT_PUBLIC_SENTRY_DSN=
-NEXT_PUBLIC_APP_ENV=production
-BETTER_STACK_SOURCE_TOKEN=
-BETTER_STACK_INGESTING_HOST=
-```
-
-Sentry build/release variables:
-
-```env
-SENTRY_ORG=
-SENTRY_PROJECT=nutsnews
-SENTRY_AUTH_TOKEN=
-```
-
-Notes:
-
-* `NEXT_PUBLIC_SENTRY_DSN` is safe to expose to the browser.
-* `SENTRY_AUTH_TOKEN` must stay secret and should only be stored in local `.env.local` or Vercel environment variables.
-* `BETTER_STACK_SOURCE_TOKEN` must stay secret and should not use `NEXT_PUBLIC_`.
-* Do not commit `.env.local`.
-
-### Worker shards
-
-Worker shards need these Cloudflare Secrets Store values:
-
-```text
-SUPABASE_URL
-SUPABASE_SERVICE_ROLE_KEY
-OPENAI_API_KEY
-BETTER_STACK_SOURCE_TOKEN
-BETTER_STACK_INGESTING_HOST
-```
-
-Worker shards also use these generated variables:
-
-```text
-FEED_SHARD_INDEX
-FEEDS_PER_SHARD
-SENTRY_ENVIRONMENT
-SENTRY_TRACES_SAMPLE_RATE
-```
-
-If using Cloudflare Secrets Store, secret values are read asynchronously:
-
-```ts
-const supabaseUrl = await env.SUPABASE_URL.get();
-const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
-const openAiApiKey = await env.OPENAI_API_KEY.get();
-const betterStackSourceToken = await env.BETTER_STACK_SOURCE_TOKEN.get();
-const betterStackIngestingHost = await env.BETTER_STACK_INGESTING_HOST.get();
-```
-
-The shard config generator needs this local terminal variable:
-
-```bash
-export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
-```
-
-### Controller Worker
-
-The controller Worker uses non-secret environment variables:
-
-```text
-SHARD_COUNT=25
-SHARD_RUN_INTERVAL_MINUTES=5
-SHARD_WORKER_PREFIX=nutsnews-worker
-SHARD_WORKER_SUBDOMAIN=nutsnews
-MAX_AI_REVIEWS_PER_SHARD=12
-```
-
-The controller also uses Better Stack secrets:
-
-```text
-BETTER_STACK_SOURCE_TOKEN
-BETTER_STACK_INGESTING_HOST
-```
-
----
-
-## Local Development
-
-### Web app
-
-```bash
-cd web
-npm install
-npm run dev
-```
-
-Open:
-
-```text
-http://localhost:3000
-```
-
-### Local web logging test
-
-Create:
-
-```text
-web/.env.local
-```
-
-Add:
-
-```env
-BETTER_STACK_SOURCE_TOKEN=your_source_token
-BETTER_STACK_INGESTING_HOST=your_ingesting_host
-NEXT_PUBLIC_APP_ENV=local
-```
-
-Run:
-
-```bash
-cd web
-npm run dev
-```
-
-Test:
-
-```bash
-curl http://localhost:3000/api/log-test
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-web environment:local
-```
-
-### Local frontend Sentry test
-
-Start the web app:
-
-```bash
-cd web
-npm run dev
-```
-
-Open:
-
-```text
-http://localhost:3000/sentry-test
-```
-
-Click:
-
-```text
-Capture manual error
-```
-
-or:
-
-```text
-Throw client error
-```
-
-Then check Sentry Issues for:
-
-```text
-NutsNews manually captured Sentry test error
-```
-
-or:
-
-```text
-NutsNews Sentry client test error
-```
-
-### Worker
-
-```bash
-cd worker
-npm install
-npm run dev
-```
-
-For local Worker logging, create:
-
-```text
-worker/.dev.vars
-```
-
-Add:
-
-```env
-SUPABASE_URL=your_supabase_url
-SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-OPENAI_API_KEY=your_openai_key
-BETTER_STACK_SOURCE_TOKEN=your_source_token
-BETTER_STACK_INGESTING_HOST=your_ingesting_host
-FEED_SHARD_INDEX=0
-FEEDS_PER_SHARD=20
-```
-
-Test:
-
-```bash
-curl http://localhost:8787/log-test
-```
-
-Search Better Stack:
-
-```text
-service:nutsnews-worker
-event:worker.log_test.completed
-```
-
-Generate shard configs:
-
-```bash
-export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
-npm run generate:wrangler
-```
-
-Deploy all shards:
-
-```bash
-npm run deploy:all
-```
-
-### Controller
-
-```bash
-cd controller
-npm install
-npm run dev
-```
-
-Deploy:
-
-```bash
-npm run deploy
-```
-
----
-
-## Operations and Monitoring
-
-NutsNews uses multiple layers of monitoring:
-
-* Better Stack Uptime for external availability checks
-* Better Stack Telemetry Logs for centralized structured logs
-* Cloudflare Worker logs and observability for Worker runtime visibility
-* Cloudflare CDN cache status for public route caching
-* Sentry for frontend and Worker error monitoring
-* Supabase queries for article/review verification
-
-### Better Stack centralized log searches
-
-Search all NutsNews logs:
-
-```text
-service:nutsnews-web OR service:nutsnews-worker OR service:nutsnews-controller
-```
-
-Search all errors:
-
-```text
-level:error
-```
-
-Search Worker errors only:
-
-```text
-service:nutsnews-worker level:error
-```
-
-Search one Worker shard:
-
-```text
-service:nutsnews-worker shardIndex:0
-```
-
-Search completed refreshes:
-
-```text
-event:worker.refresh.completed
-```
-
-Search article API requests:
-
-```text
-event:api.articles.request_completed
-```
-
-Search controller calls:
-
-```text
-event:controller.shard.call_completed
-```
-
-### Test one shard
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
-```
-
-### Test Worker logging
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
-```
-
-Search:
-
-```text
-service:nutsnews-worker event:worker.log_test.completed
-```
-
-### Test web logging
-
-```bash
-curl "https://www.nutsnews.com/api/log-test"
-```
-
-Search:
-
-```text
-service:nutsnews-web event:api.log_test.completed
-```
-
-### Test a few deployed shards
-
-```bash
-curl "https://nutsnews-worker-1.nutsnews.workers.dev/?limit=3"
-curl "https://nutsnews-worker-10.nutsnews.workers.dev/?limit=3"
-curl "https://nutsnews-worker-24.nutsnews.workers.dev/?limit=3"
-```
-
-### Test a specific shard through the controller
-
-```bash
-curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=17"
-```
-
-### Test automatic controller mode
-
-```bash
-curl "https://nutsnews-controller.nutsnews.workers.dev/"
-```
-
-### Test Cloudflare CDN cache
-
-```bash
-curl -I https://www.nutsnews.com/
-curl -I "https://www.nutsnews.com/api/articles?page=0"
-```
-
-Look for:
-
-```text
-server: cloudflare
-cache-control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
-cf-cache-status: HIT
-```
-
-### Tail Worker logs
-
-```bash
-cd worker
-npx wrangler tail nutsnews-worker-0
-```
-
-### Check recent review volume
-
-```sql
-select count(*) as reviews_last_hour
-from article_ai_reviews
-where reviewed_at > now() - interval '1 hour';
-```
-
-### Check recent published articles
-
-```sql
-select
-  title,
-  source,
-  category,
-  positivity_score,
-  published_on_site_at
-from articles
-where published_on_site_at > now() - interval '1 day'
-order by published_on_site_at desc;
-```
-
-### Check accepted vs rejected decisions
-
-```sql
-select
-  source,
-  decision,
-  count(*) as count
-from article_ai_reviews
-where reviewed_at > now() - interval '1 hour'
-group by source, decision
-order by count desc;
-```
-
-### Add a new RSS feed
-
-```sql
-insert into rss_feeds (source, url, is_positive_source)
-values ('Example Source', 'https://example.com/feed.xml', false)
-on conflict (url) do update set
-  source = excluded.source,
-  is_positive_source = excluded.is_positive_source,
-  is_active = true;
-```
-
-### Disable a feed
-
-```sql
-update rss_feeds
-set is_active = false
-where url = 'https://example.com/feed.xml';
-```
-
----
-
-## Sentry Observability
-
-Sentry is used to monitor application errors across the NutsNews frontend and Worker automation.
-
-### What Sentry monitors
-
-| Area                 | What is captured                                                                                |
-| -------------------- | ----------------------------------------------------------------------------------------------- |
-| Browser/frontend     | Client-side React and browser errors                                                            |
-| Next.js server       | Server/runtime rendering errors                                                                 |
-| Next.js edge         | Edge runtime errors                                                                             |
-| Global app errors    | Errors captured by `global-error.tsx`                                                           |
-| Worker shards        | RSS fetch failures, Supabase failures, OpenAI failures, scheduled crashes, manual route crashes |
-| Releases/source maps | Production source maps when `SENTRY_AUTH_TOKEN` is configured                                   |
-
-### Recommended Sentry projects
-
-Recommended project split:
-
-```text
-nutsnews
-nutsnews-worker
-nutsnews-controller
-```
-
-The current frontend project can be named:
-
-```text
-nutsnews
-```
-
-Worker errors can either be sent to the same project or to a dedicated project:
-
-```text
-nutsnews-worker
-```
-
-### Frontend Sentry files
-
-```text
-web/instrumentation-client.ts
-web/instrumentation.ts
-web/sentry.server.config.ts
-web/sentry.edge.config.ts
-web/app/global-error.tsx
-web/app/sentry-test/page.tsx
-web/next.config.ts
-```
-
-### Frontend Sentry environment variables
-
-```env
-NEXT_PUBLIC_SENTRY_DSN=
-NEXT_PUBLIC_APP_ENV=production
-SENTRY_ORG=
-SENTRY_PROJECT=nutsnews
-SENTRY_AUTH_TOKEN=
-```
-
-### Validate frontend Sentry locally
-
-```bash
-cd web
-npm run dev
-```
-
-Open:
-
-```text
-http://localhost:3000/sentry-test
-```
-
-Click:
-
-```text
-Capture manual error
-```
-
-Then check:
-
-```text
-Sentry → nutsnews → Issues
-```
-
-Expected issue:
-
-```text
-NutsNews manually captured Sentry test error
-```
-
-### Validate frontend Sentry in production
-
-Open:
-
-```text
-https://nutsnews.com/sentry-test
-```
-
-Click:
-
-```text
-Capture manual error
-```
-
-Then check:
-
-```text
-Sentry → nutsnews → Issues
-```
-
-### Worker Sentry secret
-
-The Worker uses:
-
-```text
-SENTRY_DSN
-```
-
-This should be stored in Cloudflare Secrets Store with the other Worker secrets.
-
-List secrets:
-
-```bash
-cd worker
-export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
-npx wrangler secrets-store secret list "$NUTSNEWS_SECRETS_STORE_ID" --remote
-```
-
-Create the secret if missing:
-
-```bash
-npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" --name SENTRY_DSN --scopes workers --remote
-```
-
-If the secret already exists, Cloudflare will return:
-
-```text
-secret_name_already_exists: SENTRY_DSN
-```
-
-That means it is already stored.
-
-### Validate Worker Sentry
-
-Trigger the Worker test route:
-
-```bash
-curl "https://nutsnews-worker-0.nutsnews.workers.dev/sentry-test"
-```
-
-Expected terminal result:
-
-```text
-error code: 1101
-```
-
-That is expected because the route intentionally throws an error.
-
-Then check:
-
-```text
-Sentry → nutsnews-worker or nutsnews → Issues
-```
-
-Expected issue:
-
-```text
-NutsNews Worker Sentry test error
-```
-
-### Sentry source maps
-
-When `SENTRY_AUTH_TOKEN` is configured in Vercel, the production build can create releases and upload source maps.
-
-Local builds may show:
-
-```text
-No auth token provided. Will not create release.
-```
-
-That is acceptable for local development.
-
-Production should have `SENTRY_AUTH_TOKEN` configured in Vercel.
-
----
-
-## Current Cost Model
-
-The About page lists the current cost model as:
-
-| Item                        |     Cost | Notes                                                          |
-| --------------------------- | -------: | -------------------------------------------------------------- |
-| Domain                      | `$11.95` | The only paid cost so far is the NutsNews domain registration  |
-| Vercel                      |     `$0` | The Next.js website is hosted on the Vercel free tier          |
-| Supabase                    |     `$0` | Article storage uses the Supabase free tier                    |
-| Cloudflare Workers          |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier      |
-| Cloudflare CDN              |     `$0` | DNS/proxy/cache can run on the Cloudflare free tier            |
-| Better Stack Uptime         |     `$0` | External uptime monitoring uses the free tier                  |
-| Better Stack Telemetry Logs |     `$0` | Centralized structured logging uses the Better Stack free tier |
-| Sentry                      |     `$0` | Error monitoring uses the Sentry free tier                     |
-
-**Total current fixed cost:** `$11.95`
-
-Everything except the domain is currently intended to run on free-tier services.
-
-OpenAI cost is variable and depends on the number of article reviews sent to the API.
+## Extendability Story
+
+NutsNews can grow in many directions.
+
+Future possibilities include:
+
+* More RSS sources
+* More positive-news categories
+* Search
+* Topic pages
+* Newsletters
+* Social media publishing
+* Personalization
+* Multi-language summaries
+* Editorial review dashboard
+* Feed health dashboard
+* Source scoring
+* Automated cache purging
+* Public API
+* Native mobile app
+
+Because the project already separates ingestion, storage, frontend, caching, logging, and monitoring, new features can be added without redesigning the entire system.
 
 ---
 
 ## Project Benefits
 
-### Fully automated news agency
+### For readers
 
-The platform can discover, filter, summarize, store, and publish stories automatically without a traditional editorial production team.
+NutsNews provides a calmer alternative to stressful news feeds.
 
-### Low operating cost
+### For publishers
 
-Using free-tier cloud services keeps the project inexpensive to launch and easy to experiment with.
+NutsNews sends readers back to the original source instead of replacing the publisher’s content.
 
-### Always-fresh content
+### For operators
 
-Scheduled or controller-triggered automation refreshes the article queue throughout the day.
+The system is automated, monitored, logged, and designed to run at low cost.
 
-### CDN-assisted delivery
+### For developers
 
-Cloudflare can cache public pages and article API responses to make repeat visits faster and reduce origin traffic.
+The architecture is modular, serverless, and easy to extend.
 
-### Centralized observability
+### For the business
 
-Better Stack Telemetry Logs gives NutsNews one searchable place for application, Worker, and controller logs.
+The platform can become the foundation for a fully automated positive-news agency.
 
-### Focused editorial voice
+---
 
-AI filtering helps keep the product aligned with a peaceful, uplifting, and positive content strategy.
+## Current Status
 
-### Mobile-first experience
+NutsNews currently includes:
 
-The site is designed around a simple scrolling feed that feels natural on phones.
+* A public mobile-first website
+* RSS-based content discovery
+* AI-assisted article filtering
+* AI-generated short summaries
+* Supabase article storage
+* Cloudflare Worker automation
+* Worker sharding
+* Controller Worker orchestration
+* Cloudflare CDN caching
+* Better Stack uptime monitoring
+* Better Stack centralized structured logs
+* Sentry error monitoring
+* Source-friendly article linking
+* MIT license
 
-### Scalable architecture
-
-The system separates the frontend, database, AI workflow, controller, and Worker shards so each part can grow independently.
-
-### Observable platform
-
-Better Stack, Cloudflare logs, Cloudflare cache status, and Sentry make it easier to detect downtime, Worker failures, frontend crashes, cache problems, and production regressions.
-
-### Fast experimentation
-
-New RSS sources, categories, prompts, and layout ideas can be tested quickly without rebuilding the whole platform.
-
-### Source-friendly publishing
-
-The site avoids republishing full articles and links readers back to the original publishers.
+The project is active and designed to improve gradually.
 
 ---
 
 ## Roadmap
 
-Potential improvements:
+Planned or possible future improvements:
 
-* Add a shared controller token so only the controller can trigger shard Workers
-* Add feed health tracking in Supabase
-* Track failed feed fetches by source
-* Build an admin dashboard for RSS feed management
-* Add manual review for borderline articles
-* Improve duplicate detection across syndicated stories
-* Improve Google News RSS handling and fallback behavior
-* Add source reliability scoring
-* Add per-source AI review caps
-* Add automatic backoff for blocked or failing feeds
-* Add richer generated fallback thumbnails
-* Add Open Graph image generation
+* Expand the RSS source list
+* Improve article image extraction
+* Add source quality scoring
+* Add feed health tracking
+* Add topic landing pages
 * Add newsletter support
-* Add category analytics
-* Add article-level engagement analytics
-* Add a moderation queue for future editorial control
-* Add Sentry alert rules for repeated Worker shard failures
-* Add Sentry alert rules for frontend production regressions
-* Add Worker health dashboards by shard
-* Add Cloudflare cache HIT ratio review
-* Add Better Stack dashboards for Worker shard success/failure counts
-* Add Better Stack alert rules for `level:error`
-* Add Better Stack alert rules for repeated `worker.scheduled.failed`
-* Add automated cache purge workflow after production deploys
+* Add search
+* Add article engagement analytics
+* Add manual review for borderline stories
+* Add dashboard for feed management
+* Add dashboard for Worker shard health
+* Add Better Stack dashboards and alerts
+* Add Sentry alert rules
+* Add Open Graph image generation
+* Add richer fallback thumbnails
+* Add personalization
+* Add multi-language support
+* Add social sharing automation
+* Add a native mobile app
 
 ---
 
@@ -2431,6 +878,20 @@ See the [LICENSE](LICENSE) file for details.
 
 ---
 
-## Status
+## Summary
 
-NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, CDN-assisted delivery, centralized structured logging, and low-cost observability.
+NutsNews is more than a positive-news website.
+
+It is a low-cost, automated, observable, CDN-backed, AI-assisted publishing platform.
+
+It combines a calm reader experience with a practical cloud architecture:
+
+* Fast enough for readers
+* Resilient enough for automation
+* Cheap enough to experiment with
+* Maintainable enough for a small team
+* Extendable enough to grow into a larger product
+
+The mission is simple:
+
+> Help people find more good in the world, one uplifting story at a time.
