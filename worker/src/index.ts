@@ -84,6 +84,12 @@ type ReviewedArticleResult = {
 	aiDecision: AiArticleDecision;
 };
 
+type ImageHydrationResult = {
+	articles: RssArticle[];
+	lookupCount: number;
+	foundCount: number;
+};
+
 type RefreshResult = {
 	message: string;
 	shardIndex: number;
@@ -94,6 +100,8 @@ type RefreshResult = {
 	candidateCount: number;
 	alreadyReviewedCount: number;
 	unreviewedCount: number;
+	imageHydrationLookupCount: number;
+	imageHydrationFoundCount: number;
 	noThumbnailRejectedCount: number;
 	locallyRejectedCount: number;
 	eligibleForAiCount: number;
@@ -111,6 +119,11 @@ const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
 const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
+
+const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 12;
+const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
+const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 45;
+const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 6;
 
 const POSITIVE_KEYWORDS = [
 	"good news",
@@ -360,7 +373,7 @@ const NO_THUMBNAIL_REJECT_DECISION: AiArticleDecision = {
 	positivity_score: 0,
 	summary: "",
 	reason:
-		"Skipped before AI because the RSS item did not include a usable image thumbnail.",
+		"Skipped before AI because the RSS item and article page did not include a usable image thumbnail.",
 };
 
 async function resolveValue(value: MaybeSecretBinding) {
@@ -427,6 +440,22 @@ function clampAiReviewLimit(value: number | undefined): number {
 	}
 
 	return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
+}
+
+function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number) {
+	const estimatedAvailableSubrequests =
+		MAX_ESTIMATED_SUBREQUESTS_PER_RUN -
+		feedCount -
+		maxAiReviews -
+		RESERVED_NON_FEED_SUBREQUESTS_PER_RUN;
+
+	return Math.max(
+		0,
+		Math.min(
+			MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN,
+			estimatedAvailableSubrequests,
+		),
+	);
 }
 
 async function getFeedsForShard(
@@ -528,6 +557,17 @@ function getAttributeValue(tagXml: string, attributeName: string): string {
 }
 
 function getAtomLink(itemXml: string): string {
+	const linkTags = itemXml.match(/<link\b[^>]*>/gi) ?? [];
+
+	for (const tag of linkTags) {
+		const rel = getAttributeValue(tag, "rel").toLowerCase();
+		const href = getAttributeValue(tag, "href");
+
+		if (href && (!rel || rel === "alternate")) {
+			return decodeHtml(href.trim());
+		}
+	}
+
 	const hrefMatch = itemXml.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i);
 
 	if (!hrefMatch?.[1]) {
@@ -599,9 +639,11 @@ function isLikelyImageUrl(url: string): boolean {
 		lowerUrl.includes(".png") ||
 		lowerUrl.includes(".webp") ||
 		lowerUrl.includes(".gif") ||
+		lowerUrl.includes(".avif") ||
 		lowerUrl.includes("image") ||
 		lowerUrl.includes("thumbnail") ||
-		lowerUrl.includes("media")
+		lowerUrl.includes("media") ||
+		lowerUrl.includes("uploads")
 	);
 }
 
@@ -619,37 +661,266 @@ function isBadImageCandidate(imageUrl: string): boolean {
 		lowerUrl.includes("tracking") ||
 		lowerUrl.includes("pixel") ||
 		lowerUrl.includes("1x1") ||
+		lowerUrl.includes("gravatar") ||
 		lowerUrl.endsWith(".svg")
 	);
 }
 
+function extractBestUrlFromSrcset(srcset: string) {
+	const candidates = srcset
+		.split(",")
+		.map((part) => {
+			const [url, descriptor] = part.trim().split(/\s+/);
+			const widthMatch = descriptor?.match(/^(\d+)w$/);
+			const densityMatch = descriptor?.match(/^(\d+(?:\.\d+)?)x$/);
+
+			let score = 1;
+
+			if (widthMatch?.[1]) {
+				score = Number(widthMatch[1]);
+			} else if (densityMatch?.[1]) {
+				score = Number(densityMatch[1]) * 1000;
+			}
+
+			return {
+				url,
+				score,
+			};
+		})
+		.filter((candidate): candidate is { url: string; score: number } =>
+			Boolean(candidate.url),
+		)
+		.sort((a, b) => b.score - a.score);
+
+	return candidates[0]?.url ?? "";
+}
+
+function firstValidImageUrl(candidates: string[], articleUrl: string) {
+	for (const candidate of candidates) {
+		const normalizedUrl = normalizeImageUrl(candidate, articleUrl);
+
+		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+			return normalizedUrl;
+		}
+	}
+
+	return null;
+}
+
 function extractImageFromHtml(html: string, articleUrl: string): string | null {
-	const imageMatch =
-		html.match(/<img[^>]+srcset=["']([^"']+)["'][^>]*>/i) ??
-		html.match(/<img[^>]+src=["']([^"']+)["'][^>]*>/i) ??
-		html.match(/<img[^>]+data-src=["']([^"']+)["'][^>]*>/i) ??
-		html.match(/<img[^>]+data-lazy-src=["']([^"']+)["'][^>]*>/i);
+	const candidates: string[] = [];
+	const imageTags = html.match(/<img\b[^>]*>/gi) ?? [];
 
-	if (!imageMatch?.[1]) {
-		return null;
+	for (const tag of imageTags) {
+		const srcset =
+			getAttributeValue(tag, "srcset") ||
+			getAttributeValue(tag, "data-srcset");
+
+		if (srcset) {
+			const bestSrcsetUrl = extractBestUrlFromSrcset(srcset);
+
+			if (bestSrcsetUrl) {
+				candidates.push(bestSrcsetUrl);
+			}
+		}
+
+		[
+			"data-original",
+			"data-image",
+			"data-src",
+			"data-lazy-src",
+			"data-orig-file",
+			"data-medium-file",
+			"data-large-file",
+			"src",
+		].forEach((attributeName) => {
+			const value = getAttributeValue(tag, attributeName);
+
+			if (value) {
+				candidates.push(value);
+			}
+		});
 	}
 
-	const rawImageValue = imageMatch[1].split(",")[0]?.trim().split(/\s+/)[0];
+	return firstValidImageUrl(candidates, articleUrl);
+}
 
-	if (!rawImageValue) {
-		return null;
+function extractMetaImagesFromHtml(html: string) {
+	const candidates: string[] = [];
+	const metaTags = html.match(/<meta\b[^>]*>/gi) ?? [];
+
+	const imageMetaKeys = new Set([
+		"og:image",
+		"og:image:url",
+		"og:image:secure_url",
+		"twitter:image",
+		"twitter:image:src",
+		"thumbnail",
+		"image",
+	]);
+
+	for (const tag of metaTags) {
+		const property = getAttributeValue(tag, "property").toLowerCase();
+		const name = getAttributeValue(tag, "name").toLowerCase();
+		const itemprop = getAttributeValue(tag, "itemprop").toLowerCase();
+		const content = getAttributeValue(tag, "content");
+
+		if (
+			content &&
+			(imageMetaKeys.has(property) ||
+				imageMetaKeys.has(name) ||
+				imageMetaKeys.has(itemprop))
+		) {
+			candidates.push(content);
+		}
 	}
 
-	const normalizedUrl = normalizeImageUrl(rawImageValue, articleUrl);
+	return candidates;
+}
 
-	if (!normalizedUrl || isBadImageCandidate(normalizedUrl)) {
-		return null;
+function extractLinkImagesFromHtml(html: string) {
+	const candidates: string[] = [];
+	const linkTags = html.match(/<link\b[^>]*>/gi) ?? [];
+
+	for (const tag of linkTags) {
+		const rel = getAttributeValue(tag, "rel").toLowerCase();
+		const asValue = getAttributeValue(tag, "as").toLowerCase();
+		const href = getAttributeValue(tag, "href");
+
+		if (
+			href &&
+			(rel.includes("image_src") ||
+				rel.includes("preload") ||
+				rel.includes("prefetch")) &&
+			(!asValue || asValue === "image")
+		) {
+			candidates.push(href);
+		}
 	}
 
-	return normalizedUrl;
+	return candidates;
+}
+
+function addJsonLdImageCandidate(value: unknown, candidates: string[]) {
+	if (!value) {
+		return;
+	}
+
+	if (typeof value === "string") {
+		candidates.push(value);
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		value.forEach((item) => addJsonLdImageCandidate(item, candidates));
+		return;
+	}
+
+	if (typeof value === "object") {
+		const record = value as Record<string, unknown>;
+
+		const url =
+			record.url ??
+			record.contentUrl ??
+			record.thumbnailUrl ??
+			record["@id"];
+
+		if (typeof url === "string") {
+			candidates.push(url);
+		}
+
+		if (Array.isArray(url)) {
+			url.forEach((item) => addJsonLdImageCandidate(item, candidates));
+		}
+	}
+}
+
+function extractJsonLdImagesFromValue(value: unknown, candidates: string[]) {
+	if (!value) {
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		value.forEach((item) => extractJsonLdImagesFromValue(item, candidates));
+		return;
+	}
+
+	if (typeof value !== "object") {
+		return;
+	}
+
+	const record = value as Record<string, unknown>;
+
+	[
+		"image",
+		"thumbnail",
+		"thumbnailUrl",
+		"primaryImageOfPage",
+		"associatedMedia",
+	].forEach((key) => {
+		if (key in record) {
+			addJsonLdImageCandidate(record[key], candidates);
+		}
+	});
+
+	Object.values(record).forEach((nestedValue) => {
+		if (typeof nestedValue === "object") {
+			extractJsonLdImagesFromValue(nestedValue, candidates);
+		}
+	});
+}
+
+function extractJsonLdImagesFromHtml(html: string) {
+	const candidates: string[] = [];
+	const scriptTags =
+		html.match(
+			/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi,
+		) ?? [];
+
+	for (const scriptTag of scriptTags) {
+		const contentMatch = scriptTag.match(
+			/<script\b[^>]*>([\s\S]*?)<\/script>/i,
+		);
+
+		const rawContent = contentMatch?.[1]?.trim();
+
+		if (!rawContent) {
+			continue;
+		}
+
+		try {
+			const parsed = JSON.parse(decodeHtml(rawContent));
+			extractJsonLdImagesFromValue(parsed, candidates);
+		} catch {
+			continue;
+		}
+	}
+
+	return candidates;
+}
+
+function extractArticlePageImageFromHtml(
+	html: string,
+	articleUrl: string,
+): string | null {
+	const candidates = [
+		...extractMetaImagesFromHtml(html),
+		...extractLinkImagesFromHtml(html),
+		...extractJsonLdImagesFromHtml(html),
+	];
+
+	const metadataImage = firstValidImageUrl(candidates, articleUrl);
+
+	if (metadataImage) {
+		return metadataImage;
+	}
+
+	return extractImageFromHtml(html, articleUrl);
 }
 
 function extractRssImageUrl(itemXml: string, articleUrl: string): string | null {
+	const candidates: string[] = [];
+
 	const mediaContentTags = itemXml.match(/<media:content\b[^>]*>/gi) ?? [];
 
 	for (const tag of mediaContentTags) {
@@ -661,11 +932,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 			url &&
 			(medium === "image" || type.startsWith("image/") || isLikelyImageUrl(url))
 		) {
-			const normalizedUrl = normalizeImageUrl(url, articleUrl);
-
-			if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-				return normalizedUrl;
-			}
+			candidates.push(url);
 		}
 	}
 
@@ -673,10 +940,9 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 
 	for (const tag of mediaThumbnailTags) {
 		const url = getAttributeValue(tag, "url");
-		const normalizedUrl = normalizeImageUrl(url, articleUrl);
 
-		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-			return normalizedUrl;
+		if (url) {
+			candidates.push(url);
 		}
 	}
 
@@ -687,11 +953,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		const url = getAttributeValue(tag, "url");
 
 		if (url && (type.startsWith("image/") || isLikelyImageUrl(url))) {
-			const normalizedUrl = normalizeImageUrl(url, articleUrl);
-
-			if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-				return normalizedUrl;
-			}
+			candidates.push(url);
 		}
 	}
 
@@ -699,11 +961,26 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 
 	for (const tag of itunesImageTags) {
 		const href = getAttributeValue(tag, "href");
-		const normalizedUrl = normalizeImageUrl(href, articleUrl);
 
-		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
-			return normalizedUrl;
+		if (href) {
+			candidates.push(href);
 		}
+	}
+
+	const imageTags = itemXml.match(/<image\b[^>]*>[\s\S]*?<\/image>/gi) ?? [];
+
+	for (const tag of imageTags) {
+		const url = getTagValue(tag, "url") || getAttributeValue(tag, "url");
+
+		if (url) {
+			candidates.push(url);
+		}
+	}
+
+	const directImage = firstValidImageUrl(candidates, articleUrl);
+
+	if (directImage) {
+		return directImage;
 	}
 
 	const description =
@@ -713,6 +990,115 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		getTagValue(itemXml, "content");
 
 	return extractImageFromHtml(description, articleUrl);
+}
+
+async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
+	if (hasUsableThumbnail(article)) {
+		return article;
+	}
+
+	try {
+		const response = await fetch(article.url, {
+			headers: {
+				"User-Agent":
+					"Mozilla/5.0 (compatible; NutsNewsBot/1.0; +https://www.nutsnews.com)",
+				Accept: "text/html,application/xhtml+xml",
+			},
+		});
+
+		if (!response.ok) {
+			return article;
+		}
+
+		const contentType = response.headers.get("content-type") ?? "";
+
+		if (
+			contentType &&
+			!contentType.toLowerCase().includes("text/html") &&
+			!contentType.toLowerCase().includes("application/xhtml")
+		) {
+			return article;
+		}
+
+		const html = await response.text();
+		const imageUrl = extractArticlePageImageFromHtml(html, article.url);
+
+		if (!imageUrl) {
+			return article;
+		}
+
+		return {
+			...article,
+			imageUrl,
+		};
+	} catch {
+		return article;
+	}
+}
+
+async function hydrateMissingArticleImages(
+	env: Env,
+	articles: RssArticle[],
+	lookupLimit: number,
+): Promise<ImageHydrationResult> {
+	if (lookupLimit <= 0) {
+		return {
+			articles,
+			lookupCount: 0,
+			foundCount: 0,
+		};
+	}
+
+	const missingImageArticles = articles.filter(
+		(article) => !hasUsableThumbnail(article),
+	);
+
+	const lookupCandidates = missingImageArticles.slice(0, lookupLimit);
+
+	if (lookupCandidates.length === 0) {
+		return {
+			articles,
+			lookupCount: 0,
+			foundCount: 0,
+		};
+	}
+
+	const hydratedCandidates = await mapWithConcurrency(
+		lookupCandidates,
+		ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY,
+		fetchArticlePageImage,
+	);
+
+	const hydratedByUrl = new Map(
+		hydratedCandidates.map((article) => [article.url, article]),
+	);
+
+	const hydratedArticles = articles.map((article) => {
+		return hydratedByUrl.get(article.url) ?? article;
+	});
+
+	const foundCount = hydratedCandidates.filter(hasUsableThumbnail).length;
+
+	await logInfo(
+		env,
+		"worker.images.hydration_completed",
+		"Article page image hydration completed",
+		{
+			lookupLimit,
+			lookupCount: lookupCandidates.length,
+			foundCount,
+			missingBeforeCount: missingImageArticles.length,
+			missingAfterCount: hydratedArticles.filter(
+				(article) => !hasUsableThumbnail(article),
+			).length,
+		},
+	);
+
+	return {
+		articles: hydratedArticles,
+		lookupCount: lookupCandidates.length,
+		foundCount,
+	};
 }
 
 function parsePublishedDate(value: string): string | null {
@@ -786,7 +1172,9 @@ function scoreArticleCandidate(
 	article: RssArticle,
 	positiveSources: Set<string>,
 ): number {
-	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+	const text =
+		`${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+
 	let score = 0;
 
 	if (positiveSources.has(article.source)) {
@@ -839,7 +1227,8 @@ function shouldSkipBeforeAi(
 	article: RssArticle,
 	positiveSources: Set<string>,
 ): boolean {
-	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
+	const text =
+		`${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 
 	const hardNegativeMatchCount = countKeywordMatches(
 		text,
@@ -912,6 +1301,7 @@ async function mapWithConcurrency<T, R>(
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex;
 			nextIndex += 1;
+
 			results[currentIndex] = await mapper(
 				items[currentIndex] as T,
 				currentIndex,
@@ -942,12 +1332,17 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 		});
 
 		if (!response.ok) {
-			await logWarn(env, "worker.rss.fetch_failed_status", "RSS feed fetch failed", {
-				source: feed.source,
-				feedUrl: feed.url,
-				status: response.status,
-				durationMs: Date.now() - startedAt,
-			});
+			await logWarn(
+				env,
+				"worker.rss.fetch_failed_status",
+				"RSS feed fetch failed",
+				{
+					source: feed.source,
+					feedUrl: feed.url,
+					status: response.status,
+					durationMs: Date.now() - startedAt,
+				},
+			);
 
 			return [];
 		}
@@ -1341,6 +1736,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 		const hasThumbnail = hasUsableThumbnail(article);
 
 		const requestedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
+
 		const normalizedDecision: "accept" | "reject" =
 			requestedDecision === "accept" && hasThumbnail ? "accept" : "reject";
 
@@ -1350,7 +1746,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 
 		const normalizedReason =
 			requestedDecision === "accept" && !hasThumbnail
-				? "Rejected before publish because the RSS item did not include a usable image thumbnail."
+				? "Rejected before publish because the RSS item and article page did not include a usable image thumbnail."
 				: aiDecision.reason || "No reason provided";
 
 		reviewRows.push({
@@ -1370,13 +1766,20 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			continue;
 		}
 
+		const imageUrl = article.imageUrl;
+
+		if (!imageUrl) {
+			rejectedCount += 1;
+			continue;
+		}
+
 		acceptedCount += 1;
 
 		acceptedArticleRows.push({
 			source: article.source,
 			title: article.title,
 			original_url: article.url,
-			image_url: article.imageUrl,
+			image_url: imageUrl,
 			published_at: article.publishedAt,
 			published_on_site_at: new Date().toISOString(),
 			original_excerpt: article.excerpt,
@@ -1413,6 +1816,11 @@ async function refreshArticles(
 
 	const shardFeeds = await getFeedsForShard(env, config);
 
+	const articlePageImageLookupLimit = getArticlePageImageLookupLimit(
+		shardFeeds.length,
+		maxAiReviews,
+	);
+
 	const positiveSources = new Set(
 		shardFeeds
 			.filter((feed) => feed.is_positive_source)
@@ -1427,18 +1835,27 @@ async function refreshArticles(
 		shardIndex,
 		fetchedCount: fetchedArticles.length,
 		candidateCount: candidateArticles.length,
-		thumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail).length,
-		noThumbnailCandidateCount: candidateArticles.filter(
+		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail).length,
+		noRssThumbnailCandidateCount: candidateArticles.filter(
 			(article) => !hasUsableThumbnail(article),
 		).length,
+		articlePageImageLookupLimit,
 		maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
 	});
 
 	const reviewedUrls = await getReviewedUrls(env, config, candidateUrls);
 
-	const unreviewedArticles = candidateArticles.filter(
+	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter(
 		(article) => !reviewedUrls.has(article.url),
 	);
+
+	const imageHydrationResult = await hydrateMissingArticleImages(
+		env,
+		unreviewedArticlesBeforeImageHydration,
+		articlePageImageLookupLimit,
+	);
+
+	const unreviewedArticles = imageHydrationResult.articles;
 
 	const noThumbnailArticles = unreviewedArticles.filter(
 		(article) => !hasUsableThumbnail(article),
@@ -1470,6 +1887,8 @@ async function refreshArticles(
 			shardIndex,
 			alreadyReviewedCount: reviewedUrls.size,
 			unreviewedCount: unreviewedArticles.length,
+			imageHydrationLookupCount: imageHydrationResult.lookupCount,
+			imageHydrationFoundCount: imageHydrationResult.foundCount,
 			noThumbnailRejectedCount: noThumbnailArticles.length,
 			locallyRejectedCount: locallyRejectedArticles.length,
 			eligibleForAiCount: articlesEligibleForAi.length,
@@ -1481,7 +1900,7 @@ async function refreshArticles(
 		noThumbnailArticles,
 		NO_THUMBNAIL_REJECT_DECISION,
 		(article) =>
-			`Skipped before AI from ${article.source}: RSS item did not include a usable image thumbnail.`,
+			`Skipped before AI from ${article.source}: RSS item and article page did not include a usable image thumbnail.`,
 	);
 
 	const locallyRejectedResults = buildRejectedArticles(
@@ -1531,6 +1950,8 @@ async function refreshArticles(
 		candidateCount: candidateArticles.length,
 		alreadyReviewedCount: reviewedUrls.size,
 		unreviewedCount: unreviewedArticles.length,
+		imageHydrationLookupCount: imageHydrationResult.lookupCount,
+		imageHydrationFoundCount: imageHydrationResult.foundCount,
 		noThumbnailRejectedCount: noThumbnailArticles.length,
 		locallyRejectedCount: locallyRejectedArticles.length,
 		eligibleForAiCount: articlesEligibleForAi.length,
