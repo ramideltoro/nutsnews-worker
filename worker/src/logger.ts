@@ -14,8 +14,28 @@ type LoggerEnv = {
 
 type LogFields = Record<string, unknown>;
 
+type BetterStackConfig = {
+	sourceToken: string;
+	endpoint: string;
+};
+
 const SERVICE_NAME = "nutsnews-worker";
 const DEFAULT_ENVIRONMENT = "production";
+
+const BETTER_STACK_DELIVERY_EVENTS = new Set([
+	"worker.log_test.completed",
+	"worker.refresh.completed",
+	"worker.request.completed",
+	"worker.request.failed",
+	"worker.scheduled.completed",
+	"worker.scheduled.failed",
+	"worker.feeds.load_failed",
+	"worker.supabase.review_lookup_failed",
+	"worker.supabase.review_batch_save_failed",
+	"worker.supabase.article_batch_save_failed",
+]);
+
+let cachedBetterStackConfigPromise: Promise<BetterStackConfig | null> | null = null;
 
 async function resolveValue(value: MaybeSecretBinding) {
 	if (!value) {
@@ -32,7 +52,10 @@ async function resolveValue(value: MaybeSecretBinding) {
 function normalizeIngestingHost(host: string) {
 	const trimmedHost = host.trim().replace(/\/+$/, "");
 
-	if (trimmedHost.startsWith("http://") || trimmedHost.startsWith("https://")) {
+	if (
+		trimmedHost.startsWith("http://") ||
+		trimmedHost.startsWith("https://")
+	) {
 		return trimmedHost;
 	}
 
@@ -69,25 +92,68 @@ function writeLocalConsole(level: LogLevel, payload: LogFields) {
 	console.log(line);
 }
 
-async function sendToBetterStack(env: LoggerEnv, payload: LogFields) {
-	const sourceToken = await resolveValue(env.BETTER_STACK_SOURCE_TOKEN);
-	const ingestingHost = await resolveValue(env.BETTER_STACK_INGESTING_HOST);
+function shouldSendToBetterStack(event: string) {
+	return BETTER_STACK_DELIVERY_EVENTS.has(event);
+}
 
-	if (!sourceToken || !ingestingHost) {
+async function getBetterStackConfig(
+	env: LoggerEnv,
+): Promise<BetterStackConfig | null> {
+	if (!cachedBetterStackConfigPromise) {
+		cachedBetterStackConfigPromise = (async () => {
+			const sourceToken = await resolveValue(env.BETTER_STACK_SOURCE_TOKEN);
+			const ingestingHost = await resolveValue(env.BETTER_STACK_INGESTING_HOST);
+
+			if (!sourceToken || !ingestingHost) {
+				return null;
+			}
+
+			return {
+				sourceToken,
+				endpoint: normalizeIngestingHost(ingestingHost),
+			};
+		})();
+	}
+
+	return cachedBetterStackConfigPromise;
+}
+
+async function sendToBetterStack(env: LoggerEnv, payload: LogFields) {
+	const event = String(payload.event ?? "");
+
+	if (!shouldSendToBetterStack(event)) {
 		return;
 	}
 
-	const endpoint = normalizeIngestingHost(ingestingHost);
-
 	try {
-		await fetch(endpoint, {
+		const config = await getBetterStackConfig(env);
+
+		if (!config) {
+			return;
+		}
+
+		const response = await fetch(config.endpoint, {
 			method: "POST",
 			headers: {
-				Authorization: `Bearer ${sourceToken}`,
+				Authorization: `Bearer ${config.sourceToken}`,
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify(payload),
 		});
+
+		if (!response.ok) {
+			console.warn(
+				JSON.stringify({
+					dt: new Date().toISOString(),
+					level: "warn",
+					service: SERVICE_NAME,
+					environment: DEFAULT_ENVIRONMENT,
+					event: "better_stack.delivery_failed_status",
+					message: "Better Stack log delivery returned a non-OK status",
+					status: response.status,
+				}),
+			);
+		}
 	} catch (error) {
 		console.warn(
 			JSON.stringify({
@@ -122,6 +188,7 @@ export async function logEvent(
 	};
 
 	writeLocalConsole(level, payload);
+
 	await sendToBetterStack(env, payload);
 }
 

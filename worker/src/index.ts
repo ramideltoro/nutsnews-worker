@@ -10,10 +10,8 @@ type Env = {
 	SUPABASE_URL: MaybeSecretBinding;
 	SUPABASE_SERVICE_ROLE_KEY: MaybeSecretBinding;
 	OPENAI_API_KEY: MaybeSecretBinding;
-
 	FEED_SHARD_INDEX?: string;
 	FEEDS_PER_SHARD?: string;
-
 	BETTER_STACK_SOURCE_TOKEN?: MaybeSecretBinding;
 	BETTER_STACK_INGESTING_HOST?: MaybeSecretBinding;
 };
@@ -67,7 +65,7 @@ type ArticleInsert = {
 	source: string;
 	title: string;
 	original_url: string;
-	image_url: string | null;
+	image_url: string;
 	published_at: string | null;
 	published_on_site_at: string;
 	original_excerpt: string;
@@ -96,6 +94,7 @@ type RefreshResult = {
 	candidateCount: number;
 	alreadyReviewedCount: number;
 	unreviewedCount: number;
+	noThumbnailRejectedCount: number;
 	locallyRejectedCount: number;
 	eligibleForAiCount: number;
 	aiReviewedCount: number;
@@ -351,7 +350,17 @@ const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
 	category: "Uplifting",
 	positivity_score: 0,
 	summary: "",
-	reason: "Skipped before AI because the article matched hard negative local filters.",
+	reason:
+		"Skipped before AI because the article matched hard negative local filters.",
+};
+
+const NO_THUMBNAIL_REJECT_DECISION: AiArticleDecision = {
+	decision: "reject",
+	category: "Uplifting",
+	positivity_score: 0,
+	summary: "",
+	reason:
+		"Skipped before AI because the RSS item did not include a usable image thumbnail.",
 };
 
 async function resolveValue(value: MaybeSecretBinding) {
@@ -484,8 +493,8 @@ function decodeHtml(value: string): string {
 		)
 		.replace(/&amp;/g, "&")
 		.replace(/&quot;/g, '"')
-		.replace(/&#39;/g, "'")
 		.replace(/&apos;/g, "'")
+		.replace(/&#39;/g, "'")
 		.replace(/&lt;/g, "<")
 		.replace(/&gt;/g, ">");
 }
@@ -519,7 +528,7 @@ function getAttributeValue(tagXml: string, attributeName: string): string {
 }
 
 function getAtomLink(itemXml: string): string {
-	const hrefMatch = itemXml.match(/<link[^>]*href=["']([^"']+)["'][^>]*>/i);
+	const hrefMatch = itemXml.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i);
 
 	if (!hrefMatch?.[1]) {
 		return "";
@@ -641,7 +650,7 @@ function extractImageFromHtml(html: string, articleUrl: string): string | null {
 }
 
 function extractRssImageUrl(itemXml: string, articleUrl: string): string | null {
-	const mediaContentTags = itemXml.match(/<media:content[^>]*>/gi) ?? [];
+	const mediaContentTags = itemXml.match(/<media:content\b[^>]*>/gi) ?? [];
 
 	for (const tag of mediaContentTags) {
 		const medium = getAttributeValue(tag, "medium").toLowerCase();
@@ -660,7 +669,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		}
 	}
 
-	const mediaThumbnailTags = itemXml.match(/<media:thumbnail[^>]*>/gi) ?? [];
+	const mediaThumbnailTags = itemXml.match(/<media:thumbnail\b[^>]*>/gi) ?? [];
 
 	for (const tag of mediaThumbnailTags) {
 		const url = getAttributeValue(tag, "url");
@@ -671,7 +680,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		}
 	}
 
-	const enclosureTags = itemXml.match(/<enclosure[^>]*>/gi) ?? [];
+	const enclosureTags = itemXml.match(/<enclosure\b[^>]*>/gi) ?? [];
 
 	for (const tag of enclosureTags) {
 		const type = getAttributeValue(tag, "type").toLowerCase();
@@ -686,7 +695,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		}
 	}
 
-	const itunesImageTags = itemXml.match(/<itunes:image[^>]*>/gi) ?? [];
+	const itunesImageTags = itemXml.match(/<itunes:image\b[^>]*>/gi) ?? [];
 
 	for (const tag of itunesImageTags) {
 		const href = getAttributeValue(tag, "href");
@@ -721,8 +730,8 @@ function parsePublishedDate(value: string): string | null {
 }
 
 function parseRss(xml: string, source: string): RssArticle[] {
-	const itemMatches = xml.match(/<item[\s\S]*?<\/item>/gi) ?? [];
-	const entryMatches = xml.match(/<entry[\s\S]*?<\/entry>/gi) ?? [];
+	const itemMatches = xml.match(/<item\b[\s\S]*?<\/item>/gi) ?? [];
+	const entryMatches = xml.match(/<entry\b[\s\S]*?<\/entry>/gi) ?? [];
 	const matches = itemMatches.length > 0 ? itemMatches : entryMatches;
 
 	return matches.slice(0, MAX_ITEMS_PER_FEED).map((itemXml) => {
@@ -765,6 +774,12 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
 
 		return true;
 	});
+}
+
+function hasUsableThumbnail(article: RssArticle): article is RssArticle & {
+	imageUrl: string;
+} {
+	return Boolean(article.imageUrl?.trim());
 }
 
 function scoreArticleCandidate(
@@ -851,14 +866,16 @@ function shouldSkipBeforeAi(
 	return hardNegativeMatchCount >= 2 && positiveEscapeMatchCount === 0;
 }
 
-function buildLocalRejectedArticles(
+function buildRejectedArticles(
 	articles: RssArticle[],
+	baseDecision: AiArticleDecision,
+	reasonBuilder: (article: RssArticle) => string,
 ): ReviewedArticleResult[] {
 	return articles.map((article) => ({
 		article,
 		aiDecision: {
-			...LOCAL_PREFILTER_REJECT_DECISION,
-			reason: `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+			...baseDecision,
+			reason: reasonBuilder(article),
 		},
 	}));
 }
@@ -888,14 +905,17 @@ async function mapWithConcurrency<T, R>(
 	concurrency: number,
 	mapper: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-	const results: R[] = [];
+	const results: R[] = new Array(items.length);
 	let nextIndex = 0;
 
 	async function worker() {
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex;
 			nextIndex += 1;
-			results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+			results[currentIndex] = await mapper(
+				items[currentIndex] as T,
+				currentIndex,
+			);
 		}
 	}
 
@@ -1081,29 +1101,23 @@ async function classifyAndSummarizeArticle(
 				{
 					role: "system",
 					content:
-						"You are filtering articles for NutsNews, a peaceful uplifting news feed. Reject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories. Be selective, but do not reject a clearly positive article just because it comes from a broad news source. Return only valid JSON.",
+						"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories. Be selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
 				},
 				{
 					role: "user",
-					content: `
-Article:
-
+					content: `Article:
 Source: ${article.source}
-
 Title: ${article.title}
-
 Excerpt: ${article.excerpt}
 
 Return JSON exactly like this:
-
 {
   "decision": "accept" or "reject",
   "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting | Nature | Space | Creativity",
   "positivity_score": number from 1 to 10,
   "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
-}
-          `,
+}`,
 				},
 			],
 		}),
@@ -1167,20 +1181,15 @@ Return JSON exactly like this:
 			JSON.parse(content) as Partial<AiArticleDecision>,
 		);
 
-		await logInfo(
-			env,
-			"worker.openai.article_reviewed",
-			"OpenAI reviewed article",
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				decision: parsedDecision.decision,
-				category: parsedDecision.category,
-				positivityScore: parsedDecision.positivity_score,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logInfo(env, "worker.openai.article_reviewed", "OpenAI reviewed article", {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			decision: parsedDecision.decision,
+			category: parsedDecision.category,
+			positivityScore: parsedDecision.positivity_score,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return parsedDecision;
 	} catch (error) {
@@ -1329,13 +1338,20 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
+		const hasThumbnail = hasUsableThumbnail(article);
 
-		const normalizedDecision =
-			aiDecision.decision === "accept" ? "accept" : "reject";
+		const requestedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
+		const normalizedDecision: "accept" | "reject" =
+			requestedDecision === "accept" && hasThumbnail ? "accept" : "reject";
+
 		const normalizedCategory = aiDecision.category || "Uplifting";
 		const normalizedScore = aiDecision.positivity_score ?? 0;
 		const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
-		const normalizedReason = aiDecision.reason || "No reason provided";
+
+		const normalizedReason =
+			requestedDecision === "accept" && !hasThumbnail
+				? "Rejected before publish because the RSS item did not include a usable image thumbnail."
+				: aiDecision.reason || "No reason provided";
 
 		reviewRows.push({
 			original_url: article.url,
@@ -1407,17 +1423,16 @@ async function refreshArticles(
 	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
 	const candidateUrls = candidateArticles.map((article) => article.url);
 
-	await logInfo(
-		env,
-		"worker.refresh.candidates_loaded",
-		"RSS candidates loaded",
-		{
-			shardIndex,
-			fetchedCount: fetchedArticles.length,
-			candidateCount: candidateArticles.length,
-			maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
-		},
-	);
+	await logInfo(env, "worker.refresh.candidates_loaded", "RSS candidates loaded", {
+		shardIndex,
+		fetchedCount: fetchedArticles.length,
+		candidateCount: candidateArticles.length,
+		thumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail).length,
+		noThumbnailCandidateCount: candidateArticles.filter(
+			(article) => !hasUsableThumbnail(article),
+		).length,
+		maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
+	});
 
 	const reviewedUrls = await getReviewedUrls(env, config, candidateUrls);
 
@@ -1425,7 +1440,14 @@ async function refreshArticles(
 		(article) => !reviewedUrls.has(article.url),
 	);
 
-	const localFilterResults = unreviewedArticles.map((article) => ({
+	const noThumbnailArticles = unreviewedArticles.filter(
+		(article) => !hasUsableThumbnail(article),
+	);
+
+	const unreviewedArticlesWithThumbnails =
+		unreviewedArticles.filter(hasUsableThumbnail);
+
+	const localFilterResults = unreviewedArticlesWithThumbnails.map((article) => ({
 		article,
 		shouldSkip: shouldSkipBeforeAi(article, positiveSources),
 	}));
@@ -1448,13 +1470,26 @@ async function refreshArticles(
 			shardIndex,
 			alreadyReviewedCount: reviewedUrls.size,
 			unreviewedCount: unreviewedArticles.length,
+			noThumbnailRejectedCount: noThumbnailArticles.length,
 			locallyRejectedCount: locallyRejectedArticles.length,
 			eligibleForAiCount: articlesEligibleForAi.length,
 			aiReviewCount: articlesForAi.length,
 		},
 	);
 
-	const locallyRejectedResults = buildLocalRejectedArticles(locallyRejectedArticles);
+	const noThumbnailRejectedResults = buildRejectedArticles(
+		noThumbnailArticles,
+		NO_THUMBNAIL_REJECT_DECISION,
+		(article) =>
+			`Skipped before AI from ${article.source}: RSS item did not include a usable image thumbnail.`,
+	);
+
+	const locallyRejectedResults = buildRejectedArticles(
+		locallyRejectedArticles,
+		LOCAL_PREFILTER_REJECT_DECISION,
+		(article) =>
+			`Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+	);
 
 	const aiReviewedArticles = await mapWithConcurrency(
 		articlesForAi,
@@ -1469,12 +1504,17 @@ async function refreshArticles(
 		},
 	);
 
-	const reviewedArticles = [...locallyRejectedResults, ...aiReviewedArticles];
+	const reviewedArticles = [
+		...noThumbnailRejectedResults,
+		...locallyRejectedResults,
+		...aiReviewedArticles,
+	];
 
 	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
 		buildRowsFromReviewedArticles(reviewedArticles);
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
+
 	const articleSaveOk = await saveAcceptedArticlesBatch(
 		env,
 		config,
@@ -1491,6 +1531,7 @@ async function refreshArticles(
 		candidateCount: candidateArticles.length,
 		alreadyReviewedCount: reviewedUrls.size,
 		unreviewedCount: unreviewedArticles.length,
+		noThumbnailRejectedCount: noThumbnailArticles.length,
 		locallyRejectedCount: locallyRejectedArticles.length,
 		eligibleForAiCount: articlesEligibleForAi.length,
 		aiReviewedCount: aiReviewedArticles.length,
@@ -1544,11 +1585,16 @@ export default {
 		}
 
 		if (url.pathname === "/log-test") {
-			await logInfo(env, "worker.log_test.completed", "Worker Better Stack log test completed", {
-				requestId,
-				path: url.pathname,
-				shardIndex: getShardIndex(env),
-			});
+			await logInfo(
+				env,
+				"worker.log_test.completed",
+				"Worker Better Stack log test completed",
+				{
+					requestId,
+					path: url.pathname,
+					shardIndex: getShardIndex(env),
+				},
+			);
 
 			return Response.json({
 				ok: true,
