@@ -20,6 +20,7 @@ The goal of NutsNews is to create a peaceful daily feed of uplifting, inspiring,
 * [Repository Structure](#repository-structure)
 * [Frontend Web App](#frontend-web-app)
 * [Cloudflare CDN and Cache Optimization](#cloudflare-cdn-and-cache-optimization)
+* [Centralized Logging with Better Stack](#centralized-logging-with-better-stack)
 * [RSS Ingestion Worker](#rss-ingestion-worker)
 * [Sharded Worker Design](#sharded-worker-design)
 * [Controller Worker](#controller-worker)
@@ -55,7 +56,7 @@ The platform is designed to be:
 * Automated end-to-end
 * Scalable across hundreds of RSS feeds
 * CDN-friendly for public pages and article APIs
-* Observable through uptime checks, Cloudflare logs, and Sentry error monitoring
+* Observable through uptime checks, Cloudflare logs, Sentry error monitoring, and Better Stack centralized logs
 
 High-level flow:
 
@@ -75,6 +76,20 @@ Next.js Website on Vercel
 Cloudflare CDN
   ↓
 Reader clicks through to the original publisher
+```
+
+High-level observability flow:
+
+```text
+Next.js Web App
+Cloudflare Worker Shards
+Controller Worker
+  ↓
+Structured JSON logs
+  ↓
+Better Stack Telemetry source: nutsnews
+  ↓
+Search by service, level, event, shardIndex, route, durationMs
 ```
 
 ---
@@ -185,6 +200,33 @@ This helps:
 * Reduce load during traffic spikes
 * Cache stable public pages while keeping content reasonably fresh
 
+### Centralized Better Stack logging
+
+NutsNews sends structured JSON logs to Better Stack so application activity is searchable in one place.
+
+Logs include searchable fields such as:
+
+* `level`
+* `service`
+* `environment`
+* `event`
+* `message`
+* `route`
+* `status`
+* `durationMs`
+* `shardIndex`
+* `articleCount`
+* `acceptedCount`
+* `rejectedCount`
+
+Current services:
+
+```text
+nutsnews-web
+nutsnews-worker
+nutsnews-controller
+```
+
 ### Sentry error monitoring
 
 NutsNews includes Sentry monitoring for frontend browser errors, Next.js runtime errors, and Cloudflare Worker shard failures.
@@ -222,7 +264,7 @@ CDN Layer
 Cloudflare proxies and caches public content where eligible
   ↓
 Observability Layer
-Better Stack Uptime, Cloudflare observability, and Sentry monitor availability and errors
+Better Stack Uptime, Better Stack centralized logs, Cloudflare observability, and Sentry monitor availability and errors
   ↓
 Distribution
 Readers click through to original publishers
@@ -230,19 +272,21 @@ Readers click through to original publishers
 
 ### Main components
 
-| Component           | Purpose                                                 |
-| ------------------- | ------------------------------------------------------- |
-| `web`               | Public Next.js website                                  |
-| `worker`            | RSS ingestion and article review pipeline               |
-| `controller`        | Optional controller Worker for triggering Worker shards |
-| `supabase`          | Database schema and data storage                        |
-| GitHub              | Source control                                          |
-| Vercel              | Frontend deployment                                     |
-| Cloudflare CDN      | DNS, proxy, cache, and edge protection                  |
-| Cloudflare Workers  | Scheduled or manually-triggered backend automation      |
-| OpenAI              | AI article classification and summary generation        |
-| Sentry              | Frontend and Worker error monitoring                    |
-| Better Stack Uptime | External uptime monitoring                              |
+| Component                   | Purpose                                                 |
+| --------------------------- | ------------------------------------------------------- |
+| `web`                       | Public Next.js website                                  |
+| `worker`                    | RSS ingestion and article review pipeline               |
+| `controller`                | Optional controller Worker for triggering Worker shards |
+| `supabase`                  | Database schema and data storage                        |
+| GitHub                      | Source control                                          |
+| Vercel                      | Frontend deployment                                     |
+| Cloudflare CDN              | DNS, proxy, cache, and edge protection                  |
+| Cloudflare Workers          | Scheduled or manually-triggered backend automation      |
+| Cloudflare Secrets Store    | Shared secret storage for Worker shards                 |
+| OpenAI                      | AI article classification and summary generation        |
+| Sentry                      | Frontend and Worker error monitoring                    |
+| Better Stack Uptime         | External uptime monitoring                              |
+| Better Stack Telemetry Logs | Centralized structured logging                          |
 
 ---
 
@@ -261,7 +305,9 @@ nutsnews/
 │   │   │   └── [id]/
 │   │   │       └── page.tsx
 │   │   ├── api/
-│   │   │   └── articles/
+│   │   │   ├── articles/
+│   │   │   │   └── route.ts
+│   │   │   └── log-test/
 │   │   │       └── route.ts
 │   │   ├── components/
 │   │   │   ├── ArticleFeed.tsx
@@ -270,7 +316,9 @@ nutsnews/
 │   │   └── sentry-test/
 │   │       └── page.tsx
 │   ├── lib/
-│   │   └── articles.ts
+│   │   ├── articles.ts
+│   │   ├── logger.ts
+│   │   └── supabase.ts
 │   ├── public/
 │   ├── instrumentation.ts
 │   ├── instrumentation-client.ts
@@ -281,7 +329,8 @@ nutsnews/
 │
 ├── worker/
 │   ├── src/
-│   │   └── index.ts
+│   │   ├── index.ts
+│   │   └── logger.ts
 │   ├── scripts/
 │   │   └── generate-wrangler-config.mjs
 │   ├── generated-wrangler/
@@ -290,7 +339,8 @@ nutsnews/
 │
 ├── controller/
 │   ├── src/
-│   │   └── index.ts
+│   │   ├── index.ts
+│   │   └── logger.ts
 │   ├── wrangler.jsonc
 │   └── package.json
 │
@@ -326,6 +376,7 @@ The `web` app is the public NutsNews website. It is built with Next.js and desig
 * Capture frontend/browser errors through Sentry
 * Capture global Next.js runtime errors through Sentry
 * Send cache-friendly headers for public content
+* Send structured application logs to Better Stack
 
 ### Important files
 
@@ -335,8 +386,11 @@ The `web` app is the public NutsNews website. It is built with Next.js and desig
 | `web/app/about/page.tsx`             | Project About page                              |
 | `web/app/articles/[id]/page.tsx`     | Individual article page                         |
 | `web/app/components/ArticleFeed.tsx` | Interactive story feed component                |
-| `web/app/api/articles/route.ts`      | Paginated article API                           |
-| `web/lib/articles.ts`                | Supabase data helpers                           |
+| `web/app/api/articles/route.ts`      | Paginated article API with structured logs      |
+| `web/app/api/log-test/route.ts`      | Better Stack logging test endpoint              |
+| `web/lib/articles.ts`                | Supabase data helpers with structured logs      |
+| `web/lib/logger.ts`                  | Better Stack structured logger                  |
+| `web/lib/supabase.ts`                | Supabase client                                 |
 | `web/instrumentation-client.ts`      | Sentry browser/client configuration             |
 | `web/instrumentation.ts`             | Next.js instrumentation hook for Sentry         |
 | `web/sentry.server.config.ts`        | Sentry server runtime configuration             |
@@ -492,9 +546,12 @@ These routes should not be cached:
 
 ```text
 /monitoring*
+/api/log-test*
 ```
 
 The `/monitoring` route is used by the Sentry tunnel and should remain uncached.
+
+The `/api/log-test` route is used to validate Better Stack logging and should remain uncached.
 
 Future private/admin/auth routes should also bypass CDN cache.
 
@@ -539,20 +596,20 @@ Edge TTL: Use cache-control header if present, bypass cache if not
 Browser TTL: Respect origin
 ```
 
-### Cloudflare Cache Rule: bypass monitoring
+### Cloudflare Cache Rule: bypass monitoring and log test routes
 
 Create this rule above the public cache rule.
 
 Rule name:
 
 ```text
-Bypass monitoring routes
+Bypass monitoring and log test routes
 ```
 
 Expression:
 
 ```text
-(http.host in {"nutsnews.com" "www.nutsnews.com"} and starts_with(http.request.uri.path, "/monitoring"))
+(http.host in {"nutsnews.com" "www.nutsnews.com"} and (starts_with(http.request.uri.path, "/monitoring") or starts_with(http.request.uri.path, "/api/log-test")))
 ```
 
 Settings:
@@ -690,6 +747,486 @@ Tiered Cache: On
 
 ---
 
+## Centralized Logging with Better Stack
+
+NutsNews uses Better Stack Telemetry Logs as a centralized logging destination.
+
+The current Better Stack source/resource is:
+
+```text
+nutsnews
+```
+
+All services can send logs into the same Better Stack source. The structured `service` field separates logs by runtime.
+
+Current service names:
+
+```text
+nutsnews-web
+nutsnews-worker
+nutsnews-controller
+```
+
+### Why centralized logs were added
+
+Centralized logs help answer questions like:
+
+* Did the Worker run?
+* Which shard failed?
+* How many articles were fetched?
+* How many articles were accepted or rejected?
+* Did Supabase return an error?
+* Did OpenAI return invalid JSON?
+* Did the article API fail?
+* Did the controller call the correct shard?
+* How long did each step take?
+* Are warnings or errors increasing?
+
+### Structured log format
+
+Logs are sent as JSON.
+
+Example Worker log:
+
+```json
+{
+  "dt": "2026-06-13T12:00:00.000Z",
+  "level": "info",
+  "service": "nutsnews-worker",
+  "environment": "production",
+  "event": "worker.refresh.completed",
+  "message": "NutsNews Worker refresh completed",
+  "shardIndex": "0",
+  "feedCount": 20,
+  "fetchedCount": 120,
+  "candidateCount": 120,
+  "alreadyReviewedCount": 80,
+  "unreviewedCount": 40,
+  "locallyRejectedCount": 10,
+  "eligibleForAiCount": 30,
+  "aiReviewedCount": 12,
+  "acceptedCount": 4,
+  "rejectedCount": 18,
+  "durationMs": 8421
+}
+```
+
+Example web log:
+
+```json
+{
+  "dt": "2026-06-13T12:00:00.000Z",
+  "level": "info",
+  "service": "nutsnews-web",
+  "environment": "production",
+  "event": "api.articles.request_completed",
+  "message": "Articles API request completed",
+  "route": "/api/articles",
+  "method": "GET",
+  "status": 200,
+  "page": 0,
+  "category": "all",
+  "articleCount": 5,
+  "durationMs": 143
+}
+```
+
+Example controller log:
+
+```json
+{
+  "dt": "2026-06-13T12:00:00.000Z",
+  "level": "info",
+  "service": "nutsnews-controller",
+  "environment": "production",
+  "event": "controller.shard.call_completed",
+  "message": "Controller shard call completed",
+  "requestId": "example-request-id",
+  "shardIndex": 17,
+  "shardUrl": "https://nutsnews-worker-17.nutsnews.workers.dev/?limit=12",
+  "ok": true,
+  "status": 200,
+  "durationMs": 2734
+}
+```
+
+### Log levels
+
+The platform uses these log levels:
+
+| Level   | Meaning                                |
+| ------- | -------------------------------------- |
+| `debug` | Extra detail for debugging             |
+| `info`  | Normal successful activity             |
+| `warn`  | Recoverable issue or unexpected status |
+| `error` | Failed operation or thrown exception   |
+
+### Better Stack search examples
+
+In Better Stack Live tail or Explore, search by service:
+
+```text
+service:nutsnews-web
+service:nutsnews-worker
+service:nutsnews-controller
+```
+
+Search for Worker errors:
+
+```text
+service:nutsnews-worker level:error
+```
+
+Search for Worker warnings:
+
+```text
+service:nutsnews-worker level:warn
+```
+
+Search for a specific shard:
+
+```text
+service:nutsnews-worker shardIndex:0
+```
+
+Search for completed Worker refreshes:
+
+```text
+event:worker.refresh.completed
+```
+
+Search for failed Worker refreshes:
+
+```text
+event:worker.request.failed
+event:worker.scheduled.failed
+event:worker.refresh.failed
+```
+
+Search for web article API requests:
+
+```text
+service:nutsnews-web event:api.articles.request_completed
+```
+
+Search for Supabase article load errors:
+
+```text
+event:supabase.articles.load_failed
+```
+
+Search for controller shard calls:
+
+```text
+service:nutsnews-controller event:controller.shard.call_completed
+```
+
+Search all production errors:
+
+```text
+environment:production level:error
+```
+
+### Logging source files
+
+| File                                          | Purpose                                                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `web/lib/logger.ts`                           | Sends structured web logs to Better Stack                                                   |
+| `web/lib/articles.ts`                         | Logs Supabase article/category/sitemap load success and failure                             |
+| `web/app/api/articles/route.ts`               | Logs article API request lifecycle                                                          |
+| `web/app/api/log-test/route.ts`               | Emits test web logs                                                                         |
+| `worker/src/logger.ts`                        | Sends structured Worker logs to Better Stack                                                |
+| `worker/src/index.ts`                         | Logs RSS fetches, filtering, OpenAI review, Supabase saves, manual runs, and scheduled runs |
+| `worker/scripts/generate-wrangler-config.mjs` | Binds Better Stack Secrets Store values into every shard config                             |
+| `controller/src/logger.ts`                    | Sends structured controller logs to Better Stack                                            |
+| `controller/src/index.ts`                     | Logs controller requests, shard calls, scheduled runs, and failures                         |
+
+### Better Stack environment variables
+
+The web app, Worker shards, and controller need:
+
+```env
+BETTER_STACK_SOURCE_TOKEN=
+BETTER_STACK_INGESTING_HOST=
+```
+
+Do not prefix these with `NEXT_PUBLIC_`.
+
+Do not include `Bearer` in `BETTER_STACK_SOURCE_TOKEN`.
+
+The ingesting host can be stored like:
+
+```env
+BETTER_STACK_INGESTING_HOST=s123456.eu-nbg-2.betterstackdata.com
+```
+
+The logger supports the host with or without `https://`.
+
+### Web app setup
+
+In Vercel:
+
+```text
+Vercel
+→ NutsNews project
+→ Settings
+→ Environment Variables
+```
+
+Add:
+
+```env
+BETTER_STACK_SOURCE_TOKEN=your_source_token
+BETTER_STACK_INGESTING_HOST=your_ingesting_host
+```
+
+Then redeploy the site.
+
+Test:
+
+```bash
+curl https://www.nutsnews.com/api/log-test
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-web
+event:api.log_test.completed
+level:info
+```
+
+### Worker Secrets Store setup
+
+Worker shards use Cloudflare Secrets Store.
+
+Set the store ID locally:
+
+```bash
+cd worker
+export NUTSNEWS_SECRETS_STORE_ID="your-cloudflare-secrets-store-id"
+```
+
+Create the Better Stack secrets:
+
+```bash
+npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" \
+  --name BETTER_STACK_SOURCE_TOKEN \
+  --scopes workers \
+  --remote
+```
+
+```bash
+npx wrangler secrets-store secret create "$NUTSNEWS_SECRETS_STORE_ID" \
+  --name BETTER_STACK_INGESTING_HOST \
+  --scopes workers \
+  --remote
+```
+
+If the secrets already exist, edit them in:
+
+```text
+Cloudflare
+→ Secrets Store
+→ BETTER_STACK_SOURCE_TOKEN
+→ Edit
+```
+
+and:
+
+```text
+Cloudflare
+→ Secrets Store
+→ BETTER_STACK_INGESTING_HOST
+→ Edit
+```
+
+Regenerate Worker shard configs:
+
+```bash
+npm run generate:wrangler
+```
+
+Verify Better Stack bindings exist:
+
+```bash
+grep -n "BETTER_STACK" generated-wrangler/wrangler.shard0.jsonc
+```
+
+Expected result:
+
+```text
+BETTER_STACK_SOURCE_TOKEN
+BETTER_STACK_INGESTING_HOST
+```
+
+Deploy all Worker shards:
+
+```bash
+npm run deploy:all
+```
+
+Test Worker logging:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-worker
+event:worker.log_test.completed
+level:info
+shardIndex:0
+```
+
+### Controller setup
+
+The controller can use regular Cloudflare Worker secrets or Secrets Store, depending on the deployed config.
+
+Using regular Worker secrets:
+
+```bash
+cd controller
+npx wrangler secret put BETTER_STACK_SOURCE_TOKEN
+npx wrangler secret put BETTER_STACK_INGESTING_HOST
+npm run deploy
+```
+
+Test:
+
+```bash
+curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-controller
+event:controller.request_completed
+```
+
+### Local logging test
+
+For local web logs, create:
+
+```text
+web/.env.local
+```
+
+Add:
+
+```env
+BETTER_STACK_SOURCE_TOKEN=your_source_token
+BETTER_STACK_INGESTING_HOST=your_ingesting_host
+NEXT_PUBLIC_APP_ENV=local
+```
+
+Run:
+
+```bash
+cd web
+npm run dev
+```
+
+Test:
+
+```bash
+curl http://localhost:3000/api/log-test
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-web environment:local
+event:api.log_test.completed
+```
+
+For local Worker logs, create:
+
+```text
+worker/.dev.vars
+```
+
+Add:
+
+```env
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+OPENAI_API_KEY=your_openai_key
+BETTER_STACK_SOURCE_TOKEN=your_source_token
+BETTER_STACK_INGESTING_HOST=your_ingesting_host
+FEED_SHARD_INDEX=0
+FEEDS_PER_SHARD=20
+```
+
+Run:
+
+```bash
+cd worker
+npm run dev
+```
+
+Test:
+
+```bash
+curl http://localhost:8787/log-test
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-worker
+event:worker.log_test.completed
+```
+
+Do not commit:
+
+```text
+web/.env.local
+worker/.dev.vars
+controller/.dev.vars
+```
+
+### Troubleshooting Better Stack logs
+
+If `/log-test` returns OK but logs do not appear in Better Stack:
+
+1. Make sure you are looking inside the `nutsnews` Better Stack source.
+2. Search for `service:nutsnews-worker`, not a separate resource name.
+3. Check the time range is recent or use Live tail.
+4. Run:
+
+```bash
+cd worker
+npx wrangler tail nutsnews-worker-0
+```
+
+Then call:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
+```
+
+Look for:
+
+```text
+better_stack.delivery_failed
+```
+
+If that appears, the Worker could not send to Better Stack.
+
+Common causes:
+
+* Wrong Better Stack source token
+* Wrong ingesting host
+* Missing Secrets Store binding in generated Wrangler config
+* Worker shard was not redeployed after config generation
+* Looking in the wrong Better Stack source or time range
+
+---
+
 ## RSS Ingestion Worker
 
 The ingestion Worker is responsible for discovering, filtering, reviewing, and saving articles.
@@ -719,7 +1256,9 @@ Save all review decisions
   ↓
 Publish accepted articles
   ↓
-Capture Worker failures and important warnings with Sentry
+Emit structured Better Stack logs
+  ↓
+Capture Worker failures and important warnings with Sentry/Cloudflare logs
 ```
 
 ### Article metadata extracted from feeds
@@ -750,23 +1289,33 @@ This helps reduce duplicate reviews and duplicate article rows.
 
 ### Worker observability
 
-The Worker reports important failures to Sentry, including:
+The Worker reports important events and failures to Better Stack, including:
 
-* RSS feed fetch failures
-* Supabase review lookup failures
-* Supabase article/review save failures
-* OpenAI classification failures
+* Manual request start/completion/failure
+* Scheduled request start/completion/failure
+* RSS feed fetch success/failure
+* Supabase review lookup success/failure
+* Supabase article/review save success/failure
+* OpenAI classification success/failure
 * Invalid OpenAI JSON responses
-* Scheduled Worker crashes
-* Manual Worker route crashes
+* Local filter counts
+* Accepted/rejected article counts
+* Shard index
+* Duration in milliseconds
 
 The Worker also includes a test route:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
+```
+
+The Worker Sentry test route remains:
 
 ```bash
 curl "https://nutsnews-worker-0.nutsnews.workers.dev/sentry-test"
 ```
 
-That route intentionally throws an error to validate Sentry Worker monitoring.
+That route intentionally throws an error to validate Worker error monitoring.
 
 ---
 
@@ -819,7 +1368,7 @@ This allows the platform to:
 * Stay closer to free-tier limits
 * Keep process updates centralized
 * Deploy the same source code across many Worker instances
-* Monitor individual shard failures through Sentry and Cloudflare logs
+* Monitor individual shard failures through Sentry, Cloudflare logs, and Better Stack logs
 
 ### Generated Wrangler configs
 
@@ -835,7 +1384,17 @@ The generated configs include:
 "compatibility_flags": ["nodejs_compat"]
 ```
 
-This allows the deployed Worker bundle to support required Node.js compatibility behavior.
+The generated configs also include Secrets Store bindings for:
+
+```text
+SUPABASE_URL
+SUPABASE_SERVICE_ROLE_KEY
+OPENAI_API_KEY
+BETTER_STACK_SOURCE_TOKEN
+BETTER_STACK_INGESTING_HOST
+```
+
+This allows every shard to access the same account-level Cloudflare Secrets Store values.
 
 ---
 
@@ -855,6 +1414,8 @@ Determines which shard should run
 Builds shard URL
   ↓
 Calls nutsnews-worker-{index}.workers.dev
+  ↓
+Logs structured controller and shard-call data to Better Stack
   ↓
 Returns or logs the shard result
 ```
@@ -1061,19 +1622,20 @@ The summary is intended to be brief, original, and not a replacement for the ful
 
 ## Tech Stack
 
-| Technology               | Role                                                                              |
-| ------------------------ | --------------------------------------------------------------------------------- |
-| Next.js                  | Mobile-friendly website and article feed                                          |
-| GitHub → Vercel CI/CD    | Every push to `main` triggers an automatic Vercel build and production deployment |
-| Vercel                   | Frontend hosting, HTTPS, custom domain, and production deployment                 |
-| Supabase                 | Postgres database for article storage                                             |
-| Cloudflare CDN           | DNS, proxy, caching, and edge protection                                          |
-| Cloudflare Workers       | Scheduled RSS ingestion and automation                                            |
-| Cloudflare Secrets Store | Centralized secret storage for Worker shards                                      |
-| OpenAI                   | Article filtering and cheerful summary generation                                 |
-| Sentry                   | Frontend, Next.js, and Worker error monitoring                                    |
-| Better Stack Uptime      | External availability monitoring                                                  |
-| RSS Feeds                | Story sources from trusted publishers                                             |
+| Technology                  | Role                                                                              |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| Next.js                     | Mobile-friendly website and article feed                                          |
+| GitHub → Vercel CI/CD       | Every push to `main` triggers an automatic Vercel build and production deployment |
+| Vercel                      | Frontend hosting, HTTPS, custom domain, and production deployment                 |
+| Supabase                    | Postgres database for article storage                                             |
+| Cloudflare CDN              | DNS, proxy, caching, and edge protection                                          |
+| Cloudflare Workers          | Scheduled RSS ingestion and automation                                            |
+| Cloudflare Secrets Store    | Centralized secret storage for Worker shards                                      |
+| OpenAI                      | Article filtering and cheerful summary generation                                 |
+| Sentry                      | Frontend, Next.js, and Worker error monitoring                                    |
+| Better Stack Uptime         | External availability monitoring                                                  |
+| Better Stack Telemetry Logs | Centralized structured logs                                                       |
+| RSS Feeds                   | Story sources from trusted publishers                                             |
 
 ---
 
@@ -1100,6 +1662,9 @@ Deployment flow:
 4. Cloudflare CDN
    Public traffic flows through Cloudflare, which caches eligible public
    pages and API responses.
+
+5. Better Stack logs
+   Runtime application logs are sent to the Better Stack nutsnews source.
 ```
 
 After CDN-related deploys, purge Cloudflare cache:
@@ -1128,7 +1693,7 @@ For one shard:
 
 ```bash
 cd worker
-npm run deploy:shard0
+npx wrangler deploy --config generated-wrangler/wrangler.shard0.jsonc
 ```
 
 For the controller Worker:
@@ -1152,6 +1717,8 @@ NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 NEXT_PUBLIC_SENTRY_DSN=
 NEXT_PUBLIC_APP_ENV=production
+BETTER_STACK_SOURCE_TOKEN=
+BETTER_STACK_INGESTING_HOST=
 ```
 
 Sentry build/release variables:
@@ -1166,17 +1733,19 @@ Notes:
 
 * `NEXT_PUBLIC_SENTRY_DSN` is safe to expose to the browser.
 * `SENTRY_AUTH_TOKEN` must stay secret and should only be stored in local `.env.local` or Vercel environment variables.
+* `BETTER_STACK_SOURCE_TOKEN` must stay secret and should not use `NEXT_PUBLIC_`.
 * Do not commit `.env.local`.
 
 ### Worker shards
 
-Worker shards need these secrets:
+Worker shards need these Cloudflare Secrets Store values:
 
 ```text
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 OPENAI_API_KEY
-SENTRY_DSN
+BETTER_STACK_SOURCE_TOKEN
+BETTER_STACK_INGESTING_HOST
 ```
 
 Worker shards also use these generated variables:
@@ -1194,7 +1763,8 @@ If using Cloudflare Secrets Store, secret values are read asynchronously:
 const supabaseUrl = await env.SUPABASE_URL.get();
 const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
 const openAiApiKey = await env.OPENAI_API_KEY.get();
-const sentryDsn = await env.SENTRY_DSN.get();
+const betterStackSourceToken = await env.BETTER_STACK_SOURCE_TOKEN.get();
+const betterStackIngestingHost = await env.BETTER_STACK_INGESTING_HOST.get();
 ```
 
 The shard config generator needs this local terminal variable:
@@ -1215,6 +1785,13 @@ SHARD_WORKER_SUBDOMAIN=nutsnews
 MAX_AI_REVIEWS_PER_SHARD=12
 ```
 
+The controller also uses Better Stack secrets:
+
+```text
+BETTER_STACK_SOURCE_TOKEN
+BETTER_STACK_INGESTING_HOST
+```
+
 ---
 
 ## Local Development
@@ -1231,6 +1808,41 @@ Open:
 
 ```text
 http://localhost:3000
+```
+
+### Local web logging test
+
+Create:
+
+```text
+web/.env.local
+```
+
+Add:
+
+```env
+BETTER_STACK_SOURCE_TOKEN=your_source_token
+BETTER_STACK_INGESTING_HOST=your_ingesting_host
+NEXT_PUBLIC_APP_ENV=local
+```
+
+Run:
+
+```bash
+cd web
+npm run dev
+```
+
+Test:
+
+```bash
+curl http://localhost:3000/api/log-test
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-web environment:local
 ```
 
 ### Local frontend Sentry test
@@ -1280,6 +1892,37 @@ npm install
 npm run dev
 ```
 
+For local Worker logging, create:
+
+```text
+worker/.dev.vars
+```
+
+Add:
+
+```env
+SUPABASE_URL=your_supabase_url
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+OPENAI_API_KEY=your_openai_key
+BETTER_STACK_SOURCE_TOKEN=your_source_token
+BETTER_STACK_INGESTING_HOST=your_ingesting_host
+FEED_SHARD_INDEX=0
+FEEDS_PER_SHARD=20
+```
+
+Test:
+
+```bash
+curl http://localhost:8787/log-test
+```
+
+Search Better Stack:
+
+```text
+service:nutsnews-worker
+event:worker.log_test.completed
+```
+
 Generate shard configs:
 
 ```bash
@@ -1314,15 +1957,84 @@ npm run deploy
 NutsNews uses multiple layers of monitoring:
 
 * Better Stack Uptime for external availability checks
+* Better Stack Telemetry Logs for centralized structured logs
 * Cloudflare Worker logs and observability for Worker runtime visibility
 * Cloudflare CDN cache status for public route caching
 * Sentry for frontend and Worker error monitoring
 * Supabase queries for article/review verification
 
+### Better Stack centralized log searches
+
+Search all NutsNews logs:
+
+```text
+service:nutsnews-web OR service:nutsnews-worker OR service:nutsnews-controller
+```
+
+Search all errors:
+
+```text
+level:error
+```
+
+Search Worker errors only:
+
+```text
+service:nutsnews-worker level:error
+```
+
+Search one Worker shard:
+
+```text
+service:nutsnews-worker shardIndex:0
+```
+
+Search completed refreshes:
+
+```text
+event:worker.refresh.completed
+```
+
+Search article API requests:
+
+```text
+event:api.articles.request_completed
+```
+
+Search controller calls:
+
+```text
+event:controller.shard.call_completed
+```
+
 ### Test one shard
 
 ```bash
 curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
+```
+
+### Test Worker logging
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/log-test"
+```
+
+Search:
+
+```text
+service:nutsnews-worker event:worker.log_test.completed
+```
+
+### Test web logging
+
+```bash
+curl "https://www.nutsnews.com/api/log-test"
+```
+
+Search:
+
+```text
+service:nutsnews-web event:api.log_test.completed
 ```
 
 ### Test a few deployed shards
@@ -1613,15 +2325,16 @@ Production should have `SENTRY_AUTH_TOKEN` configured in Vercel.
 
 The About page lists the current cost model as:
 
-| Item                |     Cost | Notes                                                         |
-| ------------------- | -------: | ------------------------------------------------------------- |
-| Domain              | `$11.95` | The only paid cost so far is the NutsNews domain registration |
-| Vercel              |     `$0` | The Next.js website is hosted on the Vercel free tier         |
-| Supabase            |     `$0` | Article storage uses the Supabase free tier                   |
-| Cloudflare Workers  |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier     |
-| Cloudflare CDN      |     `$0` | DNS/proxy/cache can run on the Cloudflare free tier           |
-| Better Stack Uptime |     `$0` | External uptime monitoring uses the free tier                 |
-| Sentry              |     `$0` | Error monitoring uses the Sentry free tier                    |
+| Item                        |     Cost | Notes                                                          |
+| --------------------------- | -------: | -------------------------------------------------------------- |
+| Domain                      | `$11.95` | The only paid cost so far is the NutsNews domain registration  |
+| Vercel                      |     `$0` | The Next.js website is hosted on the Vercel free tier          |
+| Supabase                    |     `$0` | Article storage uses the Supabase free tier                    |
+| Cloudflare Workers          |     `$0` | Scheduled RSS automation runs on the Cloudflare free tier      |
+| Cloudflare CDN              |     `$0` | DNS/proxy/cache can run on the Cloudflare free tier            |
+| Better Stack Uptime         |     `$0` | External uptime monitoring uses the free tier                  |
+| Better Stack Telemetry Logs |     `$0` | Centralized structured logging uses the Better Stack free tier |
+| Sentry                      |     `$0` | Error monitoring uses the Sentry free tier                     |
 
 **Total current fixed cost:** `$11.95`
 
@@ -1648,6 +2361,10 @@ Scheduled or controller-triggered automation refreshes the article queue through
 ### CDN-assisted delivery
 
 Cloudflare can cache public pages and article API responses to make repeat visits faster and reduce origin traffic.
+
+### Centralized observability
+
+Better Stack Telemetry Logs gives NutsNews one searchable place for application, Worker, and controller logs.
 
 ### Focused editorial voice
 
@@ -1699,6 +2416,9 @@ Potential improvements:
 * Add Sentry alert rules for frontend production regressions
 * Add Worker health dashboards by shard
 * Add Cloudflare cache HIT ratio review
+* Add Better Stack dashboards for Worker shard success/failure counts
+* Add Better Stack alert rules for `level:error`
+* Add Better Stack alert rules for repeated `worker.scheduled.failed`
 * Add automated cache purge workflow after production deploys
 
 ---
@@ -1713,4 +2433,4 @@ See the [LICENSE](LICENSE) file for details.
 
 ## Status
 
-NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, CDN-assisted delivery, and low-cost observability.
+NutsNews is an active experimental platform for automated uplifting-news discovery, AI-assisted editorial filtering, mobile-first publishing, CDN-assisted delivery, centralized structured logging, and low-cost observability.

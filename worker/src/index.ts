@@ -1,18 +1,21 @@
-import * as Sentry from "@sentry/cloudflare";
+import { logError, logInfo, logWarn } from "./logger";
 
 type SecretBinding = {
 	get: () => Promise<string>;
 };
 
+type MaybeSecretBinding = string | SecretBinding | undefined;
+
 type Env = {
-	SUPABASE_URL: SecretBinding;
-	SUPABASE_SERVICE_ROLE_KEY: SecretBinding;
-	OPENAI_API_KEY: SecretBinding;
-	SENTRY_DSN: SecretBinding;
+	SUPABASE_URL: MaybeSecretBinding;
+	SUPABASE_SERVICE_ROLE_KEY: MaybeSecretBinding;
+	OPENAI_API_KEY: MaybeSecretBinding;
+
 	FEED_SHARD_INDEX?: string;
 	FEEDS_PER_SHARD?: string;
-	SENTRY_ENVIRONMENT?: string;
-	SENTRY_TRACES_SAMPLE_RATE?: string;
+
+	BETTER_STACK_SOURCE_TOKEN?: MaybeSecretBinding;
+	BETTER_STACK_INGESTING_HOST?: MaybeSecretBinding;
 };
 
 type RuntimeConfig = {
@@ -83,6 +86,26 @@ type ReviewedArticleResult = {
 	aiDecision: AiArticleDecision;
 };
 
+type RefreshResult = {
+	message: string;
+	shardIndex: number;
+	feedsPerShard: number;
+	maxAiReviews: number;
+	feedCount: number;
+	fetchedCount: number;
+	candidateCount: number;
+	alreadyReviewedCount: number;
+	unreviewedCount: number;
+	locallyRejectedCount: number;
+	eligibleForAiCount: number;
+	aiReviewedCount: number;
+	acceptedCount: number;
+	rejectedCount: number;
+	reviewSaveOk: boolean;
+	articleSaveOk: boolean;
+	durationMs: number;
+};
+
 const MAX_ITEMS_PER_FEED = 35;
 const MAX_CANDIDATES_PER_RUN = 300;
 const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
@@ -108,6 +131,7 @@ const POSITIVE_KEYWORDS = [
 	"helping",
 	"helps",
 	"hero",
+	"heroes",
 	"achievement",
 	"breakthrough",
 	"discovery",
@@ -330,10 +354,24 @@ const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
 	reason: "Skipped before AI because the article matched hard negative local filters.",
 };
 
+async function resolveValue(value: MaybeSecretBinding) {
+	if (!value) {
+		return "";
+	}
+
+	if (typeof value === "string") {
+		return value;
+	}
+
+	return value.get();
+}
+
 async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
-	const supabaseUrl = await env.SUPABASE_URL.get();
-	const supabaseServiceRoleKey = await env.SUPABASE_SERVICE_ROLE_KEY.get();
-	const openAiApiKey = await env.OPENAI_API_KEY.get();
+	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
+	const supabaseServiceRoleKey = await resolveValue(
+		env.SUPABASE_SERVICE_ROLE_KEY,
+	);
+	const openAiApiKey = await resolveValue(env.OPENAI_API_KEY);
 
 	if (!supabaseUrl) {
 		throw new Error("Missing SUPABASE_URL secret.");
@@ -374,6 +412,14 @@ function getFeedsPerShard(env: Env): number {
 	return Math.floor(feedsPerShard);
 }
 
+function clampAiReviewLimit(value: number | undefined): number {
+	if (!value || Number.isNaN(value)) {
+		return DEFAULT_MAX_AI_REVIEWS_PER_RUN;
+	}
+
+	return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
+}
+
 async function getFeedsForShard(
 	env: Env,
 	config: RuntimeConfig,
@@ -396,25 +442,50 @@ async function getFeedsForShard(
 	if (!response.ok) {
 		const errorText = await response.text();
 
+		await logWarn(
+			env,
+			"worker.feeds.load_failed",
+			"Failed to load RSS feeds for shard",
+			{
+				shardIndex,
+				feedsPerShard,
+				offset,
+				status: response.status,
+				errorText,
+			},
+		);
+
 		throw new Error(
 			`Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`,
 		);
 	}
 
-	return (await response.json()) as RssFeed[];
+	const feeds = (await response.json()) as RssFeed[];
+
+	await logInfo(env, "worker.feeds.loaded", "Loaded RSS feeds for shard", {
+		shardIndex,
+		feedsPerShard,
+		offset,
+		feedCount: feeds.length,
+		positiveFeedCount: feeds.filter((feed) => feed.is_positive_source).length,
+	});
+
+	return feeds;
 }
 
 function decodeHtml(value: string): string {
 	return value
 		.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-		.replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+		.replace(/&#(\d+);/g, (_match, code) =>
+			String.fromCharCode(Number(code)),
+		)
 		.replace(/&#x([a-fA-F0-9]+);/g, (_match, code) =>
 			String.fromCharCode(Number.parseInt(code, 16)),
 		)
 		.replace(/&amp;/g, "&")
 		.replace(/&quot;/g, '"')
-		.replace(/&apos;/g, "'")
 		.replace(/&#39;/g, "'")
+		.replace(/&apos;/g, "'")
 		.replace(/&lt;/g, "<")
 		.replace(/&gt;/g, ">");
 }
@@ -659,11 +730,13 @@ function parseRss(xml: string, source: string): RssArticle[] {
 		const rssLink = getTagValue(itemXml, "link");
 		const atomLink = getAtomLink(itemXml);
 		const url = normalizeUrl(rssLink || atomLink);
+
 		const description =
 			getTagValue(itemXml, "description") ||
 			getTagValue(itemXml, "summary") ||
 			getTagValue(itemXml, "content:encoded") ||
 			getTagValue(itemXml, "content");
+
 		const pubDate =
 			getTagValue(itemXml, "pubDate") ||
 			getTagValue(itemXml, "published") ||
@@ -810,14 +883,6 @@ function sortArticlesForReview(
 	});
 }
 
-function clampAiReviewLimit(value: number | undefined): number {
-	if (!value || Number.isNaN(value)) {
-		return DEFAULT_MAX_AI_REVIEWS_PER_RUN;
-	}
-
-	return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
-}
-
 async function mapWithConcurrency<T, R>(
 	items: T[],
 	concurrency: number,
@@ -835,7 +900,9 @@ async function mapWithConcurrency<T, R>(
 	}
 
 	const workers = Array.from(
-		{ length: Math.min(concurrency, items.length) },
+		{
+			length: Math.min(concurrency, items.length),
+		},
 		() => worker(),
 	);
 
@@ -844,10 +911,9 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
-async function fetchSingleFeed(feed: {
-	source: string;
-	url: string;
-}): Promise<RssArticle[]> {
+async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
+	const startedAt = Date.now();
+
 	try {
 		const response = await fetch(feed.url, {
 			headers: {
@@ -856,63 +922,71 @@ async function fetchSingleFeed(feed: {
 		});
 
 		if (!response.ok) {
-			console.log(`Failed to fetch ${feed.source}: ${response.status}`);
-
-			Sentry.captureMessage(`Failed to fetch RSS feed: ${feed.source}`, {
-				level: "warning",
-				tags: {
-					source: feed.source,
-					status: String(response.status),
-				},
+			await logWarn(env, "worker.rss.fetch_failed_status", "RSS feed fetch failed", {
+				source: feed.source,
+				feedUrl: feed.url,
+				status: response.status,
+				durationMs: Date.now() - startedAt,
 			});
 
 			return [];
 		}
 
 		const xml = await response.text();
+
 		const articles = parseRss(xml, feed.source).filter(
 			(article) => article.title && article.url,
 		);
+
 		const imageCount = articles.filter((article) => article.imageUrl).length;
 
-		console.log(
-			`Fetched ${articles.length} articles from ${feed.source}. RSS images found: ${imageCount}`,
-		);
+		await logInfo(env, "worker.rss.feed_fetched", "RSS feed fetched", {
+			source: feed.source,
+			feedUrl: feed.url,
+			articleCount: articles.length,
+			imageCount,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return articles;
 	} catch (error) {
-		console.log(`Failed to fetch ${feed.source}`, error);
-
-		Sentry.captureException(error, {
-			tags: {
-				area: "rss_fetch",
+		await logError(
+			env,
+			"worker.rss.fetch_failed_exception",
+			"RSS feed fetch threw an exception",
+			error,
+			{
 				source: feed.source,
-			},
-			extra: {
 				feedUrl: feed.url,
+				durationMs: Date.now() - startedAt,
 			},
-		});
+		);
 
 		return [];
 	}
 }
 
 async function fetchRssArticles(
+	env: Env,
 	feeds: RssFeed[],
 	positiveSources: Set<string>,
 ): Promise<RssArticle[]> {
 	const feedResults = await Promise.all(
-		feeds.map((feed) => fetchSingleFeed(feed)),
+		feeds.map((feed) => fetchSingleFeed(env, feed)),
 	);
+
 	const allArticles = feedResults.flat();
 
 	return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
 }
 
 async function getReviewedUrls(
+	env: Env,
 	config: RuntimeConfig,
 	urls: string[],
 ): Promise<Set<string>> {
+	const startedAt = Date.now();
+
 	if (urls.length === 0) {
 		return new Set();
 	}
@@ -934,20 +1008,17 @@ async function getReviewedUrls(
 	if (!response.ok) {
 		const errorText = await response.text();
 
-		console.log(
-			`Failed to load recent reviewed URLs: ${response.status} ${errorText}`,
-		);
-
-		Sentry.captureMessage("Failed to load recent reviewed URLs from Supabase", {
-			level: "warning",
-			tags: {
-				area: "supabase_review_lookup",
-				status: String(response.status),
-			},
-			extra: {
+		await logWarn(
+			env,
+			"worker.supabase.review_lookup_failed",
+			"Failed to load recent reviewed URLs from Supabase",
+			{
+				status: response.status,
 				errorText,
+				candidateUrlCount: urls.length,
+				durationMs: Date.now() - startedAt,
 			},
-		});
+		);
 
 		return reviewedUrls;
 	}
@@ -960,17 +1031,41 @@ async function getReviewedUrls(
 		}
 	}
 
-	console.log(
-		`Loaded ${rows.length} recent AI review URLs. Matched ${reviewedUrls.size} current candidates.`,
+	await logInfo(
+		env,
+		"worker.supabase.review_lookup_completed",
+		"Loaded recent reviewed URLs from Supabase",
+		{
+			lookbackCount: rows.length,
+			candidateUrlCount: urls.length,
+			matchedReviewedCount: reviewedUrls.size,
+			durationMs: Date.now() - startedAt,
+		},
 	);
 
 	return reviewedUrls;
 }
 
+function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecision {
+	const decision = value.decision === "accept" ? "accept" : "reject";
+
+	return {
+		decision,
+		category: value.category || "Uplifting",
+		positivity_score:
+			typeof value.positivity_score === "number" ? value.positivity_score : 0,
+		summary: value.summary || "",
+		reason: value.reason || "No reason provided by OpenAI.",
+	};
+}
+
 async function classifyAndSummarizeArticle(
+	env: Env,
 	config: RuntimeConfig,
 	article: RssArticle,
 ): Promise<AiArticleDecision> {
+	const startedAt = Date.now();
+
 	const response = await fetch("https://api.openai.com/v1/chat/completions", {
 		method: "POST",
 		headers: {
@@ -979,7 +1074,9 @@ async function classifyAndSummarizeArticle(
 		},
 		body: JSON.stringify({
 			model: "gpt-4o-mini",
-			response_format: { type: "json_object" },
+			response_format: {
+				type: "json_object",
+			},
 			messages: [
 				{
 					role: "system",
@@ -990,11 +1087,15 @@ async function classifyAndSummarizeArticle(
 					role: "user",
 					content: `
 Article:
+
 Source: ${article.source}
+
 Title: ${article.title}
+
 Excerpt: ${article.excerpt}
 
 Return JSON exactly like this:
+
 {
   "decision": "accept" or "reject",
   "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting | Nature | Space | Creativity",
@@ -1011,20 +1112,13 @@ Return JSON exactly like this:
 	if (!response.ok) {
 		const errorText = await response.text();
 
-		console.log(`OpenAI error: ${response.status} ${errorText}`);
-
-		Sentry.captureMessage("OpenAI article classification failed", {
-			level: "warning",
-			tags: {
-				area: "openai_classification",
-				source: article.source,
-				status: String(response.status),
-			},
-			extra: {
-				title: article.title,
-				originalUrl: article.url,
-				errorText,
-			},
+		await logWarn(env, "worker.openai.request_failed", "OpenAI request failed", {
+			status: response.status,
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			errorText,
+			durationMs: Date.now() - startedAt,
 		});
 
 		return {
@@ -1047,6 +1141,18 @@ Return JSON exactly like this:
 	const content = data.choices?.[0]?.message?.content;
 
 	if (!content) {
+		await logWarn(
+			env,
+			"worker.openai.empty_response",
+			"OpenAI returned empty content",
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
 		return {
 			decision: "reject",
 			category: "Uplifting",
@@ -1057,19 +1163,40 @@ Return JSON exactly like this:
 	}
 
 	try {
-		return JSON.parse(content) as AiArticleDecision;
-	} catch (error) {
-		Sentry.captureException(error, {
-			tags: {
-				area: "openai_json_parse",
+		const parsedDecision = normalizeAiDecision(
+			JSON.parse(content) as Partial<AiArticleDecision>,
+		);
+
+		await logInfo(
+			env,
+			"worker.openai.article_reviewed",
+			"OpenAI reviewed article",
+			{
 				source: article.source,
-			},
-			extra: {
 				title: article.title,
-				originalUrl: article.url,
-				content,
+				articleUrl: article.url,
+				decision: parsedDecision.decision,
+				category: parsedDecision.category,
+				positivityScore: parsedDecision.positivity_score,
+				durationMs: Date.now() - startedAt,
 			},
-		});
+		);
+
+		return parsedDecision;
+	} catch (error) {
+		await logError(
+			env,
+			"worker.openai.invalid_json",
+			"OpenAI returned invalid JSON",
+			error,
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				rawContent: content,
+				durationMs: Date.now() - startedAt,
+			},
+		);
 
 		return {
 			decision: "reject",
@@ -1082,9 +1209,12 @@ Return JSON exactly like this:
 }
 
 async function saveArticleReviewsBatch(
+	env: Env,
 	config: RuntimeConfig,
 	reviews: ArticleReviewInsert[],
 ): Promise<boolean> {
+	const startedAt = Date.now();
+
 	if (reviews.length === 0) {
 		return true;
 	}
@@ -1106,30 +1236,41 @@ async function saveArticleReviewsBatch(
 	if (!response.ok) {
 		const errorText = await response.text();
 
-		console.log(`Failed to batch-save AI reviews: ${response.status} ${errorText}`);
-
-		Sentry.captureMessage("Failed to batch-save AI reviews", {
-			level: "error",
-			tags: {
-				area: "supabase_save_reviews",
-				status: String(response.status),
-			},
-			extra: {
+		await logWarn(
+			env,
+			"worker.supabase.review_batch_save_failed",
+			"Failed to batch-save article AI reviews",
+			{
+				status: response.status,
 				errorText,
 				reviewCount: reviews.length,
+				durationMs: Date.now() - startedAt,
 			},
-		});
+		);
 
 		return false;
 	}
+
+	await logInfo(
+		env,
+		"worker.supabase.review_batch_saved",
+		"Batch-saved article AI reviews",
+		{
+			reviewCount: reviews.length,
+			durationMs: Date.now() - startedAt,
+		},
+	);
 
 	return true;
 }
 
 async function saveAcceptedArticlesBatch(
+	env: Env,
 	config: RuntimeConfig,
 	articles: ArticleInsert[],
 ): Promise<boolean> {
+	const startedAt = Date.now();
+
 	if (articles.length === 0) {
 		return true;
 	}
@@ -1151,24 +1292,30 @@ async function saveAcceptedArticlesBatch(
 	if (!response.ok) {
 		const errorText = await response.text();
 
-		console.log(
-			`Failed to batch-save accepted articles: ${response.status} ${errorText}`,
-		);
-
-		Sentry.captureMessage("Failed to batch-save accepted articles", {
-			level: "error",
-			tags: {
-				area: "supabase_save_articles",
-				status: String(response.status),
-			},
-			extra: {
+		await logWarn(
+			env,
+			"worker.supabase.article_batch_save_failed",
+			"Failed to batch-save accepted articles",
+			{
+				status: response.status,
 				errorText,
 				articleCount: articles.length,
+				durationMs: Date.now() - startedAt,
 			},
-		});
+		);
 
 		return false;
 	}
+
+	await logInfo(
+		env,
+		"worker.supabase.article_batch_saved",
+		"Batch-saved accepted articles",
+		{
+			articleCount: articles.length,
+			durationMs: Date.now() - startedAt,
+		},
+	);
 
 	return true;
 }
@@ -1176,11 +1323,13 @@ async function saveAcceptedArticlesBatch(
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
 	const reviewRows: ArticleReviewInsert[] = [];
 	const acceptedArticleRows: ArticleInsert[] = [];
+
 	let acceptedCount = 0;
 	let rejectedCount = 0;
 
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
+
 		const normalizedDecision =
 			aiDecision.decision === "accept" ? "accept" : "reject";
 		const normalizedCategory = aiDecision.category || "Uplifting";
@@ -1202,7 +1351,6 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 
 		if (normalizedDecision === "reject") {
 			rejectedCount += 1;
-			console.log(`Rejected: ${article.title} — ${normalizedReason}`);
 			continue;
 		}
 
@@ -1221,12 +1369,6 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			positivity_score: normalizedScore || 7,
 			status: "published",
 		});
-
-		console.log(
-			`Accepted: ${article.title} | Category: ${normalizedCategory} | Score: ${normalizedScore} | Image: ${
-				article.imageUrl ? "yes" : "none"
-			}`,
-		);
 	}
 
 	return {
@@ -1237,34 +1379,48 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 	};
 }
 
-async function refreshArticles(env: Env, options: RefreshOptions = {}) {
+async function refreshArticles(
+	env: Env,
+	options: RefreshOptions = {},
+): Promise<RefreshResult> {
+	const refreshStartedAt = Date.now();
 	const config = await getRuntimeConfig(env);
 	const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
 	const shardIndex = getShardIndex(env);
 	const feedsPerShard = getFeedsPerShard(env);
 
-	Sentry.setTag("nutsnews.worker.shard", String(shardIndex));
+	await logInfo(env, "worker.refresh.started", "NutsNews Worker refresh started", {
+		shardIndex,
+		feedsPerShard,
+		maxAiReviews,
+	});
 
 	const shardFeeds = await getFeedsForShard(env, config);
+
 	const positiveSources = new Set(
 		shardFeeds
 			.filter((feed) => feed.is_positive_source)
 			.map((feed) => feed.source),
 	);
 
-	console.log(
-		`Worker shard ${shardIndex} loaded ${shardFeeds.length} RSS feeds. Feeds per shard: ${feedsPerShard}.`,
-	);
-
-	const fetchedArticles = await fetchRssArticles(shardFeeds, positiveSources);
+	const fetchedArticles = await fetchRssArticles(env, shardFeeds, positiveSources);
 	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
 	const candidateUrls = candidateArticles.map((article) => article.url);
 
-	console.log(
-		`Fetched ${fetchedArticles.length} unique RSS articles. Checking ${candidateArticles.length} sorted candidates this run.`,
+	await logInfo(
+		env,
+		"worker.refresh.candidates_loaded",
+		"RSS candidates loaded",
+		{
+			shardIndex,
+			fetchedCount: fetchedArticles.length,
+			candidateCount: candidateArticles.length,
+			maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
+		},
 	);
 
-	const reviewedUrls = await getReviewedUrls(config, candidateUrls);
+	const reviewedUrls = await getReviewedUrls(env, config, candidateUrls);
+
 	const unreviewedArticles = candidateArticles.filter(
 		(article) => !reviewedUrls.has(article.url),
 	);
@@ -1284,131 +1440,240 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}) {
 
 	const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
 
-	console.log(
-		`Already reviewed: ${reviewedUrls.size}. Unreviewed candidates: ${unreviewedArticles.length}. Locally rejected before AI: ${locallyRejectedArticles.length}. Eligible for AI after local filter: ${articlesEligibleForAi.length}. Sending ${articlesForAi.length} articles to AI with concurrency ${AI_REVIEW_CONCURRENCY}.`,
+	await logInfo(
+		env,
+		"worker.refresh.filtering_completed",
+		"Local filtering completed",
+		{
+			shardIndex,
+			alreadyReviewedCount: reviewedUrls.size,
+			unreviewedCount: unreviewedArticles.length,
+			locallyRejectedCount: locallyRejectedArticles.length,
+			eligibleForAiCount: articlesEligibleForAi.length,
+			aiReviewCount: articlesForAi.length,
+		},
 	);
 
-	const locallyReviewedArticles = buildLocalRejectedArticles(
-		locallyRejectedArticles,
-	);
+	const locallyRejectedResults = buildLocalRejectedArticles(locallyRejectedArticles);
 
 	const aiReviewedArticles = await mapWithConcurrency(
 		articlesForAi,
 		AI_REVIEW_CONCURRENCY,
-		async (article) => ({
-			article,
-			aiDecision: await classifyAndSummarizeArticle(config, article),
-		}),
+		async (article) => {
+			const aiDecision = await classifyAndSummarizeArticle(env, config, article);
+
+			return {
+				article,
+				aiDecision,
+			};
+		},
 	);
 
-	const reviewedArticles = [...locallyReviewedArticles, ...aiReviewedArticles];
+	const reviewedArticles = [...locallyRejectedResults, ...aiReviewedArticles];
 
 	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
 		buildRowsFromReviewedArticles(reviewedArticles);
 
-	console.log(
-		`Review complete. Reviews to save: ${reviewRows.length}. Accepted articles to save: ${acceptedArticleRows.length}.`,
+	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
+	const articleSaveOk = await saveAcceptedArticlesBatch(
+		env,
+		config,
+		acceptedArticleRows,
 	);
 
-	const [reviewsSaved, articlesSaved] = await Promise.all([
-		saveArticleReviewsBatch(config, reviewRows),
-		saveAcceptedArticlesBatch(config, acceptedArticleRows),
-	]);
-
-	if (reviewsSaved) {
-		console.log(`Saved ${reviewRows.length} AI review records.`);
-	}
-
-	if (articlesSaved) {
-		console.log(`Saved ${acceptedArticleRows.length} accepted article records.`);
-	}
-
-	const result = {
+	const result: RefreshResult = {
+		message: "NutsNews refresh complete",
+		shardIndex,
+		feedsPerShard,
+		maxAiReviews,
+		feedCount: shardFeeds.length,
 		fetchedCount: fetchedArticles.length,
 		candidateCount: candidateArticles.length,
 		alreadyReviewedCount: reviewedUrls.size,
-		unreviewedCandidateCount: unreviewedArticles.length,
-		locallyRejectedBeforeAiCount: locallyRejectedArticles.length,
+		unreviewedCount: unreviewedArticles.length,
+		locallyRejectedCount: locallyRejectedArticles.length,
 		eligibleForAiCount: articlesEligibleForAi.length,
-		aiReviewedCount: articlesForAi.length,
+		aiReviewedCount: aiReviewedArticles.length,
 		acceptedCount,
 		rejectedCount,
-		reviewRowsQueued: reviewRows.length,
-		articleRowsQueued: acceptedArticleRows.length,
-		reviewsSaved,
-		articlesSaved,
-		feedCount: shardFeeds.length,
-		feedShardIndex: shardIndex,
-		feedsPerShard,
-		aiReviewConcurrency: AI_REVIEW_CONCURRENCY,
-		maxAiReviews,
-		subrequestPlan:
-			"Free-plan safe target: sharded RSS feeds + duplicate checks + local negative prefilter + limited OpenAI calls + Supabase batch saves",
+		reviewSaveOk,
+		articleSaveOk,
+		durationMs: Date.now() - refreshStartedAt,
 	};
 
-	Sentry.setContext("nutsnews.worker.refresh", result);
-
-	if (!reviewsSaved || !articlesSaved) {
-		Sentry.captureMessage("NutsNews Worker completed with failed database saves", {
-			level: "warning",
-			tags: {
-				area: "refresh_articles",
-				shard: String(shardIndex),
-			},
-			extra: result,
-		});
-	}
+	await logInfo(
+		env,
+		"worker.refresh.completed",
+		"NutsNews Worker refresh completed",
+		result,
+	);
 
 	return result;
 }
 
-const workerHandler: ExportedHandler<Env> = {
+function parseManualLimit(url: URL): number | undefined {
+	const limitParam = url.searchParams.get("limit");
+
+	if (!limitParam) {
+		return undefined;
+	}
+
+	const limit = Number(limitParam);
+
+	if (Number.isNaN(limit) || limit < 1) {
+		return undefined;
+	}
+
+	return Math.floor(limit);
+}
+
+function createRequestId() {
+	return crypto.randomUUID();
+}
+
+export default {
 	async fetch(request: Request, env: Env) {
+		const requestStartedAt = Date.now();
+		const requestId = createRequestId();
 		const url = new URL(request.url);
 
 		if (url.pathname === "/favicon.ico") {
-			return new Response(null, { status: 204 });
+			return new Response(null, {
+				status: 204,
+			});
+		}
+
+		if (url.pathname === "/log-test") {
+			await logInfo(env, "worker.log_test.completed", "Worker Better Stack log test completed", {
+				requestId,
+				path: url.pathname,
+				shardIndex: getShardIndex(env),
+			});
+
+			return Response.json({
+				ok: true,
+				message: "Worker Better Stack test log emitted.",
+				searchInBetterStackFor: {
+					service: "nutsnews-worker",
+					event: "worker.log_test.completed",
+					level: "info",
+					shardIndex: getShardIndex(env),
+				},
+			});
 		}
 
 		if (url.pathname === "/sentry-test") {
 			throw new Error("NutsNews Worker Sentry test error");
 		}
 
-		const limitParam = url.searchParams.get("limit");
-		const requestedLimit = limitParam ? Number(limitParam) : undefined;
-
-		const result = await refreshArticles(env, {
-			maxAiReviews: requestedLimit,
+		await logInfo(env, "worker.request.started", "Worker manual request started", {
+			requestId,
+			method: request.method,
+			path: url.pathname,
+			query: url.search,
+			shardIndex: getShardIndex(env),
 		});
 
-		return Response.json({
-			message: "NutsNews refresh complete",
-			...result,
-		});
+		try {
+			const maxAiReviews = parseManualLimit(url);
+
+			const result = await refreshArticles(env, {
+				maxAiReviews,
+			});
+
+			await logInfo(
+				env,
+				"worker.request.completed",
+				"Worker manual request completed",
+				{
+					requestId,
+					status: 200,
+					shardIndex: getShardIndex(env),
+					durationMs: Date.now() - requestStartedAt,
+					result,
+				},
+			);
+
+			return Response.json({
+				...result,
+				mode: "manual",
+				requestId,
+			});
+		} catch (error) {
+			await logError(
+				env,
+				"worker.request.failed",
+				"Worker manual request failed",
+				error,
+				{
+					requestId,
+					status: 500,
+					shardIndex: getShardIndex(env),
+					durationMs: Date.now() - requestStartedAt,
+				},
+			);
+
+			return Response.json(
+				{
+					message: "NutsNews refresh failed",
+					requestId,
+					error:
+						error instanceof Error
+							? {
+								name: error.name,
+								message: error.message,
+							}
+							: String(error),
+				},
+				{
+					status: 500,
+				},
+			);
+		}
 	},
 
 	async scheduled(_event: ScheduledEvent, env: Env) {
-		console.log("NutsNews scheduled shard refresh started");
+		const requestStartedAt = Date.now();
+		const requestId = createRequestId();
 
-		const result = await refreshArticles(env);
+		await logInfo(
+			env,
+			"worker.scheduled.started",
+			"Worker scheduled refresh started",
+			{
+				requestId,
+				shardIndex: getShardIndex(env),
+			},
+		);
 
-		console.log("NutsNews scheduled shard refresh finished", result);
+		try {
+			const result = await refreshArticles(env);
+
+			await logInfo(
+				env,
+				"worker.scheduled.completed",
+				"Worker scheduled refresh completed",
+				{
+					requestId,
+					shardIndex: getShardIndex(env),
+					durationMs: Date.now() - requestStartedAt,
+					result,
+				},
+			);
+		} catch (error) {
+			await logError(
+				env,
+				"worker.scheduled.failed",
+				"Worker scheduled refresh failed",
+				error,
+				{
+					requestId,
+					shardIndex: getShardIndex(env),
+					durationMs: Date.now() - requestStartedAt,
+				},
+			);
+
+			throw error;
+		}
 	},
 };
-
-export default Sentry.withSentry(
-	async (env: Env) => ({
-		dsn: await env.SENTRY_DSN.get(),
-		environment: env.SENTRY_ENVIRONMENT ?? "production",
-		tracesSampleRate: Number(env.SENTRY_TRACES_SAMPLE_RATE ?? "0.1"),
-		beforeSend(event) {
-			if (event.request?.headers) {
-				delete event.request.headers.authorization;
-				delete event.request.headers.cookie;
-			}
-
-			return event;
-		},
-	}),
-	workerHandler,
-);

@@ -1,9 +1,17 @@
+import { logError, logInfo, logWarn } from "./logger";
+
+type SecretBinding = {
+  get: () => Promise<string>;
+};
+
 type Env = {
   SHARD_COUNT?: string;
   SHARD_RUN_INTERVAL_MINUTES?: string;
   SHARD_WORKER_PREFIX?: string;
   SHARD_WORKER_SUBDOMAIN?: string;
   MAX_AI_REVIEWS_PER_SHARD?: string;
+  BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
+  BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
 
 type ShardRunResult = {
@@ -15,9 +23,9 @@ type ShardRunResult = {
 };
 
 function getNumberValue(
-  value: string | undefined,
-  fallback: number,
-  minimum: number,
+    value: string | undefined,
+    fallback: number,
+    minimum: number,
 ): number {
   const parsed = Number(value);
 
@@ -64,24 +72,43 @@ function buildShardUrl(env: Env, shardIndex: number): string {
   return `https://${prefix}-${shardIndex}.${subdomain}.workers.dev/?limit=${limit}`;
 }
 
+function serializeUnknown(value: unknown) {
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+
+  return value;
+}
+
 async function runShard(
-  env: Env,
-  shardIndex: number,
+    env: Env,
+    shardIndex: number,
+    requestId: string,
 ): Promise<ShardRunResult> {
+  const startedAt = Date.now();
   const shardUrl = buildShardUrl(env, shardIndex);
 
-  console.log(`Controller calling shard ${shardIndex}: ${shardUrl}`);
+  await logInfo(env, "controller.shard.call_started", "Controller calling shard", {
+    requestId,
+    shardIndex,
+    shardUrl,
+    maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
+  });
 
   try {
     const response = await fetch(shardUrl, {
       method: "GET",
       headers: {
         "User-Agent": "NutsNewsController/1.0",
+        "X-NutsNews-Request-Id": requestId,
       },
     });
 
     let body: unknown;
-
     const contentType = response.headers.get("content-type") || "";
 
     if (contentType.includes("application/json")) {
@@ -90,27 +117,66 @@ async function runShard(
       body = await response.text();
     }
 
-    return {
+    const result = {
       shardIndex,
       shardUrl,
       ok: response.ok,
       status: response.status,
       response: body,
     };
+
+    const logFields = {
+      requestId,
+      shardIndex,
+      shardUrl,
+      ok: response.ok,
+      status: response.status,
+      durationMs: Date.now() - startedAt,
+    };
+
+    if (response.ok) {
+      await logInfo(
+          env,
+          "controller.shard.call_completed",
+          "Controller shard call completed",
+          logFields,
+      );
+    } else {
+      await logWarn(
+          env,
+          "controller.shard.call_failed_status",
+          "Controller shard call returned non-OK status",
+          {
+            ...logFields,
+            response: body,
+          },
+      );
+    }
+
+    return result;
   } catch (error) {
-    return {
+    const result = {
       shardIndex,
       shardUrl,
       ok: false,
       status: 0,
-      response:
-        error instanceof Error
-          ? {
-              name: error.name,
-              message: error.message,
-            }
-          : String(error),
+      response: serializeUnknown(error),
     };
+
+    await logError(
+        env,
+        "controller.shard.call_failed_exception",
+        "Controller failed to call shard",
+        error,
+        {
+          requestId,
+          shardIndex,
+          shardUrl,
+          durationMs: Date.now() - startedAt,
+        },
+    );
+
+    return result;
   }
 }
 
@@ -125,67 +191,138 @@ function parseManualShard(url: URL, env: Env): number | null {
   const shardCount = getShardCount(env);
 
   if (
-    Number.isNaN(shardIndex) ||
-    shardIndex < 0 ||
-    shardIndex >= shardCount
+      Number.isNaN(shardIndex) ||
+      shardIndex < 0 ||
+      shardIndex >= shardCount
   ) {
-    throw new Error(
-      `Invalid shard. Use a number from 0 to ${shardCount - 1}.`,
-    );
+    throw new Error(`Invalid shard. Use a number from 0 to ${shardCount - 1}.`);
   }
 
   return Math.floor(shardIndex);
 }
 
+function createRequestId() {
+  return crypto.randomUUID();
+}
+
 export default {
   async fetch(request: Request, env: Env) {
+    const startedAt = Date.now();
+    const requestId = createRequestId();
     const url = new URL(request.url);
 
     if (url.pathname === "/favicon.ico") {
       return new Response(null, { status: 204 });
     }
 
+    await logInfo(
+        env,
+        "controller.request_started",
+        "NutsNews controller request started",
+        {
+          requestId,
+          method: request.method,
+          path: url.pathname,
+          query: url.search,
+        },
+    );
+
     try {
       const manualShardIndex = parseManualShard(url, env);
       const shardIndex =
-        manualShardIndex ?? getAutomaticShardIndex(env, Date.now());
+          manualShardIndex ?? getAutomaticShardIndex(env, Date.now());
 
-      const result = await runShard(env, shardIndex);
+      const result = await runShard(env, shardIndex, requestId);
 
-      return Response.json({
+      const responseBody = {
         message: "NutsNews controller run complete",
         mode: manualShardIndex === null ? "automatic" : "manual",
         shardCount: getShardCount(env),
         shardRunIntervalMinutes: getRunIntervalMinutes(env),
         maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
+        requestId,
         ...result,
-      });
+      };
+
+      await logInfo(
+          env,
+          "controller.request_completed",
+          "NutsNews controller request completed",
+          {
+            requestId,
+            mode: manualShardIndex === null ? "automatic" : "manual",
+            shardIndex,
+            ok: result.ok,
+            status: result.status,
+            durationMs: Date.now() - startedAt,
+          },
+      );
+
+      return Response.json(responseBody);
     } catch (error) {
+      await logError(
+          env,
+          "controller.request_failed",
+          "NutsNews controller request failed",
+          error,
+          {
+            requestId,
+            method: request.method,
+            path: url.pathname,
+            query: url.search,
+            durationMs: Date.now() - startedAt,
+          },
+      );
+
       return Response.json(
-        {
-          message: "NutsNews controller run failed",
-          error:
-            error instanceof Error
-              ? {
-                  name: error.name,
-                  message: error.message,
-                }
-              : String(error),
-        },
-        {
-          status: 400,
-        },
+          {
+            message: "NutsNews controller run failed",
+            requestId,
+            error:
+                error instanceof Error
+                    ? {
+                      name: error.name,
+                      message: error.message,
+                    }
+                    : String(error),
+          },
+          {
+            status: 400,
+          },
       );
     }
   },
 
   async scheduled(_event: ScheduledEvent, env: Env) {
+    const startedAt = Date.now();
+    const requestId = createRequestId();
     const shardIndex = getAutomaticShardIndex(env, Date.now());
 
-    console.log(`NutsNews controller scheduled run for shard ${shardIndex}`);
+    await logInfo(
+        env,
+        "controller.scheduled_started",
+        "NutsNews controller scheduled run started",
+        {
+          requestId,
+          shardIndex,
+          shardCount: getShardCount(env),
+          shardRunIntervalMinutes: getRunIntervalMinutes(env),
+        },
+    );
 
-    const result = await runShard(env, shardIndex);
+    const result = await runShard(env, shardIndex, requestId);
 
-    console.log("NutsNews controller scheduled run finished", result);
+    await logInfo(
+        env,
+        "controller.scheduled_completed",
+        "NutsNews controller scheduled run completed",
+        {
+          requestId,
+          shardIndex,
+          ok: result.ok,
+          status: result.status,
+          durationMs: Date.now() - startedAt,
+        },
+    );
   },
 };

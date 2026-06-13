@@ -7,7 +7,7 @@ const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
 
 if (!secretsStoreId) {
 	throw new Error(
-		'Missing NUTSNEWS_SECRETS_STORE_ID. Run: export NUTSNEWS_SECRETS_STORE_ID="your-store-id"',
+		'Missing NUTSNEWS_SECRETS_STORE_ID.\nRun: export NUTSNEWS_SECRETS_STORE_ID="your-store-id"',
 	);
 }
 
@@ -30,8 +30,6 @@ for (let index = 0; index < shardCount; index += 1) {
 		vars: {
 			FEED_SHARD_INDEX: String(index),
 			FEEDS_PER_SHARD: String(feedsPerShard),
-			SENTRY_ENVIRONMENT: "production",
-			SENTRY_TRACES_SAMPLE_RATE: "0.1",
 		},
 		secrets_store_secrets: [
 			{
@@ -50,19 +48,24 @@ for (let index = 0; index < shardCount; index += 1) {
 				secret_name: "OPENAI_API_KEY",
 			},
 			{
-				binding: "SENTRY_DSN",
+				binding: "BETTER_STACK_SOURCE_TOKEN",
 				store_id: secretsStoreId,
-				secret_name: "SENTRY_DSN",
+				secret_name: "BETTER_STACK_SOURCE_TOKEN",
+			},
+			{
+				binding: "BETTER_STACK_INGESTING_HOST",
+				store_id: secretsStoreId,
+				secret_name: "BETTER_STACK_INGESTING_HOST",
 			},
 		],
 	};
 
 	fs.writeFileSync(
 		path.join(generatedDir, `wrangler.shard${index}.jsonc`),
-		`${JSON.stringify(config, null, 2)}\n`,
+		JSON.stringify(config, null, 2) + "\n",
 	);
 }
 
 console.log(
-	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Cloudflare observability, Node.js compatibility, and Sentry enabled.`,
+	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.`,
 );
