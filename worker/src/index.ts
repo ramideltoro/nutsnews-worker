@@ -32,6 +32,11 @@ type RuntimeConfig = {
 	aiTokenAlertRunLimit: number;
 };
 
+type WorkerRunSaveConfig = {
+	supabaseUrl: string;
+	supabaseServiceRoleKey: string;
+};
+
 type RssFeed = {
 	source: string;
 	url: string;
@@ -155,6 +160,38 @@ type AiUsageRunInsert = {
 	duration_ms: number;
 };
 
+type WorkerRunInsert = {
+	run_started_at: string;
+	run_completed_at: string;
+	run_source: "manual" | "scheduled" | "unknown";
+	request_id: string | null;
+	shard_index: number;
+	feeds_per_shard: number;
+	max_ai_reviews: number;
+	success: boolean;
+	error_name: string | null;
+	error_message: string | null;
+	feed_count: number;
+	fetched_count: number;
+	candidate_count: number;
+	already_reviewed_count: number;
+	unreviewed_count: number;
+	eligible_for_ai_count: number;
+	ai_reviewed_count: number;
+	accepted_count: number;
+	rejected_count: number;
+	no_thumbnail_rejected_count: number;
+	locally_rejected_count: number;
+	image_hydration_lookup_count: number;
+	image_hydration_found_count: number;
+	review_save_ok: boolean;
+	article_save_ok: boolean;
+	ai_usage_save_ok: boolean;
+	cost_protection_limit_reached: boolean;
+	spike_warning_triggered: boolean;
+	duration_ms: number;
+};
+
 type RefreshResult = {
 	message: string;
 	shardIndex: number;
@@ -176,6 +213,7 @@ type RefreshResult = {
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
 	aiUsageSaveOk: boolean;
+	workerRunSaveOk: boolean;
 	openAiModel: string;
 	openAiCallCount: number;
 	openAiPromptTokens: number;
@@ -614,6 +652,24 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 			env.AI_TOKEN_ALERT_RUN_LIMIT,
 			DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT,
 		),
+	};
+}
+
+async function getWorkerRunSaveConfig(
+	env: Env,
+): Promise<WorkerRunSaveConfig | null> {
+	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
+	const supabaseServiceRoleKey = await resolveValue(
+		env.SUPABASE_SERVICE_ROLE_KEY,
+	);
+
+	if (!supabaseUrl || !supabaseServiceRoleKey) {
+		return null;
+	}
+
+	return {
+		supabaseUrl,
+		supabaseServiceRoleKey,
 	};
 }
 
@@ -2003,6 +2059,174 @@ async function saveAiUsageRun(
 	return true;
 }
 
+async function saveWorkerRun(
+	env: Env,
+	config: WorkerRunSaveConfig,
+	run: WorkerRunInsert,
+): Promise<boolean> {
+	const startedAt = Date.now();
+
+	const response = await fetch(`${config.supabaseUrl}/rest/v1/worker_runs`, {
+		method: "POST",
+		headers: {
+			apikey: config.supabaseServiceRoleKey,
+			Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+			"Content-Type": "application/json",
+			Prefer: "return=minimal",
+		},
+		body: JSON.stringify(run),
+	});
+
+	if (!response.ok) {
+		const errorText = await response.text();
+
+		await logWarn(
+			env,
+			"worker.supabase.worker_run_save_failed",
+			"Failed to save Worker run",
+			{
+				status: response.status,
+				errorText,
+				shardIndex: run.shard_index,
+				runSource: run.run_source,
+				success: run.success,
+				errorName: run.error_name,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
+
+	await logInfo(env, "worker.supabase.worker_run_saved", "Saved Worker run", {
+		shardIndex: run.shard_index,
+		runSource: run.run_source,
+		success: run.success,
+		acceptedCount: run.accepted_count,
+		rejectedCount: run.rejected_count,
+		fetchedCount: run.fetched_count,
+		durationMs: Date.now() - startedAt,
+	});
+
+	return true;
+}
+
+function buildSuccessfulWorkerRun(
+	result: Omit<RefreshResult, "workerRunSaveOk">,
+	options: {
+		runStartedAt: number;
+		runCompletedAt: Date;
+		runSource: "manual" | "scheduled" | "unknown";
+		requestId: string | null;
+	},
+): WorkerRunInsert {
+	return {
+		run_started_at: new Date(options.runStartedAt).toISOString(),
+		run_completed_at: options.runCompletedAt.toISOString(),
+		run_source: options.runSource,
+		request_id: options.requestId,
+		shard_index: result.shardIndex,
+		feeds_per_shard: result.feedsPerShard,
+		max_ai_reviews: result.maxAiReviews,
+		success: true,
+		error_name: null,
+		error_message: null,
+		feed_count: result.feedCount,
+		fetched_count: result.fetchedCount,
+		candidate_count: result.candidateCount,
+		already_reviewed_count: result.alreadyReviewedCount,
+		unreviewed_count: result.unreviewedCount,
+		eligible_for_ai_count: result.eligibleForAiCount,
+		ai_reviewed_count: result.aiReviewedCount,
+		accepted_count: result.acceptedCount,
+		rejected_count: result.rejectedCount,
+		no_thumbnail_rejected_count: result.noThumbnailRejectedCount,
+		locally_rejected_count: result.locallyRejectedCount,
+		image_hydration_lookup_count: result.imageHydrationLookupCount,
+		image_hydration_found_count: result.imageHydrationFoundCount,
+		review_save_ok: result.reviewSaveOk,
+		article_save_ok: result.articleSaveOk,
+		ai_usage_save_ok: result.aiUsageSaveOk,
+		cost_protection_limit_reached: result.costProtectionLimitReached,
+		spike_warning_triggered: result.spikeWarningTriggered,
+		duration_ms: result.durationMs,
+	};
+}
+
+function getErrorName(error: unknown) {
+	return error instanceof Error ? error.name : "UnknownError";
+}
+
+function getErrorMessage(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function saveFailedWorkerRun(
+	env: Env,
+	options: {
+		runStartedAt: number;
+		runSource: "manual" | "scheduled" | "unknown";
+		requestId: string | null;
+		maxAiReviews?: number;
+		error: unknown;
+	},
+): Promise<boolean> {
+	const config = await getWorkerRunSaveConfig(env);
+
+	if (!config) {
+		await logWarn(
+			env,
+			"worker.supabase.worker_run_failed_save_skipped",
+			"Skipped saving failed Worker run because Supabase config is missing",
+			{
+				requestId: options.requestId,
+				shardIndex: getShardIndex(env),
+				runSource: options.runSource,
+				errorName: getErrorName(options.error),
+				errorMessage: getErrorMessage(options.error),
+			},
+		);
+
+		return false;
+	}
+
+	const runCompletedAt = new Date();
+	const durationMs = Date.now() - options.runStartedAt;
+	const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
+
+	return saveWorkerRun(env, config, {
+		run_started_at: new Date(options.runStartedAt).toISOString(),
+		run_completed_at: runCompletedAt.toISOString(),
+		run_source: options.runSource,
+		request_id: options.requestId,
+		shard_index: getShardIndex(env),
+		feeds_per_shard: getFeedsPerShard(env),
+		max_ai_reviews: maxAiReviews,
+		success: false,
+		error_name: getErrorName(options.error),
+		error_message: getErrorMessage(options.error),
+		feed_count: 0,
+		fetched_count: 0,
+		candidate_count: 0,
+		already_reviewed_count: 0,
+		unreviewed_count: 0,
+		eligible_for_ai_count: 0,
+		ai_reviewed_count: 0,
+		accepted_count: 0,
+		rejected_count: 0,
+		no_thumbnail_rejected_count: 0,
+		locally_rejected_count: 0,
+		image_hydration_lookup_count: 0,
+		image_hydration_found_count: 0,
+		review_save_ok: false,
+		article_save_ok: false,
+		ai_usage_save_ok: false,
+		cost_protection_limit_reached: false,
+		spike_warning_triggered: false,
+		duration_ms: durationMs,
+	});
+}
+
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
 	const reviewRows: ArticleReviewInsert[] = [];
 	const acceptedArticleRows: ArticleInsert[] = [];
@@ -2306,7 +2530,10 @@ async function refreshArticles(
 
 	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
 
-	const result: RefreshResult = {
+	const resultWithoutWorkerRunSaveStatus: Omit<
+		RefreshResult,
+		"workerRunSaveOk"
+	> = {
 		message: "NutsNews refresh complete",
 		shardIndex,
 		feedsPerShard,
@@ -2338,6 +2565,22 @@ async function refreshArticles(
 		costProtectionLimitReached,
 		spikeWarningTriggered,
 		durationMs,
+	};
+
+	const workerRunSaveOk = await saveWorkerRun(
+		env,
+		config,
+		buildSuccessfulWorkerRun(resultWithoutWorkerRunSaveStatus, {
+			runStartedAt: refreshStartedAt,
+			runCompletedAt,
+			runSource: options.runSource ?? "unknown",
+			requestId: options.requestId ?? null,
+		}),
+	);
+
+	const result: RefreshResult = {
+		...resultWithoutWorkerRunSaveStatus,
+		workerRunSaveOk,
 	};
 
 	await logInfo(
@@ -2418,8 +2661,9 @@ export default {
 			shardIndex: getShardIndex(env),
 		});
 
+		const maxAiReviews = parseManualLimit(url);
+
 		try {
-			const maxAiReviews = parseManualLimit(url);
 			const result = await refreshArticles(env, {
 				maxAiReviews,
 				runSource: "manual",
@@ -2445,6 +2689,14 @@ export default {
 				requestId,
 			});
 		} catch (error) {
+			await saveFailedWorkerRun(env, {
+				runStartedAt: requestStartedAt,
+				runSource: "manual",
+				requestId,
+				maxAiReviews,
+				error,
+			});
+
 			await logError(
 				env,
 				"worker.request.failed",
@@ -2509,6 +2761,13 @@ export default {
 				},
 			);
 		} catch (error) {
+			await saveFailedWorkerRun(env, {
+				runStartedAt: requestStartedAt,
+				runSource: "scheduled",
+				requestId,
+				error,
+			});
+
 			await logError(
 				env,
 				"worker.scheduled.failed",

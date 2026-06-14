@@ -20,7 +20,9 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | AI                 | OpenAI classifies, scores, and summarizes candidate articles                                                   |
 | Database           | Supabase Postgres stores articles, review history, feeds, and operational data                                 |
 | Admin Portal       | Private Google-protected admin area for internal dashboards                                                    |
-| AI Usage Dashboard | Admin dashboard for estimated OpenAI usage, cost, accepted reviews, rejected reviews, and local filter savings |
+| AI Usage Dashboard | Admin dashboard for exact OpenAI usage, token tracking, cost, accepted reviews, rejected reviews, and spike warnings |
+| Worker Health Dashboard | Admin dashboard for Worker shard health, failed executions, latest errors, stale shards, and consecutive failures |
+| Failed Run Tracking | Dedicated Worker run table stores successful and failed shard executions |
 | CDN                | Cloudflare caches public pages and API responses                                                               |
 | Logging            | Better Stack centralizes structured logs                                                                       |
 | Monitoring         | Sentry tracks application errors; Better Stack tracks uptime                                                   |
@@ -136,6 +138,9 @@ Current admin structure:
 /admin/ai-usage
   AI usage and estimated OpenAI cost dashboard
 
+/admin/shards
+  Worker health, failed shard executions, stale shard detection, and latest errors
+
 /admin/login
   Google login page
 
@@ -164,7 +169,7 @@ The admin portal is intentionally being built in phases. It starts with read-onl
 
 ## AI Usage Dashboard
 
-The first admin dashboard is the AI Usage dashboard.
+One admin dashboard is the AI Usage dashboard.
 
 It lives at:
 
@@ -176,33 +181,24 @@ The goal of this dashboard is to make OpenAI usage visible and reduce the risk o
 
 The dashboard shows:
 
-* Estimated OpenAI cost
-* Estimated AI review count
+* Exact OpenAI prompt tokens
+* Exact OpenAI completion tokens
+* Exact total tokens
+* Estimated OpenAI cost per Worker run
+* OpenAI call count
 * Accepted AI-reviewed articles
 * Rejected AI-reviewed articles
-* Local filter savings
-* Saved review rows
-* Estimated input tokens
-* Estimated output tokens
-* Seven-day usage trend
-* Recent AI decisions
+* Cost protection hits
+* Spike warning status
+* Daily usage trend
+* Shard usage
+* Latest Worker AI usage runs
 
 This is important because OpenAI is the main usage-based cost in the platform.
 
-The dashboard currently estimates usage from stored article review history. Rows that were skipped before AI are excluded from the OpenAI cost estimate, so the dashboard focuses on articles that likely reached OpenAI.
+The dashboard reads saved Worker usage rows from Supabase. This makes AI usage visible by run and by shard, rather than relying only on rough review-history estimates.
 
-The cost estimate is based on configurable token assumptions:
-
-```text
-OPENAI_INPUT_TOKENS_PER_REVIEW_ESTIMATE
-OPENAI_OUTPUT_TOKENS_PER_REVIEW_ESTIMATE
-OPENAI_INPUT_COST_PER_1M_TOKENS
-OPENAI_OUTPUT_COST_PER_1M_TOKENS
-```
-
-This gives the operator a practical view of AI usage before exact per-request token tracking is added.
-
-A future version can make the dashboard more exact by saving worker-run usage metrics such as:
+The Worker saves run-level usage metrics such as:
 
 * Shard index
 * OpenAI model
@@ -214,6 +210,61 @@ A future version can make the dashboard more exact by saving worker-run usage me
 * Accepted count
 * Rejected count
 * Cost protection limit hits
+
+---
+
+## Worker Shard Health Dashboard
+
+The Worker Shard Health dashboard lives at:
+
+```text
+/admin/shards
+```
+
+The goal of this dashboard is to show whether Worker ingestion is healthy across all Cloudflare Worker shards.
+
+The dashboard shows:
+
+* Fleet health
+* Worker ingestion summary
+* Worker error counts
+* Failed shards
+* Failed Worker runs
+* Latest failure time
+* Latest error message
+* Consecutive failure counts
+* Stale shards
+* Missing shards
+* No-feed shards
+* Warning shards
+* Accepted and rejected counts
+* No-thumbnail rejection counts
+* Image hydration lookup and found counts
+* Duration by shard
+* Recent Worker execution rows
+
+The dashboard uses a dedicated `worker_runs` table. Successful Worker executions and failed Worker executions are saved as first-class run records.
+
+This makes the dashboard able to distinguish between:
+
+* Healthy shards
+* Warning shards
+* Failed shards
+* Stale shards
+* No-feed shards
+* Missing shards
+
+A failed run stores:
+
+* `success = false`
+* `error_name`
+* `error_message`
+* `run_source`
+* `request_id`
+* `shard_index`
+* `duration_ms`
+
+This allows the operator to see exactly which shard failed, what the latest error was, and how many times the shard has failed consecutively.
 
 ---
 
@@ -244,7 +295,9 @@ The admin and operations flow runs alongside the public product:
 ```text
 Supabase Review Data
 Worker Activity
-AI Usage Estimates
+Worker Run Success and Failure Records
+AI Usage Metrics
+Shard Health Metrics
 Operational Signals
   ↓
 Private Admin Portal
@@ -682,6 +735,7 @@ Important admin routes include:
 ```text
 /admin
 /admin/ai-usage
+/admin/shards
 /admin/login
 /admin/access-denied
 ```
@@ -690,7 +744,7 @@ Important admin routes include:
 
 The automated ingestion engine.
 
-It fetches RSS feeds, parses articles, filters unsuitable candidates, calls OpenAI for review, stores review decisions, publishes accepted articles, and logs structured activity.
+It fetches RSS feeds, parses articles, filters unsuitable candidates, calls OpenAI for review, stores review decisions, publishes accepted articles, saves successful and failed Worker run records, and logs structured activity.
 
 ### `controller`
 
@@ -702,7 +756,7 @@ It can trigger Worker shards in a controlled way so the system does not need eve
 
 The data layer.
 
-It stores RSS feeds, AI review history, accepted articles, rejected articles, categories, summaries, timestamps, source links, and data used by admin dashboards.
+It stores RSS feeds, AI review history, accepted articles, rejected articles, categories, summaries, timestamps, source links, AI usage runs, Worker run records, and data used by admin dashboards.
 
 ### `README.md`
 
@@ -774,6 +828,52 @@ The admin AI Usage dashboard also uses this review history to estimate OpenAI us
 Stores the stories shown on the public website.
 
 Each published article keeps the original source URL so readers can go back to the publisher.
+
+### AI usage runs
+
+Stores run-level OpenAI usage metrics saved by the Worker.
+
+This powers `/admin/ai-usage` and includes:
+
+* Run started and completed timestamps
+* Run source
+* Request ID
+* Shard index
+* OpenAI model
+* OpenAI call count
+* Prompt tokens
+* Completion tokens
+* Total tokens
+* Estimated OpenAI cost
+* Accepted and rejected OpenAI decisions
+* Cost protection limit status
+* Spike warning status
+
+### Worker runs
+
+Stores successful and failed Worker shard executions.
+
+This powers `/admin/shards` and includes:
+
+* Run started and completed timestamps
+* Run source
+* Request ID
+* Shard index
+* Success status
+* Error name
+* Error message
+* Feed count
+* Fetched count
+* Candidate count
+* Accepted count
+* Rejected count
+* No-thumbnail rejection count
+* Image hydration lookup count
+* Image hydration found count
+* Save status fields
+* Duration
+
+Failed runs are saved with `success = false`, which makes it possible to calculate consecutive failures and show the latest failure message for each shard.
 
 ---
 
@@ -1088,7 +1188,12 @@ NutsNews currently includes:
 * Google-protected admin portal
 * Admin landing page at `/admin`
 * AI Usage dashboard at `/admin/ai-usage`
-* Estimated OpenAI cost visibility
+* Worker Health dashboard at `/admin/shards`
+* Exact OpenAI token and cost visibility
+* Dedicated Worker run tracking
+* Failed Worker execution tracking
+* Latest Worker error visibility
+* Consecutive shard failure counts
 * Source-friendly article linking
 * MIT license
 
@@ -1104,15 +1209,14 @@ Planned or possible future improvements:
 * Improve article image extraction
 * Add source quality scoring
 * Add feed health tracking
-* Add Worker shard health dashboard
 * Add RSS feed management dashboard
 * Add article review dashboard
 * Add backup status dashboard
 * Add admin controls for pausing AI reviews
 * Add admin controls for disabling bad feeds
-* Add exact OpenAI token usage tracking
-* Add cost alerts for AI usage spikes
+* Add Better Stack alert rules for AI usage spikes
 * Add Better Stack dashboards and alerts
+* Add alerting for repeated failed Worker runs
 * Add Sentry alert rules
 * Add topic landing pages
 * Add newsletter support
@@ -1125,6 +1229,28 @@ Planned or possible future improvements:
 * Add multi-language support
 * Add social sharing automation
 * Add a native mobile app
+
+---
+
+## Useful Admin Environment Variables
+
+The admin dashboards support optional configuration.
+
+```env
+ADMIN_SHARD_COUNT=25
+ADMIN_SHARD_STALE_MINUTES=180
+ADMIN_SHARD_SLOW_RUN_MS=15000
+```
+
+Recommended shard stale timing depends on the controller schedule.
+
+For the current design:
+
+```text
+25 shards × 5 minutes per shard = 125 minutes per full rotation
+```
+
+A stale threshold of 180 minutes gives the controller enough time to complete a normal rotation with buffer.
 
 ---
 
