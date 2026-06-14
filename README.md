@@ -15,6 +15,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Product            | Mobile-first positive news feed                                                                                |
 | Mission            | Give readers a calmer alternative to stressful news                                                            |
 | Content model      | RSS discovery, AI-assisted filtering, short summaries, source links                                            |
+| Social previews    | Dynamic Open Graph images for the homepage and article pages                                                   |
 | Frontend           | Next.js website hosted on Vercel                                                                               |
 | Automation         | Cloudflare Workers process RSS feeds                                                                           |
 | AI                 | OpenAI classifies, scores, and summarizes candidate articles                                                   |
@@ -48,6 +49,47 @@ A reader should be able to open NutsNews and immediately understand the feeling 
 That product idea drives the technical design.
 
 The platform is built to automatically discover articles, filter them, summarize them, publish them, cache them, monitor them, log what happened, and expose private operational dashboards — all while staying inexpensive and easy to extend.
+
+---
+
+## Open Graph Image Generation
+
+NutsNews includes branded Open Graph image generation for social sharing.
+
+The homepage has a dynamic social preview image at:
+
+```text
+/opengraph-image
+```
+
+Each article page also has a dynamic social preview image at:
+
+```text
+/articles/[id]/opengraph-image
+```
+
+The generated images use the NutsNews dark-and-amber visual system and are sized for large social previews:
+
+```text
+1200 × 630
+```
+
+Homepage previews include:
+
+* NutsNews branding
+* Product tagline
+* Positive-news positioning
+* Amber visual treatment
+
+Article previews include:
+
+* Article title
+* Article summary
+* Source name
+* Category badge when available
+* NutsNews branding
+
+This helps shared links look cleaner on platforms that read Open Graph and Twitter card metadata.
 
 ---
 
@@ -793,7 +835,7 @@ The important point is that the current architecture does not lock the project i
 
 The public website and admin portal.
 
-It presents the mobile feed, article pages, About page, SEO metadata, structured data, CDN-friendly responses, frontend error tracking, web application logs, Google-protected admin access, and server-rendered admin dashboards.
+It presents the mobile feed, article pages, About page, SEO metadata, structured data, dynamic Open Graph images, CDN-friendly responses, frontend error tracking, web application logs, Google-protected admin access, and server-rendered admin dashboards.
 
 Important admin routes include:
 
@@ -1268,6 +1310,8 @@ NutsNews currently includes:
 * Latest Worker error visibility
 * Consecutive shard failure counts
 * Source-friendly article linking
+* Dynamic Open Graph image generation
+* Branded social previews for homepage and article pages
 * MIT license
 
 The project is active and designed to improve gradually.
@@ -1297,7 +1341,6 @@ Planned or possible future improvements:
 * Add search
 * Add article engagement analytics
 * Add manual review for borderline stories
-* Add Open Graph image generation
 * Add richer fallback thumbnails
 * Add personalization
 * Add multi-language support
