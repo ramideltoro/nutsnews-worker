@@ -1,6 +1,6 @@
 # NutsNews
 
-**A calm, mobile-first positive news platform powered by automation, AI curation, serverless infrastructure, CDN caching, and centralized observability.**
+**A calm, mobile-first positive news platform powered by automation, AI curation, serverless infrastructure, CDN caching, centralized observability, and a private admin portal.**
 
 NutsNews collects uplifting stories from trusted RSS feeds, filters out stressful topics, creates short cheerful summaries, and links readers back to the original publishers.
 
@@ -10,25 +10,29 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 
 ## Project Snapshot
 
-| Area          | Highlight                                                                        |
-| ------------- | -------------------------------------------------------------------------------- |
-| Product       | Mobile-first positive news feed                                                  |
-| Mission       | Give readers a calmer alternative to stressful news                              |
-| Content model | RSS discovery, AI-assisted filtering, short summaries, source links              |
-| Frontend      | Next.js website hosted on Vercel                                                 |
-| Automation    | Cloudflare Workers process RSS feeds                                             |
-| AI            | OpenAI classifies, scores, and summarizes candidate articles                     |
-| Database      | Supabase Postgres stores articles and review history                             |
-| CDN           | Cloudflare caches public pages and API responses                                 |
-| Logging       | Better Stack centralizes structured logs                                         |
-| Monitoring    | Sentry tracks application errors; Better Stack tracks uptime                     |
-| Cost model    | Designed around free-tier cloud services, with the domain as the main fixed cost |
+| Area               | Highlight                                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------------------------- |
+| Product            | Mobile-first positive news feed                                                                                |
+| Mission            | Give readers a calmer alternative to stressful news                                                            |
+| Content model      | RSS discovery, AI-assisted filtering, short summaries, source links                                            |
+| Frontend           | Next.js website hosted on Vercel                                                                               |
+| Automation         | Cloudflare Workers process RSS feeds                                                                           |
+| AI                 | OpenAI classifies, scores, and summarizes candidate articles                                                   |
+| Database           | Supabase Postgres stores articles, review history, feeds, and operational data                                 |
+| Admin Portal       | Private Google-protected admin area for internal dashboards                                                    |
+| AI Usage Dashboard | Admin dashboard for estimated OpenAI usage, cost, accepted reviews, rejected reviews, and local filter savings |
+| CDN                | Cloudflare caches public pages and API responses                                                               |
+| Logging            | Better Stack centralizes structured logs                                                                       |
+| Monitoring         | Sentry tracks application errors; Better Stack tracks uptime                                                   |
+| Cost model         | Designed around free-tier cloud services, with OpenAI as the main usage-based cost                             |
 
 ---
 
 ## The Story Behind NutsNews
 
-Most news products are built around urgency. They compete for attention with conflict, fear, politics, money, and breaking events.
+Most news products are built around urgency.
+
+They compete for attention with conflict, fear, politics, money, and breaking events.
 
 NutsNews takes a different direction.
 
@@ -40,7 +44,7 @@ A reader should be able to open NutsNews and immediately understand the feeling 
 
 That product idea drives the technical design.
 
-The platform is built to automatically discover articles, filter them, summarize them, publish them, cache them, monitor them, and log what happened — all while staying inexpensive and easy to extend.
+The platform is built to automatically discover articles, filter them, summarize them, publish them, cache them, monitor them, log what happened, and expose private operational dashboards — all while staying inexpensive and easy to extend.
 
 ---
 
@@ -65,7 +69,9 @@ The platform focuses on stories about:
 * Helpful discoveries
 * Remarkable moments
 
-The goal is not to become a traditional newsroom. The goal is to become a fully automated positive-news discovery layer that helps readers find uplifting stories from around the web.
+The goal is not to become a traditional newsroom.
+
+The goal is to become a fully automated positive-news discovery layer that helps readers find uplifting stories from around the web.
 
 ---
 
@@ -109,6 +115,108 @@ The reading experience is intentionally simple. The homepage behaves like a calm
 
 ---
 
+## Admin Portal
+
+NutsNews includes a private admin portal that acts as the internal control center for operating the platform.
+
+The admin portal lives at:
+
+```text
+/admin
+```
+
+It is designed to behave like an internal homepage for the operator. Instead of placing every dashboard directly on one page, `/admin` acts as a landing page that links to focused admin dashboards.
+
+Current admin structure:
+
+```text
+/admin
+  Admin home and dashboard directory
+
+/admin/ai-usage
+  AI usage and estimated OpenAI cost dashboard
+
+/admin/login
+  Google login page
+
+/admin/access-denied
+  Access denied page for unauthorized Google accounts
+```
+
+The admin portal is protected by Google login and an approved email allowlist.
+
+Only the configured admin Google account can access protected admin pages. Unauthorized accounts are redirected to an access denied page.
+
+This gives NutsNews a safer foundation for future operational controls such as:
+
+* AI usage monitoring
+* Worker shard monitoring
+* RSS feed management
+* Article review tools
+* Backup status
+* Manual refresh controls
+* Pause or maintenance controls
+* Operational health dashboards
+
+The admin portal is intentionally being built in phases. It starts with read-only dashboards before adding more powerful write controls.
+
+---
+
+## AI Usage Dashboard
+
+The first admin dashboard is the AI Usage dashboard.
+
+It lives at:
+
+```text
+/admin/ai-usage
+```
+
+The goal of this dashboard is to make OpenAI usage visible and reduce the risk of surprise AI spend.
+
+The dashboard shows:
+
+* Estimated OpenAI cost
+* Estimated AI review count
+* Accepted AI-reviewed articles
+* Rejected AI-reviewed articles
+* Local filter savings
+* Saved review rows
+* Estimated input tokens
+* Estimated output tokens
+* Seven-day usage trend
+* Recent AI decisions
+
+This is important because OpenAI is the main usage-based cost in the platform.
+
+The dashboard currently estimates usage from stored article review history. Rows that were skipped before AI are excluded from the OpenAI cost estimate, so the dashboard focuses on articles that likely reached OpenAI.
+
+The cost estimate is based on configurable token assumptions:
+
+```text
+OPENAI_INPUT_TOKENS_PER_REVIEW_ESTIMATE
+OPENAI_OUTPUT_TOKENS_PER_REVIEW_ESTIMATE
+OPENAI_INPUT_COST_PER_1M_TOKENS
+OPENAI_OUTPUT_COST_PER_1M_TOKENS
+```
+
+This gives the operator a practical view of AI usage before exact per-request token tracking is added.
+
+A future version can make the dashboard more exact by saving worker-run usage metrics such as:
+
+* Shard index
+* OpenAI model
+* Prompt tokens
+* Completion tokens
+* Total tokens
+* Estimated cost per run
+* AI reviewed count
+* Accepted count
+* Rejected count
+* Cost protection limit hits
+
+---
+
 ## Architecture Overview
 
 NutsNews uses a serverless architecture. Each part of the system has a focused role.
@@ -131,6 +239,21 @@ Cloudflare CDN
 Reader
 ```
 
+The admin and operations flow runs alongside the public product:
+
+```text
+Supabase Review Data
+Worker Activity
+AI Usage Estimates
+Operational Signals
+  ↓
+Private Admin Portal
+  ↓
+Admin Dashboards
+  ↓
+Operator Visibility
+```
+
 The observability flow runs beside the product flow:
 
 ```text
@@ -145,7 +268,7 @@ Better Stack Telemetry
 Search by service, level, event, shard, duration, status
 ```
 
-And application errors are monitored through:
+Application errors are monitored through:
 
 ```text
 Frontend Errors
@@ -171,11 +294,11 @@ The platform automatically discovers, reviews, stores, and publishes stories wit
 
 ### 3. Keep operating costs low
 
-The project is built around free or low-cost cloud services.
+The project is built around free or low-cost cloud services. AI usage is monitored because it is the main variable cost.
 
 ### 4. Keep the architecture modular
 
-The frontend, database, AI workflow, Workers, controller, logging, and monitoring are separated so each layer can improve independently.
+The frontend, database, AI workflow, Workers, controller, logging, monitoring, and admin portal are separated so each layer can improve independently.
 
 ### 5. Keep publishers respected
 
@@ -183,7 +306,11 @@ NutsNews does not republish full articles. It uses short summaries and sends rea
 
 ### 6. Keep the system observable
 
-Centralized logs, uptime monitoring, CDN visibility, and error tracking make it easier to understand the health of the platform.
+Centralized logs, uptime monitoring, CDN visibility, error tracking, and admin dashboards make it easier to understand the health of the platform.
+
+### 7. Keep admin controls protected
+
+Admin dashboards and future controls are protected behind Google login and an approved email allowlist.
 
 ---
 
@@ -270,6 +397,16 @@ Rejected stories are also tracked.
 
 This prevents the system from spending money and compute reviewing the same bad-fit article over and over.
 
+### Local filtering before AI
+
+The Worker applies local filters before sending articles to OpenAI.
+
+This reduces unnecessary AI usage and helps keep costs under control.
+
+### Admin visibility
+
+The admin portal gives the operator a private place to view usage and operational health without relying only on external tools.
+
 ### External uptime monitoring
 
 Better Stack Uptime checks whether the public site is reachable from outside the platform.
@@ -290,18 +427,18 @@ NutsNews is intentionally designed to be inexpensive to run.
 
 The architecture uses free-tier or low-cost services where possible.
 
-| Service             | Role                            | Cost Goal         |
-| ------------------- | ------------------------------- | ----------------- |
-| Vercel              | Hosts the Next.js website       | Free tier         |
-| Cloudflare CDN      | DNS, cache, and edge protection | Free tier         |
-| Cloudflare Workers  | RSS automation and controller   | Free tier         |
-| Supabase            | Postgres database               | Free tier         |
-| Better Stack Uptime | External uptime monitoring      | Free tier         |
-| Better Stack Logs   | Centralized structured logs     | Free tier         |
-| Sentry              | Error monitoring                | Free tier         |
-| GitHub              | Source control                  | Free              |
-| OpenAI              | AI review and summaries         | Usage-based       |
-| Domain              | Public site domain              | Fixed yearly cost |
+| Service             | Role                                       | Cost Goal         |
+| ------------------- | ------------------------------------------ | ----------------- |
+| Vercel              | Hosts the Next.js website and admin portal | Free tier         |
+| Cloudflare CDN      | DNS, cache, and edge protection            | Free tier         |
+| Cloudflare Workers  | RSS automation and controller              | Free tier         |
+| Supabase            | Postgres database                          | Free tier         |
+| Better Stack Uptime | External uptime monitoring                 | Free tier         |
+| Better Stack Logs   | Centralized structured logs                | Free tier         |
+| Sentry              | Error monitoring                           | Free tier         |
+| GitHub              | Repository, issues, and version history    | Free              |
+| OpenAI              | AI review and summaries                    | Usage-based       |
+| Domain              | Public site domain                         | Fixed yearly cost |
 
 The current fixed cost is designed to stay very low, with the domain as the main predictable expense.
 
@@ -313,6 +450,8 @@ OpenAI is the main variable cost, so the system includes several protections:
 * Rejected article review caching
 * Shard-level review limits
 * Batch database operations
+* Admin AI usage dashboard
+* Estimated OpenAI cost visibility
 
 These choices help keep the platform affordable even as the number of RSS feeds grows.
 
@@ -348,6 +487,19 @@ Worker secrets can be stored in Cloudflare Secrets Store.
 
 This allows the same secret values to be reused across many Worker shards without manually copying them into each Worker.
 
+### Admin pages are organized by dashboard
+
+The admin portal is structured so `/admin` is the landing page and each dashboard has its own route.
+
+Example:
+
+```text
+/admin
+/admin/ai-usage
+```
+
+Future dashboards can follow the same structure.
+
 ### Logs are structured
 
 Structured logs make maintenance easier because events can be searched by known fields like:
@@ -358,6 +510,8 @@ Structured logs make maintenance easier because events can be searched by known 
 * `shardIndex`
 * `durationMs`
 * `status`
+* `acceptedCount`
+* `rejectedCount`
 
 This is much easier to search than plain text logs.
 
@@ -365,6 +519,8 @@ This is much easier to search than plain text logs.
 
 NutsNews uses multiple observability layers:
 
+* Admin Portal for private internal dashboards
+* AI Usage dashboard for estimated OpenAI usage and cost
 * Better Stack Uptime for availability
 * Better Stack Logs for centralized activity logs
 * Sentry for application errors
@@ -416,9 +572,19 @@ Future versions could allow readers to prefer topics like animals, science, trav
 
 Approved stories could be repurposed into short posts for social channels.
 
-### Add an editorial dashboard
+### Add admin dashboards
 
-A future dashboard could allow manual review, feed management, source scoring, and article moderation.
+The admin portal creates a foundation for future dashboards such as:
+
+* Worker shard health
+* RSS feed health
+* Article review activity
+* Source quality scoring
+* Backup status
+* Deployment status
+* Error trends
+* Cache status
+* Manual operational controls
 
 ### Add multi-language support
 
@@ -432,13 +598,22 @@ The important point is that the current architecture does not lock the project i
 
 ### Frontend
 
-| Technology   | Purpose                          |
-| ------------ | -------------------------------- |
-| Next.js      | Public website and article pages |
-| React        | Interactive feed experience      |
-| TypeScript   | Safer application code           |
-| Tailwind CSS | Mobile-first styling             |
-| Vercel       | Frontend hosting and deployment  |
+| Technology   | Purpose                                                                     |
+| ------------ | --------------------------------------------------------------------------- |
+| Next.js      | Public website, article pages, admin portal, and server-rendered dashboards |
+| React        | Interactive feed and admin UI                                               |
+| TypeScript   | Safer application code                                                      |
+| Tailwind CSS | Mobile-first styling                                                        |
+| Vercel       | Frontend and admin hosting                                                  |
+
+### Authentication and Admin Access
+
+| Technology               | Purpose                                                |
+| ------------------------ | ------------------------------------------------------ |
+| Auth.js / NextAuth       | Google login for the admin portal                      |
+| Google OAuth             | Admin sign-in provider                                 |
+| Admin email allowlist    | Restricts admin access to approved Google accounts     |
+| Server-side admin routes | Keeps private data and service keys out of the browser |
 
 ### Automation
 
@@ -452,17 +627,19 @@ The important point is that the current architecture does not lock the project i
 
 ### Data
 
-| Technology        | Purpose                           |
-| ----------------- | --------------------------------- |
-| Supabase          | Hosted Postgres database          |
-| Postgres          | Article, feed, and review storage |
-| Supabase REST API | Worker-to-database communication  |
+| Technology                | Purpose                                             |
+| ------------------------- | --------------------------------------------------- |
+| Supabase                  | Hosted Postgres database                            |
+| Postgres                  | Article, feed, review, and operational data storage |
+| Supabase REST API         | Worker-to-database communication                    |
+| Supabase service role key | Server-side admin dashboard data access             |
 
 ### AI
 
-| Technology | Purpose                                                                |
-| ---------- | ---------------------------------------------------------------------- |
-| OpenAI     | Article filtering, scoring, category selection, and summary generation |
+| Technology         | Purpose                                                                |
+| ------------------ | ---------------------------------------------------------------------- |
+| OpenAI             | Article filtering, scoring, category selection, and summary generation |
+| AI Usage Dashboard | Estimated OpenAI usage and cost visibility                             |
 
 ### Performance and Delivery
 
@@ -476,6 +653,8 @@ The important point is that the current architecture does not lock the project i
 
 | Technology                  | Purpose                                    |
 | --------------------------- | ------------------------------------------ |
+| Admin Portal                | Internal operational dashboard home        |
+| AI Usage Dashboard          | Estimated OpenAI usage and cost tracking   |
 | Better Stack Uptime         | External uptime monitoring                 |
 | Better Stack Telemetry Logs | Centralized structured logging             |
 | Sentry                      | Application error monitoring               |
@@ -484,9 +663,9 @@ The important point is that the current architecture does not lock the project i
 
 ### Source Control
 
-| Technology | Purpose                                        |
-| ---------- | ---------------------------------------------- |
-| GitHub     | Repository, collaboration, and version history |
+| Technology | Purpose                                                   |
+| ---------- | --------------------------------------------------------- |
+| GitHub     | Repository, issues, project planning, and version history |
 
 ---
 
@@ -494,9 +673,18 @@ The important point is that the current architecture does not lock the project i
 
 ### `web`
 
-The public website.
+The public website and admin portal.
 
-It presents the mobile feed, article pages, About page, SEO metadata, structured data, CDN-friendly responses, frontend error tracking, and web application logs.
+It presents the mobile feed, article pages, About page, SEO metadata, structured data, CDN-friendly responses, frontend error tracking, web application logs, Google-protected admin access, and server-rendered admin dashboards.
+
+Important admin routes include:
+
+```text
+/admin
+/admin/ai-usage
+/admin/login
+/admin/access-denied
+```
 
 ### `worker`
 
@@ -514,7 +702,7 @@ It can trigger Worker shards in a controlled way so the system does not need eve
 
 The data layer.
 
-It stores RSS feeds, AI review history, accepted articles, rejected articles, categories, summaries, timestamps, and source links.
+It stores RSS feeds, AI review history, accepted articles, rejected articles, categories, summaries, timestamps, source links, and data used by admin dashboards.
 
 ### `README.md`
 
@@ -530,6 +718,12 @@ It explains what NutsNews is, why it exists, how it is designed, and what makes 
 nutsnews/
 ├── web/
 │   ├── app/
+│   │   ├── admin/
+│   │   │   ├── (public)/
+│   │   │   └── (protected)/
+│   │   ├── api/
+│   │   ├── articles/
+│   │   └── components/
 │   ├── lib/
 │   ├── public/
 │   ├── next.config.ts
@@ -567,11 +761,13 @@ This allows feeds to be added, disabled, or organized without changing the whole
 
 ### Article AI reviews
 
-Stores the AI decision for each reviewed article.
+Stores the AI or local-filter decision for each reviewed article.
 
 This includes whether the article was accepted or rejected, why it was classified that way, what category it belongs to, and what positivity score it received.
 
 This is important because it prevents repeated AI review for the same story.
+
+The admin AI Usage dashboard also uses this review history to estimate OpenAI usage and cost.
 
 ### Published articles
 
@@ -595,7 +791,36 @@ The AI helps decide:
 * What short summary should appear on the site?
 * Why was it accepted or rejected?
 
-The AI is not used to copy full publisher articles. It is used to create short original summaries and support discovery.
+The AI is not used to copy full publisher articles.
+
+It is used to create short original summaries and support discovery.
+
+---
+
+## AI Cost Protection Model
+
+NutsNews treats AI usage as something that should be visible and controlled.
+
+The system reduces unnecessary AI calls through:
+
+* Local filtering before AI
+* Duplicate review detection
+* Accepted article review caching
+* Rejected article review caching
+* Shard-level review limits
+* Stored review history
+* Admin AI usage visibility
+
+The AI Usage dashboard helps answer:
+
+* How many articles likely reached OpenAI?
+* How many were accepted?
+* How many were rejected?
+* How many were skipped before AI?
+* What is the estimated OpenAI cost?
+* Is usage trending upward?
+
+This makes the platform safer to operate as the number of RSS feeds grows.
 
 ---
 
@@ -625,6 +850,18 @@ NutsNews is built with observability from the start.
 A fully automated system needs visibility. If no human is manually publishing every article, the platform needs to explain what it is doing.
 
 That is why NutsNews uses:
+
+### Admin Portal
+
+To answer:
+
+> What is happening inside the platform right now?
+
+### AI Usage Dashboard
+
+To answer:
+
+> Is OpenAI usage controlled?
 
 ### Better Stack Uptime
 
@@ -695,7 +932,9 @@ This makes the system much easier to troubleshoot than plain text logs.
 
 ## Performance Story
 
-Performance is not handled by one tool. It is handled by the whole design.
+Performance is not handled by one tool.
+
+It is handled by the whole design.
 
 NutsNews improves performance by:
 
@@ -725,6 +964,7 @@ NutsNews improves resiliency by:
 * Capturing application errors
 * Logging Worker activity centrally
 * Keeping the public website cacheable
+* Keeping admin dashboards separate from public reader pages
 
 The platform does not depend on one long-running server or one manual publishing process.
 
@@ -736,7 +976,7 @@ NutsNews is designed to stay affordable.
 
 The platform uses free-tier-friendly services wherever possible:
 
-* Vercel for the website
+* Vercel for the website and admin portal
 * Cloudflare Workers for automation
 * Cloudflare CDN for caching
 * Supabase for the database
@@ -749,6 +989,8 @@ OpenAI is the main usage-based cost, so the system is designed to reduce unneces
 The key cost-saving idea is simple:
 
 > Review each article once, remember the decision, and avoid paying to review the same story again.
+
+The admin AI Usage dashboard supports this by making estimated OpenAI usage visible.
 
 ---
 
@@ -766,9 +1008,12 @@ The system supports this by:
 * Centralizing logs
 * Monitoring errors through Sentry
 * Monitoring uptime through Better Stack
+* Providing a private admin portal for internal visibility
 * Keeping the public site source-friendly and simple
 
-The goal is not to create a complicated platform. The goal is to create a clean system that can run mostly on its own.
+The goal is not to create a complicated platform.
+
+The goal is to create a clean system that can run mostly on its own.
 
 ---
 
@@ -788,12 +1033,15 @@ Future possibilities include:
 * Multi-language summaries
 * Editorial review dashboard
 * Feed health dashboard
+* Worker shard health dashboard
 * Source scoring
 * Automated cache purging
 * Public API
 * Native mobile app
+* More admin dashboards
+* Admin controls for operational tasks
 
-Because the project already separates ingestion, storage, frontend, caching, logging, and monitoring, new features can be added without redesigning the entire system.
+Because the project already separates ingestion, storage, frontend, caching, logging, monitoring, and admin visibility, new features can be added without redesigning the entire system.
 
 ---
 
@@ -809,7 +1057,7 @@ NutsNews sends readers back to the original source instead of replacing the publ
 
 ### For operators
 
-The system is automated, monitored, logged, and designed to run at low cost.
+The system is automated, monitored, logged, protected, and designed to run at low cost.
 
 ### For developers
 
@@ -837,6 +1085,10 @@ NutsNews currently includes:
 * Better Stack uptime monitoring
 * Better Stack centralized structured logs
 * Sentry error monitoring
+* Google-protected admin portal
+* Admin landing page at `/admin`
+* AI Usage dashboard at `/admin/ai-usage`
+* Estimated OpenAI cost visibility
 * Source-friendly article linking
 * MIT license
 
@@ -852,15 +1104,21 @@ Planned or possible future improvements:
 * Improve article image extraction
 * Add source quality scoring
 * Add feed health tracking
+* Add Worker shard health dashboard
+* Add RSS feed management dashboard
+* Add article review dashboard
+* Add backup status dashboard
+* Add admin controls for pausing AI reviews
+* Add admin controls for disabling bad feeds
+* Add exact OpenAI token usage tracking
+* Add cost alerts for AI usage spikes
+* Add Better Stack dashboards and alerts
+* Add Sentry alert rules
 * Add topic landing pages
 * Add newsletter support
 * Add search
 * Add article engagement analytics
 * Add manual review for borderline stories
-* Add dashboard for feed management
-* Add dashboard for Worker shard health
-* Add Better Stack dashboards and alerts
-* Add Sentry alert rules
 * Add Open Graph image generation
 * Add richer fallback thumbnails
 * Add personalization
@@ -882,7 +1140,7 @@ See the [LICENSE](LICENSE) file for details.
 
 NutsNews is more than a positive-news website.
 
-It is a low-cost, automated, observable, CDN-backed, AI-assisted publishing platform.
+It is a low-cost, automated, observable, CDN-backed, AI-assisted publishing platform with a private admin portal for operational visibility.
 
 It combines a calm reader experience with a practical cloud architecture:
 
@@ -890,6 +1148,7 @@ It combines a calm reader experience with a practical cloud architecture:
 * Resilient enough for automation
 * Cheap enough to experiment with
 * Maintainable enough for a small team
+* Observable enough to operate safely
 * Extendable enough to grow into a larger product
 
 The mission is simple:
