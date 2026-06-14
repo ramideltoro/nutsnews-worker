@@ -354,6 +354,10 @@ The Worker now handles partial failures in several places:
 
 * A single RSS feed failure does not fail the full Worker run.
 * Failed RSS feeds are reported in `failedFeeds`.
+* Failed feed error bodies are truncated before being returned or logged, so a publisher HTML error page does not hide the rest of the Worker logs.
+* Article-page image hydration is capped conservatively to keep the Worker below Cloudflare subrequest limits.
+* Accepted article rows are saved before review-history rows so newly accepted stories have the best chance of reaching the public site first.
+* High-volume RSS failure events stay visible in Worker tail logs but are not forwarded to Better Stack on every run, reducing subrequests.
 * The Worker response includes `feedFetchSuccessCount`.
 * The Worker response includes `feedFetchFailureCount`.
 * OpenAI request failures become safe article rejections.

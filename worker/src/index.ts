@@ -85,6 +85,10 @@ type ReviewedUrlRow = {
 	original_url: string;
 };
 
+type PublishedArticleUrlRow = {
+	original_url: string;
+};
+
 type ArticleReviewInsert = {
 	original_url: string;
 	source: string;
@@ -262,10 +266,12 @@ const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
 const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
-const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 12;
+const PUBLISHED_URL_LOOKBACK_LIMIT = 5000;
+const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 3;
 const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
-const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 45;
-const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 6;
+const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 38;
+const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 14;
+const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
 
 const OPENAI_MODEL = "gpt-4o-mini";
 const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
@@ -1599,9 +1605,24 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
-async function readResponseTextSafely(response: Response): Promise<string> {
+function truncateText(value: string, maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH) {
+	const normalizedValue = value.replace(/\s+/g, " ").trim();
+
+	if (normalizedValue.length <= maxLength) {
+		return normalizedValue;
+	}
+
+	return `${normalizedValue.slice(0, maxLength)}... [truncated ${
+		normalizedValue.length - maxLength
+	} chars]`;
+}
+
+async function readResponseTextSafely(
+	response: Response,
+	maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH,
+): Promise<string> {
 	try {
-		return await response.text();
+		return truncateText(await response.text(), maxLength);
 	} catch (error) {
 		return `Failed to read response body: ${getErrorMessage(error)}`;
 	}
@@ -1764,10 +1785,13 @@ async function getReviewedUrls(
 
 	const candidateUrls = new Set(urls);
 	const reviewedUrls = new Set<string>();
-	let response: Response;
+	let reviewedLookupRowCount = 0;
+	let publishedLookupRowCount = 0;
+	let matchedReviewUrlCount = 0;
+	let matchedPublishedUrlCount = 0;
 
 	try {
-		response = await fetch(
+		const response = await fetch(
 			`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
 			{
 				method: "GET",
@@ -1777,72 +1801,139 @@ async function getReviewedUrls(
 				},
 			},
 		);
+
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+
+			await logWarn(
+				env,
+				"worker.supabase.review_lookup_failed",
+				"Failed to load recent reviewed URLs from Supabase; continuing with published article lookup",
+				{
+					status: response.status,
+					errorText,
+					candidateUrlCount: urls.length,
+					durationMs: Date.now() - startedAt,
+				},
+			);
+		} else {
+			const jsonResult = await readResponseJsonSafely<ReviewedUrlRow[]>(response);
+
+			if (!jsonResult.ok) {
+				await logError(
+					env,
+					"worker.supabase.review_lookup_parse_failed",
+					"Failed to parse Supabase reviewed URL lookup response; continuing with published article lookup",
+					jsonResult.error,
+					{
+						candidateUrlCount: urls.length,
+						durationMs: Date.now() - startedAt,
+					},
+				);
+			} else {
+				reviewedLookupRowCount = jsonResult.value.length;
+
+				for (const row of jsonResult.value) {
+					if (candidateUrls.has(row.original_url)) {
+						reviewedUrls.add(row.original_url);
+						matchedReviewUrlCount += 1;
+					}
+				}
+			}
+		}
 	} catch (error) {
 		await logError(
 			env,
 			"worker.supabase.review_lookup_exception",
-			"Supabase reviewed URL lookup threw an exception",
+			"Supabase reviewed URL lookup threw an exception; continuing with published article lookup",
 			error,
 			{
 				candidateUrlCount: urls.length,
 				durationMs: Date.now() - startedAt,
 			},
 		);
-
-		return reviewedUrls;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(
-			env,
-			"worker.supabase.review_lookup_failed",
-			"Failed to load recent reviewed URLs from Supabase",
+	try {
+		const response = await fetch(
+			`${config.supabaseUrl}/rest/v1/articles?select=original_url&order=published_on_site_at.desc&limit=${PUBLISHED_URL_LOOKBACK_LIMIT}`,
 			{
-				status: response.status,
-				errorText,
-				candidateUrlCount: urls.length,
-				durationMs: Date.now() - startedAt,
+				method: "GET",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				},
 			},
 		);
 
-		return reviewedUrls;
-	}
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
 
-	const jsonResult = await readResponseJsonSafely<ReviewedUrlRow[]>(response);
+			await logWarn(
+				env,
+				"worker.supabase.published_url_lookup_failed",
+				"Failed to load recently published article URLs from Supabase",
+				{
+					status: response.status,
+					errorText,
+					candidateUrlCount: urls.length,
+					durationMs: Date.now() - startedAt,
+				},
+			);
+		} else {
+			const jsonResult = await readResponseJsonSafely<PublishedArticleUrlRow[]>(
+				response,
+			);
 
-	if (!jsonResult.ok) {
+			if (!jsonResult.ok) {
+				await logError(
+					env,
+					"worker.supabase.published_url_lookup_parse_failed",
+					"Failed to parse Supabase published article URL lookup response",
+					jsonResult.error,
+					{
+						candidateUrlCount: urls.length,
+						durationMs: Date.now() - startedAt,
+					},
+				);
+			} else {
+				publishedLookupRowCount = jsonResult.value.length;
+
+				for (const row of jsonResult.value) {
+					if (candidateUrls.has(row.original_url)) {
+						if (!reviewedUrls.has(row.original_url)) {
+							matchedPublishedUrlCount += 1;
+						}
+
+						reviewedUrls.add(row.original_url);
+					}
+				}
+			}
+		}
+	} catch (error) {
 		await logError(
 			env,
-			"worker.supabase.review_lookup_parse_failed",
-			"Failed to parse Supabase reviewed URL lookup response",
-			jsonResult.error,
+			"worker.supabase.published_url_lookup_exception",
+			"Supabase published article URL lookup threw an exception",
+			error,
 			{
 				candidateUrlCount: urls.length,
 				durationMs: Date.now() - startedAt,
 			},
 		);
-
-		return reviewedUrls;
-	}
-
-	const rows = jsonResult.value;
-
-	for (const row of rows) {
-		if (candidateUrls.has(row.original_url)) {
-			reviewedUrls.add(row.original_url);
-		}
 	}
 
 	await logInfo(
 		env,
-		"worker.supabase.review_lookup_completed",
-		"Loaded recent reviewed URLs from Supabase",
+		"worker.supabase.processed_url_lookup_completed",
+		"Loaded previously processed article URLs from Supabase",
 		{
-			lookbackCount: rows.length,
+			reviewedLookbackCount: reviewedLookupRowCount,
+			publishedLookbackCount: publishedLookupRowCount,
 			candidateUrlCount: urls.length,
-			matchedReviewedCount: reviewedUrls.size,
+			matchedReviewUrlCount,
+			matchedPublishedUrlCount,
+			matchedProcessedUrlCount: reviewedUrls.size,
 			durationMs: Date.now() - startedAt,
 		},
 	);
@@ -2730,13 +2821,13 @@ async function refreshArticles(
 	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
 		buildRowsFromReviewedArticles(reviewedArticles);
 
-	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
-
 	const articleSaveOk = await saveAcceptedArticlesBatch(
 		env,
 		config,
 		acceptedArticleRows,
 	);
+
+	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
 
 	const openAiUsage = sumOpenAiUsage(aiReviewedArticles);
 	const estimatedOpenAiCostUsd = estimateOpenAiCost(openAiUsage, config);
