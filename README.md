@@ -22,6 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin Portal       | Private Google-protected admin area for internal dashboards                                                    |
 | AI Usage Dashboard | Admin dashboard for exact OpenAI usage, token tracking, cost, accepted reviews, rejected reviews, and spike warnings |
 | Worker Health Dashboard | Admin dashboard for Worker shard health, failed executions, latest errors, stale shards, and consecutive failures |
+| Partial Failure Handling | Worker runs continue when individual RSS feeds, OpenAI calls, or Supabase saves fail safely |
 | Failed Run Tracking | Dedicated Worker run table stores successful and failed shard executions |
 | CDN                | Cloudflare caches public pages and API responses                                                               |
 | Logging            | Better Stack centralizes structured logs                                                                       |
@@ -227,6 +228,8 @@ The dashboard shows:
 
 * Fleet health
 * Worker ingestion summary
+* Feed fetch success and failure counts
+* Failed RSS feed details
 * Worker error counts
 * Failed shards
 * Failed Worker runs
@@ -265,6 +268,50 @@ A failed run stores:
 * `duration_ms`
 
 This allows the operator to see exactly which shard failed, what the latest error was, and how many times the shard has failed consecutively.
+
+---
+
+## Worker Retry and Partial Failure Behavior
+
+The Worker is designed to complete a useful run even when some external services fail.
+
+This matters because RSS feeds, publisher websites, OpenAI, Supabase, and log delivery are all external dependencies. A temporary problem in one dependency should not automatically stop the whole refresh cycle.
+
+The Worker now handles partial failures in several places:
+
+* A single RSS feed failure does not fail the full Worker run.
+* Failed RSS feeds are reported in `failedFeeds`.
+* The Worker response includes `feedFetchSuccessCount`.
+* The Worker response includes `feedFetchFailureCount`.
+* OpenAI request failures become safe article rejections.
+* OpenAI invalid responses become safe article rejections.
+* Unexpected OpenAI review errors are converted to safe rejections.
+* Supabase lookup failures are logged and the run continues with an empty reviewed URL set.
+* Supabase save failures are logged clearly and returned as `false` status flags.
+* Better Stack delivery failures are isolated from the Worker run.
+
+Example Worker response when some feeds fail:
+
+```json
+{
+  "message": "NutsNews refresh complete",
+  "feedCount": 20,
+  "feedFetchSuccessCount": 17,
+  "feedFetchFailureCount": 3,
+  "failedFeeds": [
+    {
+      "source": "Good News Network Good Earth",
+      "url": "https://www.goodnewsnetwork.org/category/news/good-earth/feed/",
+      "status": 404,
+      "errorMessage": "Page not found"
+    }
+  ]
+}
+```
+
+This makes the Worker more resilient because the operator can see exactly what failed while the run still completes and saves whatever useful work it can.
+
+The next small cleanup is to truncate very large failed-feed error bodies so full HTML error pages do not make logs or manual curl responses noisy.
 
 ---
 
@@ -429,6 +476,24 @@ Example:
 ```
 
 This makes the system easier to scale and reduces the chance that one large workload overwhelms a single Worker.
+
+### Partial RSS feed failure isolation
+
+A failed RSS feed no longer blocks the entire Worker run.
+
+The Worker records how many feeds succeeded, how many feeds failed, and which feed URLs failed. This keeps the ingestion pipeline moving even when one publisher changes or breaks an RSS endpoint.
+
+### Safe OpenAI failure handling
+
+OpenAI failures are treated as safe article rejections instead of Worker crashes.
+
+If OpenAI returns a non-OK response, an empty response, invalid JSON, or an unexpected request exception, the article is rejected with a clear reason and the run continues.
+
+### Clear Supabase save failure logging
+
+Supabase save failures are logged clearly and returned as status flags, such as `reviewSaveOk`, `articleSaveOk`, `aiUsageSaveOk`, and `workerRunSaveOk`.
+
+This makes it easier to tell whether the Worker completed processing but failed to save a specific output.
 
 ### Controller Worker
 
@@ -744,7 +809,7 @@ Important admin routes include:
 
 The automated ingestion engine.
 
-It fetches RSS feeds, parses articles, filters unsuitable candidates, calls OpenAI for review, stores review decisions, publishes accepted articles, saves successful and failed Worker run records, and logs structured activity.
+It fetches RSS feeds, parses articles, filters unsuitable candidates, calls OpenAI for review, stores review decisions, publishes accepted articles, saves successful and failed Worker run records, reports partial feed failures, safely rejects articles when OpenAI fails, records Supabase save status, and logs structured activity.
 
 ### `controller`
 
@@ -1058,6 +1123,9 @@ NutsNews improves resiliency by:
 
 * Using managed hosting instead of self-managed servers
 * Splitting RSS processing into Worker shards
+* Allowing Worker runs to continue when individual feeds fail
+* Converting OpenAI failures into safe article rejections
+* Logging Supabase save failures without hiding partial results
 * Tracking reviewed URLs to avoid repeated work
 * Using a controller to coordinate shard execution
 * Monitoring uptime externally
@@ -1180,6 +1248,10 @@ NutsNews currently includes:
 * Supabase article storage
 * Cloudflare Worker automation
 * Worker sharding
+* Worker partial failure handling
+* RSS feed success and failure counts
+* Safe OpenAI failure rejection behavior
+* Clear Supabase save failure logging
 * Controller Worker orchestration
 * Cloudflare CDN caching
 * Better Stack uptime monitoring
@@ -1192,6 +1264,7 @@ NutsNews currently includes:
 * Exact OpenAI token and cost visibility
 * Dedicated Worker run tracking
 * Failed Worker execution tracking
+* Partial RSS feed failure visibility
 * Latest Worker error visibility
 * Consecutive shard failure counts
 * Source-friendly article linking
@@ -1208,6 +1281,7 @@ Planned or possible future improvements:
 * Expand the RSS source list
 * Improve article image extraction
 * Add source quality scoring
+* Truncate failed feed error bodies in Worker responses and logs
 * Add feed health tracking
 * Add RSS feed management dashboard
 * Add article review dashboard
