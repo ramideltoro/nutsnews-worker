@@ -16,7 +16,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Mission            | Give readers a calmer alternative to stressful news                                                            |
 | Content model      | RSS discovery, AI-assisted filtering, short summaries, source links                                            |
 | Social previews    | Dynamic Open Graph images for the homepage and article pages                                                   |
-| Frontend           | Next.js website hosted on Vercel                                                                               |
+| Frontend           | Next.js website hosted on Vercel with a mostly server-rendered public homepage                                 |
 | Automation         | Cloudflare Workers process RSS feeds                                                                           |
 | AI                 | OpenAI classifies, scores, and summarizes candidate articles                                                   |
 | Database           | Supabase Postgres stores articles, review history, feeds, and operational data                                 |
@@ -24,6 +24,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | AI Usage Dashboard | Admin dashboard for exact OpenAI usage, token tracking, cost, accepted reviews, rejected reviews, and spike warnings |
 | Worker Health Dashboard | Admin dashboard for Worker shard health, failed executions, latest errors, stale shards, and consecutive failures |
 | Partial Failure Handling | Worker runs continue when individual RSS feeds, OpenAI calls, or Supabase saves fail safely |
+| Lightweight Homepage | Public feed, category filters, article cards, and pagination render on the server to reduce client-side JavaScript |
 | Failed Run Tracking | Dedicated Worker run table stores successful and failed shard executions |
 | CDN                | Cloudflare caches public pages and API responses                                                               |
 | Logging            | Better Stack centralizes structured logs                                                                       |
@@ -157,6 +158,36 @@ Each story card gives the reader:
 * A link to the original publisher
 
 The reading experience is intentionally simple. The homepage behaves like a calm feed of uplifting stories rather than a noisy news portal.
+
+---
+
+## Lightweight Homepage Rendering
+
+The public homepage is intentionally kept lightweight.
+
+The story feed, category filter, article cards, and page navigation are rendered on the server instead of being controlled by a large client-side React component.
+
+This reduces unnecessary browser JavaScript while keeping the mobile experience simple and readable.
+
+The homepage now uses:
+
+* Server-rendered article cards
+* Server-rendered category links
+* URL-based category filtering
+* URL-based older/newer pagination
+* Native HTML disclosure behavior for the filter menu
+* No homepage infinite-scroll client state
+* No extra frontend libraries
+
+Examples:
+
+```text
+/
+/?category=Science
+/?category=Community&page=1
+```
+
+This supports issue #10 by keeping static and mostly static content on the server, avoiding unnecessary client-side state, and preserving CDN-friendly public pages.
 
 ---
 
@@ -459,6 +490,14 @@ Admin dashboards and future controls are protected behind Google login and an ap
 ## Performance Highlights
 
 Performance is handled at several layers.
+
+### Reduced client-side JavaScript
+
+The public homepage avoids shipping a large feed component to the browser.
+
+Article cards, category filters, and pagination are server-rendered. The browser receives ready-to-read HTML for the feed, while navigation happens through normal links that Vercel and Cloudflare can cache.
+
+This keeps the mobile frontend lighter and makes the homepage easier to reason about during Lighthouse testing.
 
 ### Cloudflare CDN
 
@@ -835,7 +874,7 @@ The important point is that the current architecture does not lock the project i
 
 The public website and admin portal.
 
-It presents the mobile feed, article pages, About page, SEO metadata, structured data, dynamic Open Graph images, CDN-friendly responses, frontend error tracking, web application logs, Google-protected admin access, and server-rendered admin dashboards.
+It presents the server-rendered mobile feed, article pages, About page, SEO metadata, structured data, dynamic Open Graph images, CDN-friendly responses, frontend error tracking, web application logs, Google-protected admin access, and server-rendered admin dashboards.
 
 Important admin routes include:
 
