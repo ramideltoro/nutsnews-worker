@@ -52,6 +52,27 @@ type RssArticle = {
 	imageUrl: string | null;
 };
 
+type FeedFetchResult = {
+	feed: RssFeed;
+	articles: RssArticle[];
+	ok: boolean;
+	status: number | null;
+	errorMessage: string | null;
+	durationMs: number;
+};
+
+type RssFetchResult = {
+	articles: RssArticle[];
+	feedFetchSuccessCount: number;
+	feedFetchFailureCount: number;
+	failedFeeds: Array<{
+		source: string;
+		url: string;
+		status: number | null;
+		errorMessage: string | null;
+	}>;
+};
+
 type AiArticleDecision = {
 	decision: "accept" | "reject";
 	category: string;
@@ -198,6 +219,14 @@ type RefreshResult = {
 	feedsPerShard: number;
 	maxAiReviews: number;
 	feedCount: number;
+	feedFetchSuccessCount: number;
+	feedFetchFailureCount: number;
+	failedFeeds: Array<{
+		source: string;
+		url: string;
+		status: number | null;
+		errorMessage: string | null;
+	}>;
 	fetchedCount: number;
 	candidateCount: number;
 	alreadyReviewedCount: number;
@@ -1570,7 +1599,34 @@ async function mapWithConcurrency<T, R>(
 	return results;
 }
 
-async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
+async function readResponseTextSafely(response: Response): Promise<string> {
+	try {
+		return await response.text();
+	} catch (error) {
+		return `Failed to read response body: ${getErrorMessage(error)}`;
+	}
+}
+
+async function readResponseJsonSafely<T>(
+	response: Response,
+): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+	try {
+		return {
+			ok: true,
+			value: (await response.json()) as T,
+		};
+	} catch (error) {
+		return {
+			ok: false,
+			error,
+		};
+	}
+}
+
+async function fetchSingleFeed(
+	env: Env,
+	feed: RssFeed,
+): Promise<FeedFetchResult> {
 	const startedAt = Date.now();
 
 	try {
@@ -1581,6 +1637,8 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 		});
 
 		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+
 			await logWarn(
 				env,
 				"worker.rss.fetch_failed_status",
@@ -1589,11 +1647,19 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 					source: feed.source,
 					feedUrl: feed.url,
 					status: response.status,
+					errorText,
 					durationMs: Date.now() - startedAt,
 				},
 			);
 
-			return [];
+			return {
+				feed,
+				articles: [],
+				ok: false,
+				status: response.status,
+				errorMessage: errorText || `RSS feed returned ${response.status}`,
+				durationMs: Date.now() - startedAt,
+			};
 		}
 
 		const xml = await response.text();
@@ -1610,7 +1676,14 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 			durationMs: Date.now() - startedAt,
 		});
 
-		return articles;
+		return {
+			feed,
+			articles,
+			ok: true,
+			status: response.status,
+			errorMessage: null,
+			durationMs: Date.now() - startedAt,
+		};
 	} catch (error) {
 		await logError(
 			env,
@@ -1624,7 +1697,14 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 			},
 		);
 
-		return [];
+		return {
+			feed,
+			articles: [],
+			ok: false,
+			status: null,
+			errorMessage: getErrorMessage(error),
+			durationMs: Date.now() - startedAt,
+		};
 	}
 }
 
@@ -1632,13 +1712,43 @@ async function fetchRssArticles(
 	env: Env,
 	feeds: RssFeed[],
 	positiveSources: Set<string>,
-): Promise<RssArticle[]> {
+): Promise<RssFetchResult> {
 	const feedResults = await Promise.all(
 		feeds.map((feed) => fetchSingleFeed(env, feed)),
 	);
-	const allArticles = feedResults.flat();
+	const failedFeeds = feedResults
+		.filter((result) => !result.ok)
+		.map((result) => ({
+			source: result.feed.source,
+			url: result.feed.url,
+			status: result.status,
+			errorMessage: result.errorMessage,
+		}));
+	const allArticles = feedResults.flatMap((result) => result.articles);
 
-	return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
+	if (failedFeeds.length > 0) {
+		await logWarn(
+			env,
+			"worker.rss.fetch_completed_with_failures",
+			"RSS fetch completed with one or more feed failures",
+			{
+				feedCount: feeds.length,
+				feedFetchSuccessCount: feedResults.length - failedFeeds.length,
+				feedFetchFailureCount: failedFeeds.length,
+				failedFeeds,
+			},
+		);
+	}
+
+	return {
+		articles: sortArticlesForReview(
+			uniqueArticlesByUrl(allArticles),
+			positiveSources,
+		),
+		feedFetchSuccessCount: feedResults.length - failedFeeds.length,
+		feedFetchFailureCount: failedFeeds.length,
+		failedFeeds,
+	};
 }
 
 async function getReviewedUrls(
@@ -1654,20 +1764,36 @@ async function getReviewedUrls(
 
 	const candidateUrls = new Set(urls);
 	const reviewedUrls = new Set<string>();
+	let response: Response;
 
-	const response = await fetch(
-		`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
-		{
-			method: "GET",
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+			{
+				method: "GET",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				},
 			},
-		},
-	);
+		);
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.review_lookup_exception",
+			"Supabase reviewed URL lookup threw an exception",
+			error,
+			{
+				candidateUrlCount: urls.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return reviewedUrls;
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(
 			env,
@@ -1684,7 +1810,24 @@ async function getReviewedUrls(
 		return reviewedUrls;
 	}
 
-	const rows = (await response.json()) as ReviewedUrlRow[];
+	const jsonResult = await readResponseJsonSafely<ReviewedUrlRow[]>(response);
+
+	if (!jsonResult.ok) {
+		await logError(
+			env,
+			"worker.supabase.review_lookup_parse_failed",
+			"Failed to parse Supabase reviewed URL lookup response",
+			jsonResult.error,
+			{
+				candidateUrlCount: urls.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return reviewedUrls;
+	}
+
+	const rows = jsonResult.value;
 
 	for (const row of rows) {
 		if (candidateUrls.has(row.original_url)) {
@@ -1722,33 +1865,53 @@ function normalizeAiDecision(
 	};
 }
 
+function buildRejectedAiClassificationResult(
+	config: RuntimeConfig,
+	reason: string,
+	usage: OpenAiUsage = emptyOpenAiUsage(),
+): AiClassificationResult {
+	return buildAiClassificationResult(
+		{
+			decision: "reject",
+			category: "Uplifting",
+			positivity_score: 0,
+			summary: "",
+			reason,
+		},
+		usage,
+		config,
+	);
+}
+
 async function classifyAndSummarizeArticle(
 	env: Env,
 	config: RuntimeConfig,
 	article: RssArticle,
 ): Promise<AiClassificationResult> {
 	const startedAt = Date.now();
+	let response: Response;
 
-	const response = await fetch("https://api.openai.com/v1/chat/completions", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${config.openAiApiKey}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify({
-			model: OPENAI_MODEL,
-			response_format: {
-				type: "json_object",
+	try {
+		response = await fetch("https://api.openai.com/v1/chat/completions", {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${config.openAiApiKey}`,
+				"Content-Type": "application/json",
 			},
-			messages: [
-				{
-					role: "system",
-					content:
-						"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence.\nAccept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories.\nBe selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
+			body: JSON.stringify({
+				model: OPENAI_MODEL,
+				response_format: {
+					type: "json_object",
 				},
-				{
-					role: "user",
-					content: `Article:
+				messages: [
+					{
+						role: "system",
+						content:
+							"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence.\nAccept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories.\nBe selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
+					},
+					{
+						role: "user",
+						content: `Article:
 Source: ${article.source}
 Title: ${article.title}
 Excerpt: ${article.excerpt}
@@ -1761,13 +1924,32 @@ Return JSON exactly like this:
   "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }`,
-				},
-			],
-		}),
-	});
+					},
+				],
+			}),
+		});
+	} catch (error) {
+		await logError(
+			env,
+			"worker.openai.request_exception",
+			"OpenAI request threw an exception",
+			error,
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return buildRejectedAiClassificationResult(
+			config,
+			`OpenAI request exception: ${getErrorMessage(error)}`,
+		);
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(env, "worker.openai.request_failed", "OpenAI request failed", {
 			status: response.status,
@@ -1778,28 +1960,42 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildAiClassificationResult(
-			{
-				decision: "reject",
-				category: "Uplifting",
-				positivity_score: 0,
-				summary: "",
-				reason: "OpenAI request failed",
-			},
-			emptyOpenAiUsage(),
+		return buildRejectedAiClassificationResult(
 			config,
+			`OpenAI request failed: ${response.status}`,
 		);
 	}
 
-	const data = (await response.json()) as {
+	const jsonResult = await readResponseJsonSafely<{
 		choices?: Array<{
 			message?: {
 				content?: string;
 			};
 		}>;
 		usage?: unknown;
-	};
+	}>(response);
 
+	if (!jsonResult.ok) {
+		await logError(
+			env,
+			"worker.openai.response_json_failed",
+			"Failed to parse OpenAI response JSON",
+			jsonResult.error,
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return buildRejectedAiClassificationResult(
+			config,
+			"OpenAI response JSON parse failed",
+		);
+	}
+
+	const data = jsonResult.value;
 	const usage = normalizeOpenAiUsage(data.usage);
 	const content = data.choices?.[0]?.message?.content;
 
@@ -1819,16 +2015,10 @@ Return JSON exactly like this:
 			},
 		);
 
-		return buildAiClassificationResult(
-			{
-				decision: "reject",
-				category: "Uplifting",
-				positivity_score: 0,
-				summary: "",
-				reason: "OpenAI returned empty content",
-			},
-			usage,
+		return buildRejectedAiClassificationResult(
 			config,
+			"OpenAI returned empty content",
+			usage,
 		);
 	}
 
@@ -1877,16 +2067,10 @@ Return JSON exactly like this:
 			},
 		);
 
-		return buildAiClassificationResult(
-			{
-				decision: "reject",
-				category: "Uplifting",
-				positivity_score: 0,
-				summary: "",
-				reason: "OpenAI returned invalid JSON",
-			},
-			usage,
+		return buildRejectedAiClassificationResult(
 			config,
+			"OpenAI returned invalid JSON",
+			usage,
 		);
 	}
 }
@@ -1902,22 +2086,39 @@ async function saveArticleReviewsBatch(
 		return true;
 	}
 
-	const response = await fetch(
-		`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
-		{
-			method: "POST",
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				"Content-Type": "application/json",
-				Prefer: "resolution=ignore-duplicates,return=minimal",
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
+			{
+				method: "POST",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+					"Content-Type": "application/json",
+					Prefer: "resolution=ignore-duplicates,return=minimal",
+				},
+				body: JSON.stringify(reviews),
 			},
-			body: JSON.stringify(reviews),
-		},
-	);
+		);
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.review_batch_save_exception",
+			"Supabase article AI review batch save threw an exception",
+			error,
+			{
+				reviewCount: reviews.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(
 			env,
@@ -1958,22 +2159,39 @@ async function saveAcceptedArticlesBatch(
 		return true;
 	}
 
-	const response = await fetch(
-		`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
-		{
-			method: "POST",
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				"Content-Type": "application/json",
-				Prefer: "resolution=ignore-duplicates,return=minimal",
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
+			{
+				method: "POST",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+					"Content-Type": "application/json",
+					Prefer: "resolution=ignore-duplicates,return=minimal",
+				},
+				body: JSON.stringify(articles),
 			},
-			body: JSON.stringify(articles),
-		},
-	);
+		);
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.article_batch_save_exception",
+			"Supabase accepted article batch save threw an exception",
+			error,
+			{
+				articleCount: articles.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(
 			env,
@@ -2009,20 +2227,38 @@ async function saveAiUsageRun(
 	run: AiUsageRunInsert,
 ): Promise<boolean> {
 	const startedAt = Date.now();
+	let response: Response;
 
-	const response = await fetch(`${config.supabaseUrl}/rest/v1/ai_usage_runs`, {
-		method: "POST",
-		headers: {
-			apikey: config.supabaseServiceRoleKey,
-			Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-			"Content-Type": "application/json",
-			Prefer: "return=minimal",
-		},
-		body: JSON.stringify(run),
-	});
+	try {
+		response = await fetch(`${config.supabaseUrl}/rest/v1/ai_usage_runs`, {
+			method: "POST",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				"Content-Type": "application/json",
+				Prefer: "return=minimal",
+			},
+			body: JSON.stringify(run),
+		});
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.ai_usage_run_save_exception",
+			"Supabase AI usage run save threw an exception",
+			error,
+			{
+				shardIndex: run.shard_index,
+				openAiCallCount: run.openai_call_count,
+				estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(
 			env,
@@ -2065,20 +2301,39 @@ async function saveWorkerRun(
 	run: WorkerRunInsert,
 ): Promise<boolean> {
 	const startedAt = Date.now();
+	let response: Response;
 
-	const response = await fetch(`${config.supabaseUrl}/rest/v1/worker_runs`, {
-		method: "POST",
-		headers: {
-			apikey: config.supabaseServiceRoleKey,
-			Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-			"Content-Type": "application/json",
-			Prefer: "return=minimal",
-		},
-		body: JSON.stringify(run),
-	});
+	try {
+		response = await fetch(`${config.supabaseUrl}/rest/v1/worker_runs`, {
+			method: "POST",
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				"Content-Type": "application/json",
+				Prefer: "return=minimal",
+			},
+			body: JSON.stringify(run),
+		});
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.worker_run_save_exception",
+			"Supabase Worker run save threw an exception",
+			error,
+			{
+				shardIndex: run.shard_index,
+				runSource: run.run_source,
+				success: run.success,
+				errorName: run.error_name,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readResponseTextSafely(response);
 
 		await logWarn(
 			env,
@@ -2227,6 +2482,52 @@ async function saveFailedWorkerRun(
 	});
 }
 
+async function reviewArticleWithOpenAi(
+	env: Env,
+	config: RuntimeConfig,
+	article: RssArticle,
+): Promise<ReviewedArticleResult> {
+	try {
+		const aiResult = await classifyAndSummarizeArticle(env, config, article);
+
+		return {
+			article,
+			aiDecision: aiResult.aiDecision,
+			usage: aiResult.usage,
+			estimatedCostUsd: aiResult.estimatedCostUsd,
+			openAiModel: aiResult.openAiModel,
+			reviewSource: "openai",
+		};
+	} catch (error) {
+		await logError(
+			env,
+			"worker.openai.article_review_exception",
+			"OpenAI article review failed unexpectedly and was converted to a safe rejection",
+			error,
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+			},
+		);
+
+		return {
+			article,
+			aiDecision: {
+				decision: "reject",
+				category: "Uplifting",
+				positivity_score: 0,
+				summary: "",
+				reason: `OpenAI review exception: ${getErrorMessage(error)}`,
+			},
+			usage: emptyOpenAiUsage(),
+			estimatedCostUsd: 0,
+			openAiModel: OPENAI_MODEL,
+			reviewSource: "openai",
+		};
+	}
+}
+
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
 	const reviewRows: ArticleReviewInsert[] = [];
 	const acceptedArticleRows: ArticleInsert[] = [];
@@ -2328,13 +2629,17 @@ async function refreshArticles(
 			.map((feed) => feed.source),
 	);
 
-	const fetchedArticles = await fetchRssArticles(env, shardFeeds, positiveSources);
+	const rssFetchResult = await fetchRssArticles(env, shardFeeds, positiveSources);
+	const fetchedArticles = rssFetchResult.articles;
 	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
 	const candidateUrls = candidateArticles.map((article) => article.url);
 
 	await logInfo(env, "worker.refresh.candidates_loaded", "RSS candidates loaded", {
 		shardIndex,
 		fetchedCount: fetchedArticles.length,
+		feedFetchSuccessCount: rssFetchResult.feedFetchSuccessCount,
+		feedFetchFailureCount: rssFetchResult.feedFetchFailureCount,
+		failedFeeds: rssFetchResult.failedFeeds,
 		candidateCount: candidateArticles.length,
 		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail)
 			.length,
@@ -2413,18 +2718,7 @@ async function refreshArticles(
 	const aiReviewedArticles = await mapWithConcurrency(
 		articlesForAi,
 		AI_REVIEW_CONCURRENCY,
-		async (article) => {
-			const aiResult = await classifyAndSummarizeArticle(env, config, article);
-
-			return {
-				article,
-				aiDecision: aiResult.aiDecision,
-				usage: aiResult.usage,
-				estimatedCostUsd: aiResult.estimatedCostUsd,
-				openAiModel: aiResult.openAiModel,
-				reviewSource: "openai" as const,
-			};
-		},
+		(article) => reviewArticleWithOpenAi(env, config, article),
 	);
 
 	const reviewedArticles = [
@@ -2539,6 +2833,9 @@ async function refreshArticles(
 		feedsPerShard,
 		maxAiReviews,
 		feedCount: shardFeeds.length,
+		feedFetchSuccessCount: rssFetchResult.feedFetchSuccessCount,
+		feedFetchFailureCount: rssFetchResult.feedFetchFailureCount,
+		failedFeeds: rssFetchResult.failedFeeds,
 		fetchedCount: fetchedArticles.length,
 		candidateCount: candidateArticles.length,
 		alreadyReviewedCount: reviewedUrls.size,
