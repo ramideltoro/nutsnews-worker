@@ -14,12 +14,22 @@ type Env = {
 	FEEDS_PER_SHARD?: string;
 	BETTER_STACK_SOURCE_TOKEN?: MaybeSecretBinding;
 	BETTER_STACK_INGESTING_HOST?: MaybeSecretBinding;
+	OPENAI_INPUT_COST_PER_1M_TOKENS?: string;
+	OPENAI_OUTPUT_COST_PER_1M_TOKENS?: string;
+	AI_COST_ALERT_RUN_USD?: string;
+	AI_REVIEW_ALERT_RUN_LIMIT?: string;
+	AI_TOKEN_ALERT_RUN_LIMIT?: string;
 };
 
 type RuntimeConfig = {
 	supabaseUrl: string;
 	supabaseServiceRoleKey: string;
 	openAiApiKey: string;
+	openAiInputCostPer1MTokens: number;
+	openAiOutputCostPer1MTokens: number;
+	aiCostAlertRunUsd: number;
+	aiReviewAlertRunLimit: number;
+	aiTokenAlertRunLimit: number;
 };
 
 type RssFeed = {
@@ -77,17 +87,70 @@ type ArticleInsert = {
 
 type RefreshOptions = {
 	maxAiReviews?: number;
+	runSource?: "manual" | "scheduled" | "unknown";
+	requestId?: string;
+};
+
+type OpenAiUsage = {
+	promptTokens: number;
+	completionTokens: number;
+	totalTokens: number;
+};
+
+type AiClassificationResult = {
+	aiDecision: AiArticleDecision;
+	usage: OpenAiUsage;
+	estimatedCostUsd: number;
+	openAiModel: string;
 };
 
 type ReviewedArticleResult = {
 	article: RssArticle;
 	aiDecision: AiArticleDecision;
+	usage?: OpenAiUsage;
+	estimatedCostUsd?: number;
+	openAiModel?: string;
+	reviewSource?: "openai" | "local";
 };
 
 type ImageHydrationResult = {
 	articles: RssArticle[];
 	lookupCount: number;
 	foundCount: number;
+};
+
+type AiUsageRunInsert = {
+	run_started_at: string;
+	run_completed_at: string;
+	run_source: "manual" | "scheduled" | "unknown";
+	request_id: string | null;
+	shard_index: number;
+	feeds_per_shard: number;
+	max_ai_reviews: number;
+	feed_count: number;
+	fetched_count: number;
+	candidate_count: number;
+	already_reviewed_count: number;
+	unreviewed_count: number;
+	eligible_for_ai_count: number;
+	ai_reviewed_count: number;
+	openai_model: string;
+	openai_call_count: number;
+	openai_prompt_tokens: number;
+	openai_completion_tokens: number;
+	openai_total_tokens: number;
+	estimated_openai_cost_usd: number;
+	openai_accepted_count: number;
+	openai_rejected_count: number;
+	published_accepted_count: number;
+	total_rejected_count: number;
+	no_thumbnail_rejected_count: number;
+	locally_rejected_count: number;
+	cost_protection_limit_reached: boolean;
+	spike_warning_triggered: boolean;
+	review_save_ok: boolean;
+	article_save_ok: boolean;
+	duration_ms: number;
 };
 
 type RefreshResult = {
@@ -110,6 +173,17 @@ type RefreshResult = {
 	rejectedCount: number;
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
+	aiUsageSaveOk: boolean;
+	openAiModel: string;
+	openAiCallCount: number;
+	openAiPromptTokens: number;
+	openAiCompletionTokens: number;
+	openAiTotalTokens: number;
+	estimatedOpenAiCostUsd: number;
+	openAiAcceptedCount: number;
+	openAiRejectedCount: number;
+	costProtectionLimitReached: boolean;
+	spikeWarningTriggered: boolean;
 	durationMs: number;
 };
 
@@ -119,11 +193,17 @@ const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
 const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
-
 const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 12;
 const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
 const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 45;
 const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 6;
+
+const OPENAI_MODEL = "gpt-4o-mini";
+const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
+const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
+const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
+const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
+const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 
 const POSITIVE_KEYWORDS = [
 	"good news",
@@ -363,8 +443,7 @@ const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
 	category: "Uplifting",
 	positivity_score: 0,
 	summary: "",
-	reason:
-		"Skipped before AI because the article matched hard negative local filters.",
+	reason: "Skipped before AI because the article matched hard negative local filters.",
 };
 
 const NO_THUMBNAIL_REJECT_DECISION: AiArticleDecision = {
@@ -386,6 +465,108 @@ async function resolveValue(value: MaybeSecretBinding) {
 	}
 
 	return value.get();
+}
+
+function getOptionalNumber(value: string | undefined, fallback: number) {
+	if (!value) {
+		return fallback;
+	}
+
+	const parsed = Number(value);
+
+	if (Number.isNaN(parsed) || parsed < 0) {
+		return fallback;
+	}
+
+	return parsed;
+}
+
+function emptyOpenAiUsage(): OpenAiUsage {
+	return {
+		promptTokens: 0,
+		completionTokens: 0,
+		totalTokens: 0,
+	};
+}
+
+function estimateOpenAiCost(usage: OpenAiUsage, config: RuntimeConfig) {
+	const inputCost =
+		(usage.promptTokens / 1_000_000) * config.openAiInputCostPer1MTokens;
+	const outputCost =
+		(usage.completionTokens / 1_000_000) *
+		config.openAiOutputCostPer1MTokens;
+
+	return inputCost + outputCost;
+}
+
+function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
+	if (!value || typeof value !== "object") {
+		return emptyOpenAiUsage();
+	}
+
+	const record = value as Record<string, unknown>;
+
+	const promptTokens =
+		typeof record.prompt_tokens === "number" ? record.prompt_tokens : 0;
+	const completionTokens =
+		typeof record.completion_tokens === "number"
+			? record.completion_tokens
+			: 0;
+	const totalTokens =
+		typeof record.total_tokens === "number"
+			? record.total_tokens
+			: promptTokens + completionTokens;
+
+	return {
+		promptTokens,
+		completionTokens,
+		totalTokens,
+	};
+}
+
+function buildAiClassificationResult(
+	aiDecision: AiArticleDecision,
+	usage: OpenAiUsage,
+	config: RuntimeConfig,
+): AiClassificationResult {
+	return {
+		aiDecision,
+		usage,
+		estimatedCostUsd: estimateOpenAiCost(usage, config),
+		openAiModel: OPENAI_MODEL,
+	};
+}
+
+function sumOpenAiUsage(reviewedArticles: ReviewedArticleResult[]) {
+	return reviewedArticles.reduce(
+		(total, reviewedArticle) => {
+			if (!reviewedArticle.usage) {
+				return total;
+			}
+
+			return {
+				promptTokens:
+					total.promptTokens + reviewedArticle.usage.promptTokens,
+				completionTokens:
+					total.completionTokens +
+					reviewedArticle.usage.completionTokens,
+				totalTokens: total.totalTokens + reviewedArticle.usage.totalTokens,
+			};
+		},
+		emptyOpenAiUsage(),
+	);
+}
+
+function shouldTriggerOpenAiUsageWarning(
+	run: AiUsageRunInsert,
+	config: RuntimeConfig,
+) {
+	return (
+		run.cost_protection_limit_reached ||
+		run.ai_reviewed_count >= config.aiReviewAlertRunLimit ||
+		run.estimated_openai_cost_usd >= config.aiCostAlertRunUsd ||
+		run.openai_total_tokens >= config.aiTokenAlertRunLimit
+	);
 }
 
 async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
@@ -411,6 +592,26 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		supabaseUrl,
 		supabaseServiceRoleKey,
 		openAiApiKey,
+		openAiInputCostPer1MTokens: getOptionalNumber(
+			env.OPENAI_INPUT_COST_PER_1M_TOKENS,
+			DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS,
+		),
+		openAiOutputCostPer1MTokens: getOptionalNumber(
+			env.OPENAI_OUTPUT_COST_PER_1M_TOKENS,
+			DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS,
+		),
+		aiCostAlertRunUsd: getOptionalNumber(
+			env.AI_COST_ALERT_RUN_USD,
+			DEFAULT_AI_COST_ALERT_RUN_USD,
+		),
+		aiReviewAlertRunLimit: getOptionalNumber(
+			env.AI_REVIEW_ALERT_RUN_LIMIT,
+			DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT,
+		),
+		aiTokenAlertRunLimit: getOptionalNumber(
+			env.AI_TOKEN_ALERT_RUN_LIMIT,
+			DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT,
+		),
 	};
 }
 
@@ -535,7 +736,10 @@ function stripHtml(value: string): string {
 }
 
 function getTagValue(itemXml: string, tagName: string): string {
-	const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+	const regex = new RegExp(
+		`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`,
+		"i",
+	);
 	const match = itemXml.match(regex);
 
 	if (!match?.[1]) {
@@ -687,8 +891,9 @@ function extractBestUrlFromSrcset(srcset: string) {
 				score,
 			};
 		})
-		.filter((candidate): candidate is { url: string; score: number } =>
-			Boolean(candidate.url),
+		.filter(
+			(candidate): candidate is { url: string; score: number } =>
+				Boolean(candidate.url),
 		)
 		.sort((a, b) => b.score - a.score);
 
@@ -748,7 +953,6 @@ function extractImageFromHtml(html: string, articleUrl: string): string | null {
 function extractMetaImagesFromHtml(html: string) {
 	const candidates: string[] = [];
 	const metaTags = html.match(/<meta\b[^>]*>/gi) ?? [];
-
 	const imageMetaKeys = new Set([
 		"og:image",
 		"og:image:url",
@@ -818,12 +1022,8 @@ function addJsonLdImageCandidate(value: unknown, candidates: string[]) {
 
 	if (typeof value === "object") {
 		const record = value as Record<string, unknown>;
-
 		const url =
-			record.url ??
-			record.contentUrl ??
-			record.thumbnailUrl ??
-			record["@id"];
+			record.url ?? record.contentUrl ?? record.thumbnailUrl ?? record["@id"];
 
 		if (typeof url === "string") {
 			candidates.push(url);
@@ -878,10 +1078,7 @@ function extractJsonLdImagesFromHtml(html: string) {
 		) ?? [];
 
 	for (const scriptTag of scriptTags) {
-		const contentMatch = scriptTag.match(
-			/<script\b[^>]*>([\s\S]*?)<\/script>/i,
-		);
-
+		const contentMatch = scriptTag.match(/<script\b[^>]*>([\s\S]*?)<\/script>/i);
 		const rawContent = contentMatch?.[1]?.trim();
 
 		if (!rawContent) {
@@ -1052,7 +1249,6 @@ async function hydrateMissingArticleImages(
 	const missingImageArticles = articles.filter(
 		(article) => !hasUsableThumbnail(article),
 	);
-
 	const lookupCandidates = missingImageArticles.slice(0, lookupLimit);
 
 	if (lookupCandidates.length === 0) {
@@ -1157,14 +1353,13 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
 		}
 
 		seenUrls.add(article.url);
-
 		return true;
 	});
 }
 
-function hasUsableThumbnail(article: RssArticle): article is RssArticle & {
-	imageUrl: string;
-} {
+function hasUsableThumbnail(
+	article: RssArticle,
+): article is RssArticle & { imageUrl: string } {
 	return Boolean(article.imageUrl?.trim());
 }
 
@@ -1172,9 +1367,7 @@ function scoreArticleCandidate(
 	article: RssArticle,
 	positiveSources: Set<string>,
 ): number {
-	const text =
-		`${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
-
+	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 	let score = 0;
 
 	if (positiveSources.has(article.source)) {
@@ -1227,9 +1420,7 @@ function shouldSkipBeforeAi(
 	article: RssArticle,
 	positiveSources: Set<string>,
 ): boolean {
-	const text =
-		`${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
-
+	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 	const hardNegativeMatchCount = countKeywordMatches(
 		text,
 		HARD_NEGATIVE_KEYWORDS,
@@ -1266,6 +1457,7 @@ function buildRejectedArticles(
 			...baseDecision,
 			reason: reasonBuilder(article),
 		},
+		reviewSource: "local",
 	}));
 }
 
@@ -1301,7 +1493,6 @@ async function mapWithConcurrency<T, R>(
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex;
 			nextIndex += 1;
-
 			results[currentIndex] = await mapper(
 				items[currentIndex] as T,
 				currentIndex,
@@ -1348,11 +1539,9 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<RssArticle[]> {
 		}
 
 		const xml = await response.text();
-
 		const articles = parseRss(xml, feed.source).filter(
 			(article) => article.title && article.url,
 		);
-
 		const imageCount = articles.filter((article) => article.imageUrl).length;
 
 		await logInfo(env, "worker.rss.feed_fetched", "RSS feed fetched", {
@@ -1389,7 +1578,6 @@ async function fetchRssArticles(
 	const feedResults = await Promise.all(
 		feeds.map((feed) => fetchSingleFeed(env, feed)),
 	);
-
 	const allArticles = feedResults.flat();
 
 	return sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources);
@@ -1461,7 +1649,9 @@ async function getReviewedUrls(
 	return reviewedUrls;
 }
 
-function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecision {
+function normalizeAiDecision(
+	value: Partial<AiArticleDecision>,
+): AiArticleDecision {
 	const decision = value.decision === "accept" ? "accept" : "reject";
 
 	return {
@@ -1478,7 +1668,7 @@ async function classifyAndSummarizeArticle(
 	env: Env,
 	config: RuntimeConfig,
 	article: RssArticle,
-): Promise<AiArticleDecision> {
+): Promise<AiClassificationResult> {
 	const startedAt = Date.now();
 
 	const response = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1488,7 +1678,7 @@ async function classifyAndSummarizeArticle(
 			"Content-Type": "application/json",
 		},
 		body: JSON.stringify({
-			model: "gpt-4o-mini",
+			model: OPENAI_MODEL,
 			response_format: {
 				type: "json_object",
 			},
@@ -1496,7 +1686,7 @@ async function classifyAndSummarizeArticle(
 				{
 					role: "system",
 					content:
-						"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence. Accept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories. Be selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
+						"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence.\nAccept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories.\nBe selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
 				},
 				{
 					role: "user",
@@ -1530,13 +1720,17 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return {
-			decision: "reject",
-			category: "Uplifting",
-			positivity_score: 0,
-			summary: "",
-			reason: "OpenAI request failed",
-		};
+		return buildAiClassificationResult(
+			{
+				decision: "reject",
+				category: "Uplifting",
+				positivity_score: 0,
+				summary: "",
+				reason: "OpenAI request failed",
+			},
+			emptyOpenAiUsage(),
+			config,
+		);
 	}
 
 	const data = (await response.json()) as {
@@ -1545,8 +1739,10 @@ Return JSON exactly like this:
 				content?: string;
 			};
 		}>;
+		usage?: unknown;
 	};
 
+	const usage = normalizeOpenAiUsage(data.usage);
 	const content = data.choices?.[0]?.message?.content;
 
 	if (!content) {
@@ -1558,35 +1754,53 @@ Return JSON exactly like this:
 				source: article.source,
 				title: article.title,
 				articleUrl: article.url,
+				promptTokens: usage.promptTokens,
+				completionTokens: usage.completionTokens,
+				totalTokens: usage.totalTokens,
 				durationMs: Date.now() - startedAt,
 			},
 		);
 
-		return {
-			decision: "reject",
-			category: "Uplifting",
-			positivity_score: 0,
-			summary: "",
-			reason: "OpenAI returned empty content",
-		};
+		return buildAiClassificationResult(
+			{
+				decision: "reject",
+				category: "Uplifting",
+				positivity_score: 0,
+				summary: "",
+				reason: "OpenAI returned empty content",
+			},
+			usage,
+			config,
+		);
 	}
 
 	try {
 		const parsedDecision = normalizeAiDecision(
 			JSON.parse(content) as Partial<AiArticleDecision>,
 		);
+		const estimatedCostUsd = estimateOpenAiCost(usage, config);
 
-		await logInfo(env, "worker.openai.article_reviewed", "OpenAI reviewed article", {
-			source: article.source,
-			title: article.title,
-			articleUrl: article.url,
-			decision: parsedDecision.decision,
-			category: parsedDecision.category,
-			positivityScore: parsedDecision.positivity_score,
-			durationMs: Date.now() - startedAt,
-		});
+		await logInfo(
+			env,
+			"worker.openai.article_reviewed",
+			"OpenAI reviewed article",
+			{
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				decision: parsedDecision.decision,
+				category: parsedDecision.category,
+				positivityScore: parsedDecision.positivity_score,
+				openAiModel: OPENAI_MODEL,
+				promptTokens: usage.promptTokens,
+				completionTokens: usage.completionTokens,
+				totalTokens: usage.totalTokens,
+				estimatedCostUsd,
+				durationMs: Date.now() - startedAt,
+			},
+		);
 
-		return parsedDecision;
+		return buildAiClassificationResult(parsedDecision, usage, config);
 	} catch (error) {
 		await logError(
 			env,
@@ -1598,17 +1812,24 @@ Return JSON exactly like this:
 				title: article.title,
 				articleUrl: article.url,
 				rawContent: content,
+				promptTokens: usage.promptTokens,
+				completionTokens: usage.completionTokens,
+				totalTokens: usage.totalTokens,
 				durationMs: Date.now() - startedAt,
 			},
 		);
 
-		return {
-			decision: "reject",
-			category: "Uplifting",
-			positivity_score: 0,
-			summary: "",
-			reason: "OpenAI returned invalid JSON",
-		};
+		return buildAiClassificationResult(
+			{
+				decision: "reject",
+				category: "Uplifting",
+				positivity_score: 0,
+				summary: "",
+				reason: "OpenAI returned invalid JSON",
+			},
+			usage,
+			config,
+		);
 	}
 }
 
@@ -1724,6 +1945,62 @@ async function saveAcceptedArticlesBatch(
 	return true;
 }
 
+async function saveAiUsageRun(
+	env: Env,
+	config: RuntimeConfig,
+	run: AiUsageRunInsert,
+): Promise<boolean> {
+	const startedAt = Date.now();
+
+	const response = await fetch(`${config.supabaseUrl}/rest/v1/ai_usage_runs`, {
+		method: "POST",
+		headers: {
+			apikey: config.supabaseServiceRoleKey,
+			Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+			"Content-Type": "application/json",
+			Prefer: "return=minimal",
+		},
+		body: JSON.stringify(run),
+	});
+
+	if (!response.ok) {
+		const errorText = await response.text();
+
+		await logWarn(
+			env,
+			"worker.supabase.ai_usage_run_save_failed",
+			"Failed to save AI usage run",
+			{
+				status: response.status,
+				errorText,
+				shardIndex: run.shard_index,
+				openAiCallCount: run.openai_call_count,
+				estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
+
+	await logInfo(
+		env,
+		"worker.supabase.ai_usage_run_saved",
+		"Saved AI usage run",
+		{
+			shardIndex: run.shard_index,
+			openAiCallCount: run.openai_call_count,
+			openAiPromptTokens: run.openai_prompt_tokens,
+			openAiCompletionTokens: run.openai_completion_tokens,
+			openAiTotalTokens: run.openai_total_tokens,
+			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+			durationMs: Date.now() - startedAt,
+		},
+	);
+
+	return true;
+}
+
 function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
 	const reviewRows: ArticleReviewInsert[] = [];
 	const acceptedArticleRows: ArticleInsert[] = [];
@@ -1734,16 +2011,13 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
 		const hasThumbnail = hasUsableThumbnail(article);
-
-		const requestedDecision = aiDecision.decision === "accept" ? "accept" : "reject";
-
+		const requestedDecision =
+			aiDecision.decision === "accept" ? "accept" : "reject";
 		const normalizedDecision: "accept" | "reject" =
 			requestedDecision === "accept" && hasThumbnail ? "accept" : "reject";
-
 		const normalizedCategory = aiDecision.category || "Uplifting";
 		const normalizedScore = aiDecision.positivity_score ?? 0;
 		const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
-
 		const normalizedReason =
 			requestedDecision === "accept" && !hasThumbnail
 				? "Rejected before publish because the RSS item and article page did not include a usable image thumbnail."
@@ -1812,10 +2086,11 @@ async function refreshArticles(
 		shardIndex,
 		feedsPerShard,
 		maxAiReviews,
+		runSource: options.runSource ?? "unknown",
+		requestId: options.requestId ?? null,
 	});
 
 	const shardFeeds = await getFeedsForShard(env, config);
-
 	const articlePageImageLookupLimit = getArticlePageImageLookupLimit(
 		shardFeeds.length,
 		maxAiReviews,
@@ -1835,7 +2110,8 @@ async function refreshArticles(
 		shardIndex,
 		fetchedCount: fetchedArticles.length,
 		candidateCount: candidateArticles.length,
-		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail).length,
+		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail)
+			.length,
 		noRssThumbnailCandidateCount: candidateArticles.filter(
 			(article) => !hasUsableThumbnail(article),
 		).length,
@@ -1856,11 +2132,9 @@ async function refreshArticles(
 	);
 
 	const unreviewedArticles = imageHydrationResult.articles;
-
 	const noThumbnailArticles = unreviewedArticles.filter(
 		(article) => !hasUsableThumbnail(article),
 	);
-
 	const unreviewedArticlesWithThumbnails =
 		unreviewedArticles.filter(hasUsableThumbnail);
 
@@ -1914,11 +2188,15 @@ async function refreshArticles(
 		articlesForAi,
 		AI_REVIEW_CONCURRENCY,
 		async (article) => {
-			const aiDecision = await classifyAndSummarizeArticle(env, config, article);
+			const aiResult = await classifyAndSummarizeArticle(env, config, article);
 
 			return {
 				article,
-				aiDecision,
+				aiDecision: aiResult.aiDecision,
+				usage: aiResult.usage,
+				estimatedCostUsd: aiResult.estimatedCostUsd,
+				openAiModel: aiResult.openAiModel,
+				reviewSource: "openai" as const,
 			};
 		},
 	);
@@ -1940,6 +2218,90 @@ async function refreshArticles(
 		acceptedArticleRows,
 	);
 
+	const openAiUsage = sumOpenAiUsage(aiReviewedArticles);
+	const estimatedOpenAiCostUsd = estimateOpenAiCost(openAiUsage, config);
+	const openAiAcceptedCount = aiReviewedArticles.filter(
+		(reviewedArticle) => reviewedArticle.aiDecision.decision === "accept",
+	).length;
+	const openAiRejectedCount = aiReviewedArticles.filter(
+		(reviewedArticle) => reviewedArticle.aiDecision.decision === "reject",
+	).length;
+	const costProtectionLimitReached =
+		articlesEligibleForAi.length > articlesForAi.length;
+
+	const runCompletedAt = new Date();
+	const durationMs = Date.now() - refreshStartedAt;
+
+	const aiUsageRunBase: AiUsageRunInsert = {
+		run_started_at: new Date(refreshStartedAt).toISOString(),
+		run_completed_at: runCompletedAt.toISOString(),
+		run_source: options.runSource ?? "unknown",
+		request_id: options.requestId ?? null,
+		shard_index: shardIndex,
+		feeds_per_shard: feedsPerShard,
+		max_ai_reviews: maxAiReviews,
+		feed_count: shardFeeds.length,
+		fetched_count: fetchedArticles.length,
+		candidate_count: candidateArticles.length,
+		already_reviewed_count: reviewedUrls.size,
+		unreviewed_count: unreviewedArticles.length,
+		eligible_for_ai_count: articlesEligibleForAi.length,
+		ai_reviewed_count: aiReviewedArticles.length,
+		openai_model: OPENAI_MODEL,
+		openai_call_count: aiReviewedArticles.length,
+		openai_prompt_tokens: openAiUsage.promptTokens,
+		openai_completion_tokens: openAiUsage.completionTokens,
+		openai_total_tokens: openAiUsage.totalTokens,
+		estimated_openai_cost_usd: Number(estimatedOpenAiCostUsd.toFixed(6)),
+		openai_accepted_count: openAiAcceptedCount,
+		openai_rejected_count: openAiRejectedCount,
+		published_accepted_count: acceptedCount,
+		total_rejected_count: rejectedCount,
+		no_thumbnail_rejected_count: noThumbnailArticles.length,
+		locally_rejected_count: locallyRejectedArticles.length,
+		cost_protection_limit_reached: costProtectionLimitReached,
+		spike_warning_triggered: false,
+		review_save_ok: reviewSaveOk,
+		article_save_ok: articleSaveOk,
+		duration_ms: durationMs,
+	};
+
+	const spikeWarningTriggered = shouldTriggerOpenAiUsageWarning(
+		aiUsageRunBase,
+		config,
+	);
+
+	const aiUsageRun: AiUsageRunInsert = {
+		...aiUsageRunBase,
+		spike_warning_triggered: spikeWarningTriggered,
+	};
+
+	if (spikeWarningTriggered) {
+		await logWarn(
+			env,
+			"worker.openai.usage_spike",
+			"OpenAI usage warning threshold reached",
+			{
+				shardIndex,
+				runSource: aiUsageRun.run_source,
+				requestId: aiUsageRun.request_id,
+				maxAiReviews,
+				eligibleForAiCount: articlesEligibleForAi.length,
+				aiReviewedCount: aiReviewedArticles.length,
+				openAiPromptTokens: openAiUsage.promptTokens,
+				openAiCompletionTokens: openAiUsage.completionTokens,
+				openAiTotalTokens: openAiUsage.totalTokens,
+				estimatedOpenAiCostUsd: aiUsageRun.estimated_openai_cost_usd,
+				costProtectionLimitReached,
+				aiCostAlertRunUsd: config.aiCostAlertRunUsd,
+				aiReviewAlertRunLimit: config.aiReviewAlertRunLimit,
+				aiTokenAlertRunLimit: config.aiTokenAlertRunLimit,
+			},
+		);
+	}
+
+	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
+
 	const result: RefreshResult = {
 		message: "NutsNews refresh complete",
 		shardIndex,
@@ -1960,7 +2322,18 @@ async function refreshArticles(
 		rejectedCount,
 		reviewSaveOk,
 		articleSaveOk,
-		durationMs: Date.now() - refreshStartedAt,
+		aiUsageSaveOk,
+		openAiModel: OPENAI_MODEL,
+		openAiCallCount: aiReviewedArticles.length,
+		openAiPromptTokens: openAiUsage.promptTokens,
+		openAiCompletionTokens: openAiUsage.completionTokens,
+		openAiTotalTokens: openAiUsage.totalTokens,
+		estimatedOpenAiCostUsd: aiUsageRun.estimated_openai_cost_usd,
+		openAiAcceptedCount,
+		openAiRejectedCount,
+		costProtectionLimitReached,
+		spikeWarningTriggered,
+		durationMs,
 	};
 
 	await logInfo(
@@ -2043,9 +2416,10 @@ export default {
 
 		try {
 			const maxAiReviews = parseManualLimit(url);
-
 			const result = await refreshArticles(env, {
 				maxAiReviews,
+				runSource: "manual",
+				requestId,
 			});
 
 			await logInfo(
@@ -2114,7 +2488,10 @@ export default {
 		);
 
 		try {
-			const result = await refreshArticles(env);
+			const result = await refreshArticles(env, {
+				runSource: "scheduled",
+				requestId,
+			});
 
 			await logInfo(
 				env,
