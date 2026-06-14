@@ -146,6 +146,8 @@ type AiUsageRunInsert = {
 	total_rejected_count: number;
 	no_thumbnail_rejected_count: number;
 	locally_rejected_count: number;
+	image_hydration_lookup_count: number;
+	image_hydration_found_count: number;
 	cost_protection_limit_reached: boolean;
 	spike_warning_triggered: boolean;
 	review_save_ok: boolean;
@@ -2259,6 +2261,8 @@ async function refreshArticles(
 		total_rejected_count: rejectedCount,
 		no_thumbnail_rejected_count: noThumbnailArticles.length,
 		locally_rejected_count: locallyRejectedArticles.length,
+		image_hydration_lookup_count: imageHydrationResult.lookupCount,
+		image_hydration_found_count: imageHydrationResult.foundCount,
 		cost_protection_limit_reached: costProtectionLimitReached,
 		spike_warning_triggered: false,
 		review_save_ok: reviewSaveOk,
