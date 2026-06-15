@@ -975,35 +975,141 @@ function isLikelyImageUrl(url: string): boolean {
 	const lowerUrl = url.toLowerCase();
 
 	return (
-		lowerUrl.includes(".jpg") ||
-		lowerUrl.includes(".jpeg") ||
-		lowerUrl.includes(".png") ||
-		lowerUrl.includes(".webp") ||
-		lowerUrl.includes(".gif") ||
-		lowerUrl.includes(".avif") ||
+		/\.(?:jpg|jpeg|png|webp|gif|avif)(?:[?#]|$)/i.test(lowerUrl) ||
 		lowerUrl.includes("image") ||
 		lowerUrl.includes("thumbnail") ||
+		lowerUrl.includes("thumb") ||
 		lowerUrl.includes("media") ||
-		lowerUrl.includes("uploads")
+		lowerUrl.includes("uploads") ||
+		lowerUrl.includes("wp-content") ||
+		lowerUrl.includes("cdn")
 	);
+}
+
+function getImageDimensionHints(imageUrl: string): {
+	width: number | null;
+	height: number | null;
+} {
+	let width: number | null = null;
+	let height: number | null = null;
+
+	try {
+		const parsedUrl = new URL(imageUrl);
+		const widthParam =
+			parsedUrl.searchParams.get("width") ??
+			parsedUrl.searchParams.get("w") ??
+			parsedUrl.searchParams.get("resize_w");
+		const heightParam =
+			parsedUrl.searchParams.get("height") ??
+			parsedUrl.searchParams.get("h") ??
+			parsedUrl.searchParams.get("resize_h");
+		const fitParam =
+			parsedUrl.searchParams.get("fit") ??
+			parsedUrl.searchParams.get("resize") ??
+			parsedUrl.searchParams.get("dimensions");
+
+		if (widthParam && /^\d+$/.test(widthParam)) {
+			width = Number(widthParam);
+		}
+
+		if (heightParam && /^\d+$/.test(heightParam)) {
+			height = Number(heightParam);
+		}
+
+		const fitMatch = fitParam?.match(/(\d{1,4})\D+(\d{1,4})/);
+
+		if (fitMatch?.[1] && fitMatch[2]) {
+			width ??= Number(fitMatch[1]);
+			height ??= Number(fitMatch[2]);
+		}
+
+		const pathDimensionMatch = parsedUrl.pathname.match(
+			/(?:^|[-_/])(\d{1,4})x(\d{1,4})(?:[-_.]|$)/,
+		);
+
+		if (pathDimensionMatch?.[1] && pathDimensionMatch[2]) {
+			width ??= Number(pathDimensionMatch[1]);
+			height ??= Number(pathDimensionMatch[2]);
+		}
+	} catch {
+		return { width, height };
+	}
+
+	return { width, height };
+}
+
+function hasTinyImageDimensionHints(imageUrl: string): boolean {
+	const { width, height } = getImageDimensionHints(imageUrl);
+
+	if (width !== null && width <= 120) {
+		return true;
+	}
+
+	if (height !== null && height <= 120) {
+		return true;
+	}
+
+	return false;
+}
+
+function isGenericGoogleImageCandidate(imageUrl: string): boolean {
+	try {
+		const parsedUrl = new URL(imageUrl);
+		const hostname = parsedUrl.hostname.toLowerCase();
+		const pathname = parsedUrl.pathname.toLowerCase();
+		const search = parsedUrl.search.toLowerCase();
+
+		return (
+			hostname === "news.google.com" ||
+			hostname.endsWith(".news.google.com") ||
+			(hostname.includes("google") &&
+				(pathname.includes("favicon") ||
+					pathname.includes("logo") ||
+					pathname.includes("icon") ||
+					pathname.includes("placeholder") ||
+					search.includes("favicon") ||
+					search.includes("logo") ||
+					search.includes("icon"))) ||
+			hostname.includes("gstatic.com") ||
+			hostname.includes("googleusercontent.com") && pathname.includes("favicon")
+		);
+	} catch {
+		return false;
+	}
 }
 
 function isBadImageCandidate(imageUrl: string): boolean {
 	const lowerUrl = imageUrl.toLowerCase();
 
 	return (
-		lowerUrl.includes("logo") ||
-		lowerUrl.includes("icon") ||
+		isGenericGoogleImageCandidate(imageUrl) ||
+		hasTinyImageDimensionHints(imageUrl) ||
+		lowerUrl.includes("/logo") ||
+		lowerUrl.includes("logo.") ||
+		lowerUrl.includes("logo-") ||
+		lowerUrl.includes("/icon") ||
+		lowerUrl.includes("icon.") ||
+		lowerUrl.includes("apple-touch-icon") ||
+		lowerUrl.includes("favicon") ||
 		lowerUrl.includes("sprite") ||
 		lowerUrl.includes("avatar") ||
+		lowerUrl.includes("author") ||
+		lowerUrl.includes("profile") ||
 		lowerUrl.includes("placeholder") ||
+		lowerUrl.includes("default-image") ||
+		lowerUrl.includes("missing-image") ||
+		lowerUrl.includes("no-image") ||
 		lowerUrl.includes("blank") ||
 		lowerUrl.includes("transparent") ||
 		lowerUrl.includes("tracking") ||
 		lowerUrl.includes("pixel") ||
+		lowerUrl.includes("spacer") ||
+		lowerUrl.includes("loader") ||
+		lowerUrl.includes("spinner") ||
 		lowerUrl.includes("1x1") ||
 		lowerUrl.includes("gravatar") ||
-		lowerUrl.endsWith(".svg")
+		lowerUrl.endsWith(".svg") ||
+		lowerUrl.includes(".svg?")
 	);
 }
 
@@ -1037,11 +1143,29 @@ function extractBestUrlFromSrcset(srcset: string) {
 	return candidates[0]?.url ?? "";
 }
 
+function isUsableImageUrl(imageUrl: string) {
+	const trimmedImageUrl = imageUrl.trim();
+
+	if (!trimmedImageUrl || isBadImageCandidate(trimmedImageUrl)) {
+		return false;
+	}
+
+	return isLikelyImageUrl(trimmedImageUrl);
+}
+
 function firstValidImageUrl(candidates: string[], articleUrl: string) {
+	const seenCandidates = new Set<string>();
+
 	for (const candidate of candidates) {
 		const normalizedUrl = normalizeImageUrl(candidate, articleUrl);
 
-		if (normalizedUrl && !isBadImageCandidate(normalizedUrl)) {
+		if (!normalizedUrl || seenCandidates.has(normalizedUrl)) {
+			continue;
+		}
+
+		seenCandidates.add(normalizedUrl);
+
+		if (isUsableImageUrl(normalizedUrl)) {
 			return normalizedUrl;
 		}
 	}
@@ -1052,11 +1176,13 @@ function firstValidImageUrl(candidates: string[], articleUrl: string) {
 function extractImageFromHtml(html: string, articleUrl: string): string | null {
 	const candidates: string[] = [];
 	const imageTags = html.match(/<img\b[^>]*>/gi) ?? [];
+	const sourceTags = html.match(/<source\b[^>]*>/gi) ?? [];
 
-	for (const tag of imageTags) {
+	for (const tag of [...sourceTags, ...imageTags]) {
 		const srcset =
 			getAttributeValue(tag, "srcset") ||
-			getAttributeValue(tag, "data-srcset");
+			getAttributeValue(tag, "data-srcset") ||
+			getAttributeValue(tag, "data-lazy-srcset");
 
 		if (srcset) {
 			const bestSrcsetUrl = extractBestUrlFromSrcset(srcset);
@@ -1068,12 +1194,17 @@ function extractImageFromHtml(html: string, articleUrl: string): string | null {
 
 		[
 			"data-original",
+			"data-original-src",
 			"data-image",
+			"data-img",
 			"data-src",
 			"data-lazy-src",
 			"data-orig-file",
 			"data-medium-file",
 			"data-large-file",
+			"data-fallback-src",
+			"data-hi-res-src",
+			"poster",
 			"src",
 		].forEach((attributeName) => {
 			const value = getAttributeValue(tag, attributeName);
@@ -1097,7 +1228,11 @@ function extractMetaImagesFromHtml(html: string) {
 		"twitter:image",
 		"twitter:image:src",
 		"thumbnail",
+		"thumbnailurl",
 		"image",
+		"parsely-image-url",
+		"sailthru.image.full",
+		"sailthru.image.thumb",
 	]);
 
 	for (const tag of metaTags) {
@@ -1317,13 +1452,22 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 		return directImage;
 	}
 
-	const description =
-		getTagValue(itemXml, "description") ||
-		getTagValue(itemXml, "summary") ||
-		getTagValue(itemXml, "content:encoded") ||
-		getTagValue(itemXml, "content");
+	const embeddedHtmlBlocks = [
+		getTagValue(itemXml, "description"),
+		getTagValue(itemXml, "summary"),
+		getTagValue(itemXml, "content:encoded"),
+		getTagValue(itemXml, "content"),
+	].filter(Boolean);
 
-	return extractImageFromHtml(description, articleUrl);
+	for (const embeddedHtml of embeddedHtmlBlocks) {
+		const embeddedImage = extractImageFromHtml(embeddedHtml, articleUrl);
+
+		if (embeddedImage) {
+			return embeddedImage;
+		}
+	}
+
+	return null;
 }
 
 async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
@@ -1497,7 +1641,7 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
 function hasUsableThumbnail(
 	article: RssArticle,
 ): article is RssArticle & { imageUrl: string } {
-	return Boolean(article.imageUrl?.trim());
+	return Boolean(article.imageUrl?.trim() && isUsableImageUrl(article.imageUrl));
 }
 
 function scoreArticleCandidate(

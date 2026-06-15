@@ -18,6 +18,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Social previews    | Dynamic Open Graph images for the homepage and article pages                                                   |
 | Frontend           | Next.js website hosted on Vercel with a mostly server-rendered public homepage                                 |
 | Automation         | Cloudflare Workers process RSS feeds                                                                           |
+| Image Quality      | Worker extracts thumbnails from RSS media tags, srcset values, article metadata, and rejects generic images    |
 | AI                 | OpenAI classifies, scores, and summarizes candidate articles                                                   |
 | Database           | Supabase Postgres stores articles, review history, feeds, and operational data                                 |
 | Admin Portal       | Private Google-protected admin area for internal dashboards                                                    |
@@ -395,8 +396,68 @@ Example Worker response when some feeds fail:
 
 This makes the Worker more resilient because the operator can see exactly what failed while the run still completes and saves whatever useful work it can.
 
-The next small cleanup is to truncate very large failed-feed error bodies so full HTML error pages do not make logs or manual curl responses noisy.
+---
 
+## Article Image Extraction and Thumbnail Quality
+
+NutsNews requires published articles to have a usable publisher image. This keeps the public feed visually clean and prevents article cards from showing logos, favicons, tracking pixels, placeholders, or generic thumbnails.
+
+The Worker applies a stricter image-quality pipeline before articles are sent to OpenAI or published.
+
+### Image sources checked
+
+The Worker looks for candidate images in multiple places, in priority order:
+
+* RSS `media:content` tags
+* RSS `media:thumbnail` tags
+* RSS image enclosures
+* iTunes image tags
+* RSS item image blocks
+* Images embedded in RSS description, summary, `content:encoded`, or content HTML
+* HTML `srcset` and lazy-loaded image attributes
+* Article-page metadata when RSS has no usable thumbnail
+* Publisher `og:image` and `twitter:image` values
+* JSON-LD image and thumbnail fields
+* Article-page image tags as a final fallback
+
+Article-page metadata is fetched only when the RSS item does not already provide a usable thumbnail. This protects Cloudflare Worker subrequest budget while still recovering thumbnails from publishers that do not include images in RSS.
+
+### Generic image rejection
+
+Image candidates are rejected when they look like:
+
+* Google News generic images
+* Logos
+* Favicons
+* Icons
+* Sprites
+* Avatars
+* Author profile images
+* Placeholders
+* Blank or transparent images
+* Tracking pixels
+* Spacer images
+* Loading spinners
+* SVG icons
+* Tiny image dimensions from URL hints
+
+Only candidates that look like real article images are allowed into `image_url`.
+
+### Worker counters
+
+Shard responses and saved Worker run records include image-quality counters:
+
+```text
+imageHydrationLookupCount
+imageHydrationFoundCount
+noThumbnailRejectedCount
+```
+
+These counters show how often the Worker had to fetch article pages for metadata, how many missing images were recovered, and how many articles were rejected because they still did not have a usable thumbnail.
+
+### Why this matters
+
+The reader experience depends on clean article cards with real publisher images. Better thumbnail extraction improves trust, visual quality, and click-through while preventing low-quality RSS feed artifacts from reaching the public site.
 
 ---
 
@@ -1560,6 +1621,8 @@ NutsNews currently includes:
 * Worker sharding
 * Worker partial failure handling
 * RSS feed success and failure counts
+* Improved RSS and article-page thumbnail extraction
+* Generic thumbnail rejection before publishing
 * Safe OpenAI failure rejection behavior
 * Clear Supabase save failure logging
 * Controller Worker orchestration
