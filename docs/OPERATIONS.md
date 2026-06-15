@@ -215,6 +215,19 @@ curl -I "https://www.nutsnews.com/"
 curl -s "https://www.nutsnews.com/api/articles?page=0"
 ```
 
+### Public feed snapshot headers
+
+```bash
+curl -I "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Expected optimized headers after the migration is applied and the snapshot is refreshed:
+
+```text
+X-NutsNews-Article-Data-Source: public_feed_snapshot
+X-NutsNews-Feed-Snapshot: hit
+```
+
 ### Worker shard
 
 ```bash
@@ -494,6 +507,40 @@ Detailed scoring rules live in:
 docs/RSS_SOURCE_QUALITY.md
 ```
 
+
+
+### Refresh public feed snapshot
+
+The homepage/API optimized feed source is:
+
+```text
+public.public_feed_snapshot
+```
+
+Refresh it manually from Supabase SQL Editor when needed:
+
+```sql
+select public.refresh_public_feed_snapshot();
+```
+
+Check the latest snapshot rows:
+
+```sql
+select
+  snapshot_rank,
+  source,
+  title,
+  published_on_site_at
+from public.public_feed_snapshot
+order by snapshot_rank asc
+limit 10;
+```
+
+Detailed guide:
+
+```text
+docs/PUBLIC_FEED_SNAPSHOT.md
+```
 
 ### Validate a restored Supabase database
 

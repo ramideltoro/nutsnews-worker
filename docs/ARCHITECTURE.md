@@ -17,6 +17,8 @@ OpenAI Review
   ↓
 Supabase Postgres
   ↓
+Public Feed Snapshot
+  ↓
 Next.js Website on Vercel
   ↓
 Cloudflare CDN
@@ -97,6 +99,7 @@ Important routes:
 /api/articles
 /articles/[id]
 /admin
+/admin/articles
 /admin/ai-usage
 /admin/shards
 /admin/feed-health
@@ -120,7 +123,7 @@ It triggers Worker shards in a controlled way so every shard does not need to ru
 
 The data layer.
 
-It stores articles, RSS feeds, AI review history, AI usage runs, Worker run records, feed health, and admin dashboard data.
+It stores articles, RSS feeds, AI review history, AI usage runs, Worker run records, feed health, admin dashboard data, and the materialized public feed snapshot.
 
 ### `docs`
 
@@ -164,6 +167,7 @@ nutsnews/
 │   ├── ARCHITECTURE.md
 │   ├── OPERATIONS.md
 │   ├── ADMIN_ARTICLE_REVIEWS.md
+│   ├── PUBLIC_FEED_SNAPSHOT.md
 │   ├── DEPENDENCY_UPDATES.md
 │   ├── PERFORMANCE_AND_RESILIENCY.md
 │   ├── OBSERVABILITY.md
@@ -222,6 +226,21 @@ Route:
 
 The dashboard reads `public.article_ai_reviews`, joins matching published records from `public.articles` by `original_url`, and sorts reviews by `reviewed_at`. Operators can filter by decision, source, category, and positivity score to investigate accepted and rejected story decisions.
 
+
+
+### `public_feed_snapshot`
+
+Materialized Supabase view used by the homepage and `/api/articles` as the first-read optimized public feed source.
+
+It contains only published, image-backed article card fields and a precomputed `snapshot_rank`.
+
+The Worker refreshes it by calling:
+
+```text
+public.refresh_public_feed_snapshot()
+```
+
+The web app falls back to `public.articles` if the snapshot is unavailable.
 
 ### `articles`
 

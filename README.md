@@ -21,6 +21,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | AI | OpenAI classifies, scores, and summarizes candidate stories |
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
+| Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
 | Observability | Better Stack logs and uptime, Sentry errors, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
@@ -44,6 +45,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
+| [Public Feed Snapshot](docs/PUBLIC_FEED_SNAPSHOT.md) | Materialized homepage/API feed snapshot, Worker refresh flow, fallback behavior, and validation checks |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
 | [RSS Source Quality](docs/RSS_SOURCE_QUALITY.md) | Quality score formula, Supabase ranking query, admin dashboard behavior, and feed promotion/disable rules |
 | [Supabase Restore Procedure](docs/SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
@@ -80,6 +82,7 @@ nutsnews/
 | Feed management dashboard | `/admin/feeds` |
 | Dependency update guide | [docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) |
 | RSS source quality guide | [docs/RSS_SOURCE_QUALITY.md](docs/RSS_SOURCE_QUALITY.md) |
+| Public feed snapshot guide | [docs/PUBLIC_FEED_SNAPSHOT.md](docs/PUBLIC_FEED_SNAPSHOT.md) |
 | Supabase restore runbook | [docs/SUPABASE_RESTORE.md](docs/SUPABASE_RESTORE.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
@@ -96,6 +99,7 @@ NutsNews currently includes:
 * Supabase article, feed, review, AI usage, Worker run, and feed health tables
 * Cloudflare Worker sharding
 * Controller Worker orchestration
+* Supabase public feed snapshot for faster homepage/API reads
 * Cloudflare CDN caching for public reader routes
 * Better Stack uptime monitoring and centralized logs
 * Sentry error monitoring

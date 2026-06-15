@@ -295,6 +295,7 @@ type RefreshResult = {
 	rejectedCount: number;
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
+	publicFeedSnapshotRefreshOk: boolean;
 	feedHealthSaveOk: boolean;
 	aiUsageSaveOk: boolean;
 	workerRunSaveOk: boolean;
@@ -2483,6 +2484,48 @@ async function saveAcceptedArticlesBatch(env: Env, config: RuntimeConfig, articl
 	return true;
 }
 
+async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<boolean> {
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch(`${config.supabaseUrl}/rest/v1/rpc/refresh_public_feed_snapshot`, {
+			method: 'POST',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				'Content-Type': 'application/json',
+				Prefer: 'return=representation',
+			},
+			body: '{}',
+		});
+	} catch (error) {
+		await logError(env, 'worker.supabase.public_feed_snapshot_refresh_exception', 'Public feed snapshot refresh threw an exception', error, {
+			durationMs: Date.now() - startedAt,
+		});
+
+		return false;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+
+		await logWarn(env, 'worker.supabase.public_feed_snapshot_refresh_failed', 'Failed to refresh public feed snapshot', {
+			status: response.status,
+			errorText,
+			durationMs: Date.now() - startedAt,
+		});
+
+		return false;
+	}
+
+	await logInfo(env, 'worker.supabase.public_feed_snapshot_refreshed', 'Refreshed public feed snapshot', {
+		durationMs: Date.now() - startedAt,
+	});
+
+	return true;
+}
+
 async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunInsert): Promise<boolean> {
 	const startedAt = Date.now();
 	let response: Response;
@@ -2915,6 +2958,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
+	const publicFeedSnapshotRefreshOk = articleSaveOk ? await refreshPublicFeedSnapshot(env, config) : false;
 
 	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
 	const feedHealthRows = buildFeedHealthRows(rssFetchResult.feedResults, feedOutcomeCounts, previousFeedHealth, new Date());
@@ -3019,6 +3063,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		rejectedCount,
 		reviewSaveOk,
 		articleSaveOk,
+		publicFeedSnapshotRefreshOk,
 		feedHealthSaveOk,
 		aiUsageSaveOk,
 		openAiModel: OPENAI_MODEL,

@@ -43,7 +43,22 @@ left join information_schema.views
 order by required_views.view_name;
 
 \echo ''
-\echo '3. Row counts'
+\echo '3. Required materialized views'
+with required_materialized_views(view_name) as (
+  values
+    ('public_feed_snapshot')
+)
+select
+  required_materialized_views.view_name,
+  case when pg_matviews.matviewname is null then 'missing' else 'ok' end as status
+from required_materialized_views
+left join pg_matviews
+  on pg_matviews.schemaname = 'public'
+ and pg_matviews.matviewname = required_materialized_views.view_name
+order by required_materialized_views.view_name;
+
+\echo ''
+\echo '4. Row counts'
 select 'articles' as object_name, count(*)::bigint as row_count from public.articles
 union all
 select 'rss_feeds', count(*)::bigint from public.rss_feeds
@@ -55,10 +70,12 @@ union all
 select 'worker_runs', count(*)::bigint from public.worker_runs
 union all
 select 'feed_health', count(*)::bigint from public.feed_health
+union all
+select 'public_feed_snapshot', count(*)::bigint from public.public_feed_snapshot
 order by object_name;
 
 \echo ''
-\echo '4. Public feed readiness'
+\echo '5. Public feed readiness'
 select
   count(*) filter (
     where status = 'published'
@@ -70,7 +87,7 @@ select
 from public.articles;
 
 \echo ''
-\echo '5. RSS feed readiness'
+\echo '6. RSS feed readiness'
 select
   count(*) filter (where is_active = true) as active_feeds,
   count(*) filter (where is_active = false) as inactive_feeds,
@@ -78,7 +95,7 @@ select
 from public.rss_feeds;
 
 \echo ''
-\echo '6. AI review readiness'
+\echo '7. AI review readiness'
 select
   count(*) filter (where decision = 'accept') as accepted_reviews,
   count(*) filter (where decision = 'reject') as rejected_reviews,
@@ -86,7 +103,7 @@ select
 from public.article_ai_reviews;
 
 \echo ''
-\echo '7. Duplicate checks'
+\echo '8. Duplicate checks'
 select
   'articles.original_url duplicates' as check_name,
   count(*) as duplicate_groups
@@ -118,7 +135,7 @@ from (
 ) duplicates;
 
 \echo ''
-\echo '8. Important indexes'
+\echo '9. Important indexes'
 select
   schemaname,
   tablename,
@@ -148,12 +165,16 @@ where schemaname = 'public'
     'feed_health_last_checked_idx',
     'feed_health_consecutive_failure_idx',
     'feed_health_total_accepted_idx',
-    'feed_health_source_idx'
+    'feed_health_source_idx',
+    'public_feed_snapshot_id_idx',
+    'public_feed_snapshot_rank_idx',
+    'public_feed_snapshot_time_id_idx',
+    'public_feed_snapshot_category_idx'
   )
 order by tablename, indexname;
 
 \echo ''
-\echo '9. Row level security status'
+\echo '10. Row level security status'
 select
   schemaname,
   tablename,
@@ -171,12 +192,24 @@ where schemaname = 'public'
 order by tablename;
 
 \echo ''
-\echo '10. View smoke tests'
+\echo '11. View smoke tests'
 select count(*) as bad_feed_rows from public.bad_feeds;
 select count(*) as best_feed_rows from public.best_feeds;
+select count(*) as public_feed_snapshot_rows from public.public_feed_snapshot;
 
 \echo ''
-\echo '11. Latest operational rows'
+\echo '12. Public feed snapshot smoke test'
+select
+  snapshot_rank,
+  source,
+  title,
+  published_on_site_at
+from public.public_feed_snapshot
+order by snapshot_rank asc
+limit 5;
+
+\echo ''
+\echo '13. Latest operational rows'
 select
   'latest_worker_run' as object_name,
   run_started_at,

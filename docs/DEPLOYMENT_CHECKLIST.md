@@ -773,3 +773,44 @@ Before closing a deployment issue, confirm:
 | [Performance and Resiliency](PERFORMANCE_AND_RESILIENCY.md) | Cache, performance, resiliency, and cost controls |
 | [Observability](OBSERVABILITY.md) | Better Stack, Sentry, structured logs, and dashboards |
 | [Troubleshooting Guide](TROUBLESHOOTING.md) | Diagnose production problems |
+
+
+---
+
+## Public Feed Snapshot Checks
+
+When deploying Issue #8 or any change to the public homepage/API feed source:
+
+```bash
+supabase db push
+```
+
+Then verify the materialized view exists and can be refreshed:
+
+```sql
+select public.refresh_public_feed_snapshot();
+
+select
+  snapshot_rank,
+  source,
+  title,
+  published_on_site_at
+from public.public_feed_snapshot
+order by snapshot_rank asc
+limit 10;
+```
+
+Confirm the article API is using the optimized snapshot path:
+
+```bash
+curl -I "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Expected headers:
+
+```text
+X-NutsNews-Article-Data-Source: public_feed_snapshot
+X-NutsNews-Feed-Snapshot: hit
+```
+
+If the headers show fallback, the API should still work, but the migration or snapshot refresh needs attention.

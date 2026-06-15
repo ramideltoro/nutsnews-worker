@@ -99,6 +99,43 @@ Quick cache validation:
 
 ---
 
+## Public Feed Snapshot
+
+The homepage and `/api/articles` now read from a precomputed Supabase materialized view first:
+
+```text
+public.public_feed_snapshot
+```
+
+This reduces repeated database work because the public feed no longer needs to repeatedly filter, image-check, and sort the full `articles` table for the common homepage path.
+
+The Worker refreshes the snapshot after each ingestion run by calling:
+
+```text
+public.refresh_public_feed_snapshot()
+```
+
+The web app keeps a safe fallback:
+
+```text
+public.public_feed_snapshot -> public.articles fallback
+```
+
+The article API exposes the active source in headers:
+
+```text
+X-NutsNews-Article-Data-Source: public_feed_snapshot | articles_fallback
+X-NutsNews-Feed-Snapshot: hit | fallback
+```
+
+Detailed guide:
+
+```text
+docs/PUBLIC_FEED_SNAPSHOT.md
+```
+
+---
+
 ## Article API Pagination
 
 The public article API is optimized for predictable mobile feed performance.

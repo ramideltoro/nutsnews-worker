@@ -44,6 +44,24 @@ check_http_ok() {
   fi
 }
 
+
+check_header_contains() {
+  local label="$1"
+  local url="$2"
+  local expected="$3"
+  local headers
+
+  headers="$(curl -sSI "$url")"
+  echo "$label: checking response headers for '$expected'"
+
+  if ! grep -qi "$expected" <<<"$headers"; then
+    echo "ERROR: $label did not contain expected header text: $expected" >&2
+    echo "Headers:" >&2
+    echo "$headers" >&2
+    exit 1
+  fi
+}
+
 check_contains() {
   local label="$1"
   local url="$2"
@@ -68,6 +86,8 @@ print_section "Public web"
 check_http_ok "Homepage" "$trimmed_site_url/"
 check_http_ok "Article API" "$trimmed_site_url/api/articles?page=0"
 check_contains "Article API shape" "$trimmed_site_url/api/articles?page=0" "articles"
+check_header_contains "Article API snapshot data source" "$trimmed_site_url/api/articles?page=0" "x-nutsnews-article-data-source"
+check_header_contains "Article API snapshot status" "$trimmed_site_url/api/articles?page=0" "x-nutsnews-feed-snapshot"
 
 if [[ -n "$ARTICLE_PATH" ]]; then
   if [[ "$ARTICLE_PATH" == http* ]]; then
@@ -103,3 +123,4 @@ echo "Next manual checks:"
 echo "  Better Stack: service:nutsnews-web, service:nutsnews-worker, service:nutsnews-controller"
 echo "  Sentry: latest frontend/server/Worker/controller errors"
 echo "  Admin: /admin/shards, /admin/feed-health, /admin/ai-usage"
+echo "  Article API snapshot headers: X-NutsNews-Article-Data-Source, X-NutsNews-Feed-Snapshot"
