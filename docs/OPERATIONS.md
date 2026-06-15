@@ -18,6 +18,7 @@ Current admin routes:
 
 ```text
 /admin
+/admin/articles
 /admin/ai-usage
 /admin/shards
 /admin/feed-health
@@ -28,6 +29,33 @@ Current admin routes:
 ---
 
 ## Admin Dashboards
+
+### Article Review Dashboard
+
+Route:
+
+```text
+/admin/articles
+```
+
+Purpose:
+
+* Show recently reviewed articles
+* Sort reviewed articles by review time
+* Filter by accepted/rejected decision
+* Filter by source
+* Filter by category
+* Filter by positivity score
+* Show rejection reasons
+* Link to the original article
+* Link to the published NutsNews story when available
+* Support manual investigation of bad AI decisions
+
+Detailed guide:
+
+```text
+docs/ADMIN_ARTICLE_REVIEWS.md
+```
 
 ### AI Usage Dashboard
 

@@ -163,6 +163,7 @@ nutsnews/
 │   ├── PROJECT.md
 │   ├── ARCHITECTURE.md
 │   ├── OPERATIONS.md
+│   ├── ADMIN_ARTICLE_REVIEWS.md
 │   ├── DEPENDENCY_UPDATES.md
 │   ├── PERFORMANCE_AND_RESILIENCY.md
 │   ├── OBSERVABILITY.md
@@ -210,6 +211,17 @@ Major upgrades are intentionally kept out of the normal routine and should be ha
 ---
 
 ## Data Model Summary
+
+### Admin article review dashboard
+
+Route:
+
+```text
+/admin/articles
+```
+
+The dashboard reads `public.article_ai_reviews`, joins matching published records from `public.articles` by `original_url`, and sorts reviews by `reviewed_at`. Operators can filter by decision, source, category, and positivity score to investigate accepted and rejected story decisions.
+
 
 ### `articles`
 

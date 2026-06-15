@@ -19,7 +19,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Controller | Controller Worker coordinates shard execution |
 | Database | Supabase Postgres stores articles, feeds, review history, and operational data |
 | AI | OpenAI classifies, scores, and summarizes candidate stories |
-| Admin | Google-protected admin dashboards for internal operations |
+| Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Observability | Better Stack logs and uptime, Sentry errors, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
@@ -39,6 +39,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Project Overview](docs/PROJECT.md) | Product story, mission, reader experience, and benefits |
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
+| [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, and investigation workflow |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
@@ -72,6 +73,7 @@ nutsnews/
 | --- | --- |
 | Public site | https://www.nutsnews.com |
 | Admin portal | `/admin` |
+| Article review dashboard | `/admin/articles` |
 | AI usage dashboard | `/admin/ai-usage` |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
@@ -98,13 +100,14 @@ NutsNews currently includes:
 * Better Stack uptime monitoring and centralized logs
 * Sentry error monitoring
 * Google-protected admin portal
+* Article review dashboard for accepted/rejected story decisions
 * AI usage dashboard
 * Worker shard health dashboard
 * RSS feed health and feed management dashboards
 * RSS source quality scoring with 0-100 feed rankings
 * Repeatable dependency update routine with npm audit/outdated reports and safe patch/minor updates
 * Dependabot npm monitoring for web, Worker, and controller projects
-* Database indexes for feed/API performance
+* Database indexes for feed/API and article review dashboard performance
 * GitHub documentation in `docs/`
 * Production troubleshooting guide for issue #30
 * Controller and shard operations guide for issue #37

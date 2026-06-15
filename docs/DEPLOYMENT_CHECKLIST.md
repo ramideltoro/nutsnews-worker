@@ -146,6 +146,7 @@ Use this checklist when changing:
 * Article pages
 * API routes
 * Admin portal
+* Article review dashboard
 * Sentry web config
 * Better Stack web logging
 * Cloudflare cache headers
@@ -216,6 +217,19 @@ Expected:
 
 ```text
 HTTP/2 200
+```
+
+Admin article dashboard smoke check after signing in:
+
+```text
+/admin/articles
+```
+
+Expected:
+
+```text
+Article Review Dashboard
+Accepted and Rejected Story Reviews
 ```
 
 For `/api/articles`, expected response shape includes:
