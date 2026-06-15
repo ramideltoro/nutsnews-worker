@@ -22,6 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Observability | Better Stack logs and uptime, Sentry errors, admin health dashboards |
+| Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Documented Supabase restore runbook with validation SQL |
 | Cost model | Built around free-tier cloud services with OpenAI as the main variable cost |
@@ -39,6 +40,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
+| [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
@@ -74,6 +76,7 @@ nutsnews/
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
+| Dependency update guide | [docs/DEPENDENCY_UPDATES.md](docs/DEPENDENCY_UPDATES.md) |
 | RSS source quality guide | [docs/RSS_SOURCE_QUALITY.md](docs/RSS_SOURCE_QUALITY.md) |
 | Supabase restore runbook | [docs/SUPABASE_RESTORE.md](docs/SUPABASE_RESTORE.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
@@ -99,6 +102,8 @@ NutsNews currently includes:
 * Worker shard health dashboard
 * RSS feed health and feed management dashboards
 * RSS source quality scoring with 0-100 feed rankings
+* Repeatable dependency update routine with npm audit/outdated reports and safe patch/minor updates
+* Dependabot npm monitoring for web, Worker, and controller projects
 * Database indexes for feed/API performance
 * GitHub documentation in `docs/`
 * Production troubleshooting guide for issue #30

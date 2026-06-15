@@ -19,6 +19,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# local dependency update reports
+dependency-update-reports/
+
 # local backups and database exports
 backups/
 *.backup

@@ -10,12 +10,12 @@
 		"deploy:all": "npm run generate:wrangler && for i in {0..24}; do echo \"Deploying shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
 	},
 	"dependencies": {
-		"@sentry/cloudflare": "^10.57.0"
+		"@sentry/cloudflare": "^10.58.0"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20260601.0",
+		"@cloudflare/workers-types": "^4.20260615.1",
 		"@types/node": "^20.19.43",
-		"typescript": "^5.8.3",
-		"wrangler": "^4.20.0"
+		"typescript": "^5.9.3",
+		"wrangler": "^4.100.0"
 	}
 }

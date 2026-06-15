@@ -126,7 +126,7 @@ It stores articles, RSS feeds, AI review history, AI usage runs, Worker run reco
 
 The GitHub documentation layer.
 
-The root README stays short. Detailed documentation lives in `docs/`.
+The root README stays short. Detailed documentation lives in `docs/`. Operational routines such as deployment, dependency updates, source quality scoring, restore, and troubleshooting are documented here.
 
 ---
 
@@ -155,19 +155,57 @@ nutsnews/
 ├── supabase/
 │   └── migrations/
 │
+├── .github/
+│   └── dependabot.yml
+│
 ├── docs/
 │   ├── README.md
 │   ├── PROJECT.md
 │   ├── ARCHITECTURE.md
 │   ├── OPERATIONS.md
+│   ├── DEPENDENCY_UPDATES.md
 │   ├── PERFORMANCE_AND_RESILIENCY.md
 │   ├── OBSERVABILITY.md
 │   └── TROUBLESHOOTING.md
 │
 ├── scripts/
+│   ├── dependency_update_routine.sh
+│   ├── post_deploy_verify.sh
+│   └── validate_cloudflare_cache_hit_rate.sh
 ├── README.md
 └── LICENSE
 ```
+
+
+---
+
+## Dependency Maintenance
+
+NutsNews has a repeatable dependency update routine for the web app, Worker shards, and controller Worker.
+
+The routine is implemented in:
+
+```text
+scripts/dependency_update_routine.sh
+```
+
+The runbook is documented in:
+
+```text
+docs/DEPENDENCY_UPDATES.md
+```
+
+The process covers:
+
+* `npm outdated --long`
+* `npm audit --audit-level=moderate`
+* Safe patch/minor updates with `npm update --save`
+* Web lint and build validation
+* Worker Wrangler config generation
+* Worker TypeScript validation
+* Dependabot weekly npm checks for `web/`, `worker/`, and `controller/`
+
+Major upgrades are intentionally kept out of the normal routine and should be handled as separate issues.
 
 ---
 

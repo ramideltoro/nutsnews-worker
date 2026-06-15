@@ -27,14 +27,15 @@ Use this deployment flow for normal production releases:
 ```text
 1. Pull latest main
 2. Check local status
-3. Build the web app
-4. Generate Worker shard configs
-5. Deploy web changes through Vercel
-6. Deploy Worker shards when Worker code/config changed
-7. Deploy controller when controller code/config changed
-8. Purge Cloudflare cache when public web/cache behavior changed
-9. Run post-deploy verification
-10. Check logs, Sentry, and admin dashboards
+3. Run dependency routine when dependency/package files changed
+4. Build the web app
+5. Generate Worker shard configs
+6. Deploy web changes through Vercel
+7. Deploy Worker shards when Worker code/config changed
+8. Deploy controller when controller code/config changed
+9. Purge Cloudflare cache when public web/cache behavior changed
+10. Run post-deploy verification
+11. Check logs, Sentry, and admin dashboards
 ```
 
 Keep deployments small when possible. A documentation-only change does not need Worker or controller redeploys.
@@ -81,6 +82,52 @@ build/
 .turbo/
 coverage/
 .DS_Store
+```
+
+
+---
+
+## 1A. Dependency Update Checklist
+
+Use this section when the release includes `package.json`, `package-lock.json`, dependency, or security maintenance changes.
+
+The full dependency runbook lives in:
+
+```text
+docs/DEPENDENCY_UPDATES.md
+```
+
+Check dependency health without changing lockfiles:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews2
+./scripts/dependency_update_routine.sh check
+```
+
+Apply safe patch/minor updates only:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews2
+./scripts/dependency_update_routine.sh update
+```
+
+Before committing dependency changes, confirm:
+
+```text
+[ ] npm audit output was reviewed
+[ ] npm outdated output was reviewed
+[ ] no npm audit fix --force was used
+[ ] web lint passed
+[ ] web build passed
+[ ] Worker Wrangler generation passed when Worker dependencies changed
+[ ] Worker TypeScript check passed when Worker dependencies changed
+[ ] major upgrades were moved to their own issue
+```
+
+Review package diffs:
+
+```bash
+git diff -- web/package.json web/package-lock.json worker/package.json worker/package-lock.json controller/package.json controller/package-lock.json
 ```
 
 ---

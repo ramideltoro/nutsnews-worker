@@ -14,6 +14,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [Architecture](ARCHITECTURE.md) | System design, components, data flow, data model, and repository layout |
 | [Operations](OPERATIONS.md) | Admin portal, deployment, maintenance workflows, environment variables, and operating model |
 | [Deployment Checklist](DEPLOYMENT_CHECKLIST.md) | Repeatable web, Worker shard, controller, Cloudflare cache purge, and post-deploy verification checklist |
+| [Dependency Updates](DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, Dependabot, and validation routine |
 | [Controller and Shards](CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, pagination, database indexes, Worker sharding, failure handling, and cost controls |
 | [Observability](OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, monitoring, and health checks |
@@ -31,6 +32,7 @@ Use the docs like this:
 * Use `ARCHITECTURE.md` when making system or code changes.
 * Use `OPERATIONS.md` when deploying or maintaining the platform.
 * Use `DEPLOYMENT_CHECKLIST.md` when releasing web, Worker, controller, database, or cache changes.
+* Use `DEPENDENCY_UPDATES.md` when reviewing npm audit output, applying safe dependency updates, or validating Dependabot PRs.
 * Use `CONTROLLER_AND_SHARDS.md` when manually testing the controller or individual Worker shards.
 * Use `PERFORMANCE_AND_RESILIENCY.md` when improving speed, cache HIT rate, database performance, Worker throughput, or reliability.
 * Use `OBSERVABILITY.md` when debugging logs, dashboards, monitoring, or errors.

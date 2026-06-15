@@ -207,6 +207,46 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
 
 ---
 
+## Dependency Update Routine
+
+The dependency update runbook lives in:
+
+```text
+docs/DEPENDENCY_UPDATES.md
+```
+
+Use it when reviewing `npm audit`, applying safe patch/minor updates, or validating Dependabot PRs.
+
+Check dependency health without changing lockfiles:
+
+```bash
+./scripts/dependency_update_routine.sh check
+```
+
+Apply safe patch/minor updates allowed by existing `package.json` ranges:
+
+```bash
+./scripts/dependency_update_routine.sh update
+```
+
+The routine intentionally avoids forced upgrades:
+
+```text
+Do not use npm audit fix --force as part of the normal routine.
+```
+
+Validation includes the web lint/build and Worker TypeScript checks.
+
+Reports are written locally under:
+
+```text
+dependency-update-reports/<timestamp>/
+```
+
+These reports are ignored by Git.
+
+---
+
 ## Supabase Backup and Restore
 
 The full restore runbook lives in:
@@ -317,12 +357,28 @@ NutsNews is maintained by keeping each system boundary clear:
 * Public routes are cacheable.
 * Admin routes are protected.
 * Restore instructions and validation SQL live in the repo.
+* Dependency update instructions and validation scripts live in the repo.
+* Local dependency update reports stay outside Git.
 * Actual database backup files stay outside Git.
 * Docs live in `docs/`.
 
 ---
 
 ## Common Maintenance Tasks
+
+### Run dependency health check
+
+```bash
+./scripts/dependency_update_routine.sh check
+```
+
+### Apply safe dependency updates
+
+```bash
+./scripts/dependency_update_routine.sh update
+```
+
+Review the generated report and package diffs before committing.
 
 ### Add or disable RSS feeds
 
