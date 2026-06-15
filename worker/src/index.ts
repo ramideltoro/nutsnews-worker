@@ -63,6 +63,7 @@ type FeedFetchResult = {
 
 type RssFetchResult = {
 	articles: RssArticle[];
+	feedResults: FeedFetchResult[];
 	feedFetchSuccessCount: number;
 	feedFetchFailureCount: number;
 	failedFeeds: Array<{
@@ -87,6 +88,48 @@ type ReviewedUrlRow = {
 
 type PublishedArticleUrlRow = {
 	original_url: string;
+};
+
+type FeedHealthSnapshotRow = {
+	feed_url: string;
+	consecutive_failure_count: number | null;
+	total_fetch_count: number | null;
+	total_success_count: number | null;
+	total_failure_count: number | null;
+	total_article_count: number | null;
+	total_image_count: number | null;
+	total_accepted_count: number | null;
+	total_rejected_count: number | null;
+	last_success_at: string | null;
+	last_failure_at: string | null;
+};
+
+type FeedHealthUpsert = {
+	source: string;
+	feed_url: string;
+	last_checked_at: string;
+	last_success_at: string | null;
+	last_failure_at: string | null;
+	last_status: number | null;
+	last_error_message: string | null;
+	last_article_count: number;
+	last_image_count: number;
+	last_accepted_count: number;
+	last_rejected_count: number;
+	consecutive_failure_count: number;
+	total_fetch_count: number;
+	total_success_count: number;
+	total_failure_count: number;
+	total_article_count: number;
+	total_image_count: number;
+	total_accepted_count: number;
+	total_rejected_count: number;
+	updated_at: string;
+};
+
+type FeedOutcomeCounts = {
+	accepted: number;
+	rejected: number;
 };
 
 type ArticleReviewInsert = {
@@ -245,6 +288,7 @@ type RefreshResult = {
 	rejectedCount: number;
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
+	feedHealthSaveOk: boolean;
 	aiUsageSaveOk: boolean;
 	workerRunSaveOk: boolean;
 	openAiModel: string;
@@ -267,10 +311,10 @@ const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
 const PUBLISHED_URL_LOOKBACK_LIMIT = 5000;
-const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 3;
+const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 1;
 const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
 const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 38;
-const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 14;
+const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 15;
 const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
 
 const OPENAI_MODEL = "gpt-4o-mini";
@@ -1762,6 +1806,7 @@ async function fetchRssArticles(
 	}
 
 	return {
+		feedResults,
 		articles: sortArticlesForReview(
 			uniqueArticlesByUrl(allArticles),
 			positiveSources,
@@ -2164,6 +2209,233 @@ Return JSON exactly like this:
 			usage,
 		);
 	}
+}
+
+function buildFeedOutcomeCounts(
+	reviewedArticles: ReviewedArticleResult[],
+): Map<string, FeedOutcomeCounts> {
+	const countsBySource = new Map<string, FeedOutcomeCounts>();
+
+	for (const reviewedArticle of reviewedArticles) {
+		const source = reviewedArticle.article.source;
+		const current = countsBySource.get(source) ?? {
+			accepted: 0,
+			rejected: 0,
+		};
+		const hasThumbnail = hasUsableThumbnail(reviewedArticle.article);
+		const accepted =
+			reviewedArticle.aiDecision.decision === "accept" && hasThumbnail;
+
+		if (accepted) {
+			current.accepted += 1;
+		} else {
+			current.rejected += 1;
+		}
+
+		countsBySource.set(source, current);
+	}
+
+	return countsBySource;
+}
+
+async function getFeedHealthSnapshots(
+	env: Env,
+	config: RuntimeConfig,
+): Promise<Map<string, FeedHealthSnapshotRow>> {
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/feed_health?select=feed_url,consecutive_failure_count,total_fetch_count,total_success_count,total_failure_count,total_article_count,total_image_count,total_accepted_count,total_rejected_count,last_success_at,last_failure_at&limit=10000`,
+			{
+				method: "GET",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				},
+			},
+		);
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.feed_health_lookup_exception",
+			"Supabase feed health lookup threw an exception",
+			error,
+			{
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return new Map();
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+
+		await logWarn(
+			env,
+			"worker.supabase.feed_health_lookup_failed",
+			"Failed to load feed health snapshots",
+			{
+				status: response.status,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return new Map();
+	}
+
+	const rows = await readResponseJsonSafely<FeedHealthSnapshotRow[]>(response);
+
+	if (!rows.ok) {
+		await logError(
+			env,
+			"worker.supabase.feed_health_lookup_parse_failed",
+			"Failed to parse feed health lookup response",
+			rows.error,
+			{
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return new Map();
+	}
+
+	return new Map(rows.value.map((row) => [row.feed_url, row]));
+}
+
+function buildFeedHealthRows(
+	feedResults: FeedFetchResult[],
+	outcomeCounts: Map<string, FeedOutcomeCounts>,
+	previousHealthByUrl: Map<string, FeedHealthSnapshotRow>,
+	checkedAt: Date,
+): FeedHealthUpsert[] {
+	const checkedAtIso = checkedAt.toISOString();
+
+	return feedResults.map((result) => {
+		const previous = previousHealthByUrl.get(result.feed.url);
+		const outcome = outcomeCounts.get(result.feed.source) ?? {
+			accepted: 0,
+			rejected: 0,
+		};
+		const previousConsecutiveFailureCount =
+			previous?.consecutive_failure_count ?? 0;
+		const previousTotalFetchCount = previous?.total_fetch_count ?? 0;
+		const previousTotalSuccessCount = previous?.total_success_count ?? 0;
+		const previousTotalFailureCount = previous?.total_failure_count ?? 0;
+		const previousTotalArticleCount = previous?.total_article_count ?? 0;
+		const previousTotalImageCount = previous?.total_image_count ?? 0;
+		const previousTotalAcceptedCount = previous?.total_accepted_count ?? 0;
+		const previousTotalRejectedCount = previous?.total_rejected_count ?? 0;
+		const articleCount = result.articles.length;
+		const imageCount = result.articles.filter(hasUsableThumbnail).length;
+		const lastSuccessAt = result.ok
+			? checkedAtIso
+			: previous?.last_success_at ?? null;
+		const lastFailureAt = result.ok
+			? previous?.last_failure_at ?? null
+			: checkedAtIso;
+
+		return {
+			source: result.feed.source,
+			feed_url: result.feed.url,
+			last_checked_at: checkedAtIso,
+			last_success_at: lastSuccessAt,
+			last_failure_at: lastFailureAt,
+			last_status: result.status,
+			last_error_message: result.ok ? null : result.errorMessage,
+			last_article_count: articleCount,
+			last_image_count: imageCount,
+			last_accepted_count: outcome.accepted,
+			last_rejected_count: outcome.rejected,
+			consecutive_failure_count: result.ok
+				? 0
+				: previousConsecutiveFailureCount + 1,
+			total_fetch_count: previousTotalFetchCount + 1,
+			total_success_count: previousTotalSuccessCount + (result.ok ? 1 : 0),
+			total_failure_count: previousTotalFailureCount + (result.ok ? 0 : 1),
+			total_article_count: previousTotalArticleCount + articleCount,
+			total_image_count: previousTotalImageCount + imageCount,
+			total_accepted_count: previousTotalAcceptedCount + outcome.accepted,
+			total_rejected_count: previousTotalRejectedCount + outcome.rejected,
+			updated_at: checkedAtIso,
+		};
+	});
+}
+
+async function saveFeedHealthBatch(
+	env: Env,
+	config: RuntimeConfig,
+	feedHealthRows: FeedHealthUpsert[],
+): Promise<boolean> {
+	const startedAt = Date.now();
+
+	if (feedHealthRows.length === 0) {
+		return true;
+	}
+
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/feed_health?on_conflict=feed_url`,
+			{
+				method: "POST",
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+					"Content-Type": "application/json",
+					Prefer: "resolution=merge-duplicates,return=minimal",
+				},
+				body: JSON.stringify(feedHealthRows),
+			},
+		);
+	} catch (error) {
+		await logError(
+			env,
+			"worker.supabase.feed_health_batch_save_exception",
+			"Supabase feed health batch save threw an exception",
+			error,
+			{
+				feedHealthRowCount: feedHealthRows.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+
+		await logWarn(
+			env,
+			"worker.supabase.feed_health_batch_save_failed",
+			"Failed to batch-save feed health rows",
+			{
+				status: response.status,
+				errorText,
+				feedHealthRowCount: feedHealthRows.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+
+		return false;
+	}
+
+	await logInfo(
+		env,
+		"worker.supabase.feed_health_batch_saved",
+		"Batch-saved feed health rows",
+		{
+			feedHealthRowCount: feedHealthRows.length,
+			durationMs: Date.now() - startedAt,
+		},
+	);
+
+	return true;
 }
 
 async function saveArticleReviewsBatch(
@@ -2820,11 +3092,25 @@ async function refreshArticles(
 
 	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
 		buildRowsFromReviewedArticles(reviewedArticles);
+	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(
 		env,
 		config,
 		acceptedArticleRows,
+	);
+
+	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
+	const feedHealthRows = buildFeedHealthRows(
+		rssFetchResult.feedResults,
+		feedOutcomeCounts,
+		previousFeedHealth,
+		new Date(),
+	);
+	const feedHealthSaveOk = await saveFeedHealthBatch(
+		env,
+		config,
+		feedHealthRows,
 	);
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
@@ -2941,6 +3227,7 @@ async function refreshArticles(
 		rejectedCount,
 		reviewSaveOk,
 		articleSaveOk,
+		feedHealthSaveOk,
 		aiUsageSaveOk,
 		openAiModel: OPENAI_MODEL,
 		openAiCallCount: aiReviewedArticles.length,

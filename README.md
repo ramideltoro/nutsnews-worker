@@ -249,6 +249,8 @@ It lives at:
 
 ```text
 /admin/ai-usage
+/admin/shards
+/admin/feed-health
 ```
 
 The goal of this dashboard is to make OpenAI usage visible and reduce the risk of surprise AI spend.
@@ -318,6 +320,8 @@ The dashboard shows:
 * Image hydration lookup and found counts
 * Duration by shard
 * Recent Worker execution rows
+
+The admin portal also includes an RSS Feed Health dashboard for source quality, repeated feed failures, thumbnail coverage, accepted output, and Supabase disable actions.
 
 The dashboard uses a dedicated `worker_runs` table. Successful Worker executions and failed Worker executions are saved as first-class run records.
 
@@ -389,6 +393,114 @@ Example Worker response when some feeds fail:
 This makes the Worker more resilient because the operator can see exactly what failed while the run still completes and saves whatever useful work it can.
 
 The next small cleanup is to truncate very large failed-feed error bodies so full HTML error pages do not make logs or manual curl responses noisy.
+
+
+---
+
+## RSS Feed Health Tracking
+
+NutsNews now tracks RSS feed quality over time in Supabase and exposes it through a protected admin dashboard at:
+
+```text
+/admin/feed-health
+```
+
+This feature is designed for source quality management. The platform can now show which feeds are reliable, which feeds repeatedly fail, which feeds produce thumbnails, which feeds produce accepted articles, and which feeds should be disabled.
+
+### What the Worker records
+
+Every Worker run saves one feed health row per RSS feed in the current shard.
+
+The `feed_health` table tracks:
+
+* Feed source name
+* Feed URL
+* Last checked time
+* Last successful fetch time
+* Last failed fetch time
+* Latest HTTP status
+* Latest error message
+* Latest article count
+* Latest image count
+* Latest accepted count
+* Latest rejected count
+* Consecutive failure count
+* Total fetch count
+* Total success count
+* Total failure count
+* Total article count
+* Total image count
+* Total accepted count
+* Total rejected count
+
+The Worker still saves accepted articles before review history and feed health rows, so accepted stories continue to have priority when Cloudflare subrequest limits are tight.
+
+### Admin dashboard
+
+The RSS Feed Health dashboard shows:
+
+* Total feeds
+* Active feeds
+* Disabled feeds
+* Weak feeds
+* Best feeds
+* Success rate
+* Image rate
+* Accepted article count
+* Repeated failure count
+* Last checked time
+* Last success time
+* Last failure time
+* Last HTTP status
+* Latest feed error message
+* A full feed health table
+* A Supabase SQL snippet to disable weak feeds without a code deploy
+
+Dashboard route:
+
+```text
+/admin/feed-health
+```
+
+### Supabase views
+
+The migration also creates two operational views:
+
+```sql
+select * from public.bad_feeds;
+```
+
+Use this to find weak feeds that repeatedly fail, produce no articles, or produce poor thumbnail coverage.
+
+```sql
+select * from public.best_feeds;
+```
+
+Use this to find feeds that produce the most accepted articles with good reliability and image coverage.
+
+### Disable weak feeds without code changes
+
+The Worker already selects only active feeds:
+
+```sql
+select *
+from public.rss_feeds
+where is_active = true;
+```
+
+To disable weak feeds, update Supabase data instead of changing Worker code:
+
+```sql
+update public.rss_feeds
+set is_active = false
+where url in (
+  select feed_url
+  from public.bad_feeds
+  limit 25
+);
+```
+
+This satisfies the RSS quality workflow: observe feed health, identify weak feeds, disable bad sources, and prioritize sources that actually produce usable uplifting stories.
 
 ---
 
@@ -699,6 +811,8 @@ Example:
 ```text
 /admin
 /admin/ai-usage
+/admin/shards
+/admin/feed-health
 ```
 
 Future dashboards can follow the same structure.
@@ -780,7 +894,7 @@ Approved stories could be repurposed into short posts for social channels.
 The admin portal creates a foundation for future dashboards such as:
 
 * Worker shard health
-* RSS feed health
+* RSS feed health dashboard
 * Article review activity
 * Source quality scoring
 * Backup status
@@ -1285,7 +1399,7 @@ Future possibilities include:
 * Personalization
 * Multi-language summaries
 * Editorial review dashboard
-* Feed health dashboard
+* Feed health dashboard with Supabase disable actions
 * Worker shard health dashboard
 * Source scoring
 * Automated cache purging
