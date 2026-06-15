@@ -580,3 +580,106 @@ ok = true
 status = 200
 response.message = NutsNews refresh complete
 ```
+
+---
+
+## Worker Finds No Articles
+
+Use this when Worker runs complete but publish no new articles.
+
+### Symptoms
+
+```text
+acceptedCount: 0
+eligibleForAiCount: 0
+noThumbnailRejectedCount is high
+alreadyReviewedCount is high
+imageHydrationFoundCount: 0
+```
+
+### Run a shard with extra image recovery
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=6&imageLookups=8"
+```
+
+### Fields to inspect
+
+```text
+fetchedCount
+candidateCount
+alreadyReviewedCount
+unreviewedCount
+articlePageImageLookupLimit
+imageHydrationLookupCount
+imageHydrationFoundCount
+noThumbnailRejectedCount
+eligibleForAiCount
+aiReviewedCount
+acceptedCount
+rejectedCount
+reviewSaveOk
+articleSaveOk
+```
+
+### What the fields mean
+
+| Field | Meaning |
+| --- | --- |
+| `fetchedCount` | Unique RSS articles found across the shard feeds |
+| `candidateCount` | Articles considered this run before reviewed URL filtering |
+| `alreadyReviewedCount` | Candidate URLs skipped because they were already processed or recently retried |
+| `unreviewedCount` | Candidate URLs still eligible for local/image/AI checks |
+| `articlePageImageLookupLimit` | Max article page image lookups allowed this run |
+| `imageHydrationLookupCount` | Article pages fetched to recover missing images |
+| `imageHydrationFoundCount` | Missing images recovered from article pages |
+| `noThumbnailRejectedCount` | Articles skipped before AI because no usable image was found |
+| `eligibleForAiCount` | Articles with thumbnails that passed local negative filters |
+| `acceptedCount` | Articles accepted by AI and saved for the public feed |
+
+### Common causes
+
+* Most active feeds are already fully reviewed.
+* Many feeds do not expose RSS thumbnails.
+* Publisher pages block article-page image hydration.
+* Feeds are active but stale.
+* The shard has a high `alreadyReviewedCount` because previous no-thumbnail rows were stored.
+
+### Current fix behavior
+
+The Worker now retries old no-thumbnail review rows after a cooldown. This prevents one bad no-thumbnail pass from blocking an article forever if image extraction later improves or the publisher page starts exposing an image.
+
+### If accepted count stays zero
+
+Check feed health:
+
+```sql
+select
+  source,
+  feed_url,
+  last_article_count,
+  last_image_count,
+  last_accepted_count,
+  consecutive_failure_count,
+  last_error_message
+from public.feed_health
+order by last_checked_at desc
+limit 50;
+```
+
+Find feeds with poor image coverage:
+
+```sql
+select
+  source,
+  feed_url,
+  total_article_count,
+  total_image_count,
+  total_accepted_count
+from public.feed_health
+where total_article_count > 0
+order by (total_image_count::numeric / nullif(total_article_count, 0)) asc nulls first
+limit 25;
+```
+
+Then prefer direct publisher feeds with stronger RSS images.

@@ -262,3 +262,49 @@ NutsNews improves resiliency by:
 * Logging activity centrally in Better Stack
 * Keeping public reader routes cacheable
 * Keeping admin dashboards separate from public reader pages
+
+---
+
+## Worker Article Recovery Improvements
+
+The Worker now does more work to recover usable publisher images before rejecting articles for missing thumbnails.
+
+Current behavior:
+
+* Article page image hydration defaults to multiple lookups per run instead of only one lookup.
+* Manual Worker tests can override image lookup count with `imageLookups`.
+* No-thumbnail local rejections are retried after a short cooldown instead of becoming permanent dead ends.
+* Article AI review rows are merged on conflict so retry cooldowns refresh cleanly.
+* RSS image detection accepts more publisher CDN image URL shapes.
+* Atom image enclosure links are included as RSS image candidates.
+
+Manual test with more image lookups:
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=6&imageLookups=8"
+```
+
+Watch these response fields:
+
+```text
+fetchedCount
+candidateCount
+alreadyReviewedCount
+unreviewedCount
+articlePageImageLookupLimit
+imageHydrationLookupCount
+imageHydrationFoundCount
+noThumbnailRejectedCount
+eligibleForAiCount
+aiReviewedCount
+acceptedCount
+rejectedCount
+```
+
+A healthier run should show one or more of:
+
+```text
+imageHydrationFoundCount > 0
+eligibleForAiCount > 0
+acceptedCount > 0
+```

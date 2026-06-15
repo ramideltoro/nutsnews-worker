@@ -36,7 +36,6 @@ The full project documentation lives in [`docs/`](docs/).
 | [Project Overview](docs/PROJECT.md) | Product story, mission, reader experience, and benefits |
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
-| [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable web, Worker shard, controller, Cloudflare cache purge, and post-deploy verification checklist |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
@@ -71,7 +70,6 @@ nutsnews/
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
-| Deployment checklist | [docs/DEPLOYMENT_CHECKLIST.md](docs/DEPLOYMENT_CHECKLIST.md) |
 
 ---
 
@@ -96,8 +94,8 @@ NutsNews currently includes:
 * Database indexes for feed/API performance
 * GitHub documentation in `docs/`
 * Production troubleshooting guide for issue #30
-* Deployment checklist for issue #29
 * Controller and shard operations guide for issue #37
+* Worker article recovery improvements for no-thumbnail retries and image hydration
 * MIT license
 
 ---

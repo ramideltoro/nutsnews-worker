@@ -1,4 +1,4 @@
-import { logError, logInfo, logWarn } from "./logger";
+import { logError, logInfo, logWarn } from './logger';
 
 type SecretBinding = {
 	get: () => Promise<string>;
@@ -19,6 +19,7 @@ type Env = {
 	AI_COST_ALERT_RUN_USD?: string;
 	AI_REVIEW_ALERT_RUN_LIMIT?: string;
 	AI_TOKEN_ALERT_RUN_LIMIT?: string;
+	ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT?: string;
 };
 
 type RuntimeConfig = {
@@ -30,6 +31,7 @@ type RuntimeConfig = {
 	aiCostAlertRunUsd: number;
 	aiReviewAlertRunLimit: number;
 	aiTokenAlertRunLimit: number;
+	articlePageImageLookupLimit: number;
 };
 
 type WorkerRunSaveConfig = {
@@ -75,7 +77,7 @@ type RssFetchResult = {
 };
 
 type AiArticleDecision = {
-	decision: "accept" | "reject";
+	decision: 'accept' | 'reject';
 	category: string;
 	positivity_score: number;
 	summary: string;
@@ -84,6 +86,9 @@ type AiArticleDecision = {
 
 type ReviewedUrlRow = {
 	original_url: string;
+	decision: 'accept' | 'reject';
+	reason: string | null;
+	reviewed_at: string | null;
 };
 
 type PublishedArticleUrlRow = {
@@ -136,7 +141,7 @@ type ArticleReviewInsert = {
 	original_url: string;
 	source: string;
 	title: string;
-	decision: "accept" | "reject";
+	decision: 'accept' | 'reject';
 	category: string;
 	positivity_score: number;
 	summary: string;
@@ -155,12 +160,13 @@ type ArticleInsert = {
 	ai_summary: string;
 	category: string;
 	positivity_score: number;
-	status: "published";
+	status: 'published';
 };
 
 type RefreshOptions = {
 	maxAiReviews?: number;
-	runSource?: "manual" | "scheduled" | "unknown";
+	imageLookupLimit?: number;
+	runSource?: 'manual' | 'scheduled' | 'unknown';
 	requestId?: string;
 };
 
@@ -183,7 +189,7 @@ type ReviewedArticleResult = {
 	usage?: OpenAiUsage;
 	estimatedCostUsd?: number;
 	openAiModel?: string;
-	reviewSource?: "openai" | "local";
+	reviewSource?: 'openai' | 'local';
 };
 
 type ImageHydrationResult = {
@@ -195,7 +201,7 @@ type ImageHydrationResult = {
 type AiUsageRunInsert = {
 	run_started_at: string;
 	run_completed_at: string;
-	run_source: "manual" | "scheduled" | "unknown";
+	run_source: 'manual' | 'scheduled' | 'unknown';
 	request_id: string | null;
 	shard_index: number;
 	feeds_per_shard: number;
@@ -231,7 +237,7 @@ type AiUsageRunInsert = {
 type WorkerRunInsert = {
 	run_started_at: string;
 	run_completed_at: string;
-	run_source: "manual" | "scheduled" | "unknown";
+	run_source: 'manual' | 'scheduled' | 'unknown';
 	request_id: string | null;
 	shard_index: number;
 	feeds_per_shard: number;
@@ -265,6 +271,7 @@ type RefreshResult = {
 	shardIndex: number;
 	feedsPerShard: number;
 	maxAiReviews: number;
+	articlePageImageLookupLimit: number;
 	feedCount: number;
 	feedFetchSuccessCount: number;
 	feedFetchFailureCount: number;
@@ -311,13 +318,15 @@ const HARD_MAX_AI_REVIEWS_PER_RUN = 18;
 const AI_REVIEW_CONCURRENCY = 3;
 const REVIEWED_URL_LOOKBACK_LIMIT = 5000;
 const PUBLISHED_URL_LOOKBACK_LIMIT = 5000;
-const MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 1;
+const DEFAULT_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 6;
+const HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 8;
 const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
-const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 38;
-const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 15;
+const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 48;
+const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 10;
+const NO_THUMBNAIL_RETRY_AFTER_HOURS = 6;
 const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
 
-const OPENAI_MODEL = "gpt-4o-mini";
+const OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
 const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
@@ -325,261 +334,260 @@ const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 
 const POSITIVE_KEYWORDS = [
-	"good news",
-	"uplifting",
-	"inspiring",
-	"inspired",
-	"kindness",
-	"rescue",
-	"rescued",
-	"reunited",
-	"reunion",
-	"community",
-	"volunteer",
-	"volunteers",
-	"donation",
-	"donated",
-	"helping",
-	"helps",
-	"hero",
-	"heroes",
-	"achievement",
-	"breakthrough",
-	"discovery",
-	"restored",
-	"restoration",
-	"recover",
-	"recovered",
-	"healing",
-	"wellness",
-	"healthier",
-	"happiness",
-	"joy",
-	"celebrate",
-	"celebration",
-	"wins",
-	"award",
-	"remarkable",
-	"rare",
-	"beautiful",
-	"travel",
-	"animals",
-	"wildlife",
-	"conservation",
-	"garden",
-	"nature",
-	"science",
-	"space",
-	"students",
-	"teacher",
-	"school",
-	"family",
-	"friendship",
-	"creative",
-	"art",
-	"music",
-	"culture",
-	"environment",
-	"climate solution",
-	"clean energy",
-	"ocean cleanup",
-	"forest",
-	"tree",
-	"trees",
-	"young people",
-	"kids",
-	"children",
-	"happiest",
-	"hope",
-	"hopeful",
+	'good news',
+	'uplifting',
+	'inspiring',
+	'inspired',
+	'kindness',
+	'rescue',
+	'rescued',
+	'reunited',
+	'reunion',
+	'community',
+	'volunteer',
+	'volunteers',
+	'donation',
+	'donated',
+	'helping',
+	'helps',
+	'hero',
+	'heroes',
+	'achievement',
+	'breakthrough',
+	'discovery',
+	'restored',
+	'restoration',
+	'recover',
+	'recovered',
+	'healing',
+	'wellness',
+	'healthier',
+	'happiness',
+	'joy',
+	'celebrate',
+	'celebration',
+	'wins',
+	'award',
+	'remarkable',
+	'rare',
+	'beautiful',
+	'travel',
+	'animals',
+	'wildlife',
+	'conservation',
+	'garden',
+	'nature',
+	'science',
+	'space',
+	'students',
+	'teacher',
+	'school',
+	'family',
+	'friendship',
+	'creative',
+	'art',
+	'music',
+	'culture',
+	'environment',
+	'climate solution',
+	'clean energy',
+	'ocean cleanup',
+	'forest',
+	'tree',
+	'trees',
+	'young people',
+	'kids',
+	'children',
+	'happiest',
+	'hope',
+	'hopeful',
 ];
 
 const NEGATIVE_KEYWORDS = [
-	"politics",
-	"election",
-	"president",
-	"minister",
-	"government",
-	"senate",
-	"congress",
-	"parliament",
-	"war",
-	"military",
-	"missile",
-	"attack",
-	"attacks",
-	"killed",
-	"dead",
-	"death",
-	"dies",
-	"murder",
-	"crime",
-	"criminal",
-	"shooting",
-	"violence",
-	"violent",
-	"crash",
-	"disaster",
-	"tragedy",
-	"tragic",
-	"lawsuit",
-	"court",
-	"trial",
-	"stocks",
-	"market",
-	"markets",
-	"inflation",
-	"recession",
-	"tariff",
-	"economy",
-	"business",
-	"money",
-	"bank",
-	"earnings",
-	"profit",
-	"losses",
-	"layoffs",
-	"fired",
+	'politics',
+	'election',
+	'president',
+	'minister',
+	'government',
+	'senate',
+	'congress',
+	'parliament',
+	'war',
+	'military',
+	'missile',
+	'attack',
+	'attacks',
+	'killed',
+	'dead',
+	'death',
+	'dies',
+	'murder',
+	'crime',
+	'criminal',
+	'shooting',
+	'violence',
+	'violent',
+	'crash',
+	'disaster',
+	'tragedy',
+	'tragic',
+	'lawsuit',
+	'court',
+	'trial',
+	'stocks',
+	'market',
+	'markets',
+	'inflation',
+	'recession',
+	'tariff',
+	'economy',
+	'business',
+	'money',
+	'bank',
+	'earnings',
+	'profit',
+	'losses',
+	'layoffs',
+	'fired',
 ];
 
-const STRICT_LOCAL_PREFILTER_SOURCES = new Set(["NPR", "BBC Stories"]);
+const STRICT_LOCAL_PREFILTER_SOURCES = new Set(['NPR', 'BBC Stories']);
 
 const HARD_NEGATIVE_KEYWORDS = [
-	"politics",
-	"political",
-	"election",
-	"elections",
-	"campaign",
-	"vote",
-	"voters",
-	"president",
-	"minister",
-	"government",
-	"congress",
-	"senate",
-	"parliament",
-	"democrat",
-	"republican",
-	"trump",
-	"biden",
-	"court",
-	"supreme court",
-	"judge",
-	"lawsuit",
-	"trial",
-	"charges",
-	"charged",
-	"convicted",
-	"prison",
-	"war",
-	"military",
-	"missile",
-	"bomb",
-	"attack",
-	"attacks",
-	"hostage",
-	"killed",
-	"dead",
-	"death",
-	"dies",
-	"murder",
-	"shooting",
-	"gun",
-	"crime",
-	"criminal",
-	"violence",
-	"violent",
-	"abuse",
-	"crash",
-	"disaster",
-	"tragedy",
-	"tragic",
-	"hurricane",
-	"flood",
-	"wildfire",
-	"earthquake",
-	"stocks",
-	"stock market",
-	"market",
-	"markets",
-	"inflation",
-	"recession",
-	"tariff",
-	"economy",
-	"business",
-	"money",
-	"bank",
-	"earnings",
-	"profit",
-	"losses",
-	"layoffs",
-	"fired",
+	'politics',
+	'political',
+	'election',
+	'elections',
+	'campaign',
+	'vote',
+	'voters',
+	'president',
+	'minister',
+	'government',
+	'congress',
+	'senate',
+	'parliament',
+	'democrat',
+	'republican',
+	'trump',
+	'biden',
+	'court',
+	'supreme court',
+	'judge',
+	'lawsuit',
+	'trial',
+	'charges',
+	'charged',
+	'convicted',
+	'prison',
+	'war',
+	'military',
+	'missile',
+	'bomb',
+	'attack',
+	'attacks',
+	'hostage',
+	'killed',
+	'dead',
+	'death',
+	'dies',
+	'murder',
+	'shooting',
+	'gun',
+	'crime',
+	'criminal',
+	'violence',
+	'violent',
+	'abuse',
+	'crash',
+	'disaster',
+	'tragedy',
+	'tragic',
+	'hurricane',
+	'flood',
+	'wildfire',
+	'earthquake',
+	'stocks',
+	'stock market',
+	'market',
+	'markets',
+	'inflation',
+	'recession',
+	'tariff',
+	'economy',
+	'business',
+	'money',
+	'bank',
+	'earnings',
+	'profit',
+	'losses',
+	'layoffs',
+	'fired',
 ];
 
 const HARD_POSITIVE_ESCAPE_KEYWORDS = [
-	"rescue",
-	"rescued",
-	"reunited",
-	"reunion",
-	"healing",
-	"recovered",
-	"recovery",
-	"breakthrough",
-	"discovery",
-	"donation",
-	"donated",
-	"volunteer",
-	"volunteers",
-	"kindness",
-	"community",
-	"hero",
-	"heroes",
-	"saved",
-	"restored",
-	"restoration",
-	"conservation",
-	"wildlife",
-	"garden",
-	"school",
-	"students",
-	"teacher",
-	"science",
-	"space",
-	"nasa",
-	"art",
-	"music",
-	"creative",
-	"achievement",
-	"award",
-	"celebrate",
-	"celebration",
-	"hope",
-	"hopeful",
+	'rescue',
+	'rescued',
+	'reunited',
+	'reunion',
+	'healing',
+	'recovered',
+	'recovery',
+	'breakthrough',
+	'discovery',
+	'donation',
+	'donated',
+	'volunteer',
+	'volunteers',
+	'kindness',
+	'community',
+	'hero',
+	'heroes',
+	'saved',
+	'restored',
+	'restoration',
+	'conservation',
+	'wildlife',
+	'garden',
+	'school',
+	'students',
+	'teacher',
+	'science',
+	'space',
+	'nasa',
+	'art',
+	'music',
+	'creative',
+	'achievement',
+	'award',
+	'celebrate',
+	'celebration',
+	'hope',
+	'hopeful',
 ];
 
 const LOCAL_PREFILTER_REJECT_DECISION: AiArticleDecision = {
-	decision: "reject",
-	category: "Uplifting",
+	decision: 'reject',
+	category: 'Uplifting',
 	positivity_score: 0,
-	summary: "",
-	reason: "Skipped before AI because the article matched hard negative local filters.",
+	summary: '',
+	reason: 'Skipped before AI because the article matched hard negative local filters.',
 };
 
 const NO_THUMBNAIL_REJECT_DECISION: AiArticleDecision = {
-	decision: "reject",
-	category: "Uplifting",
+	decision: 'reject',
+	category: 'Uplifting',
 	positivity_score: 0,
-	summary: "",
-	reason:
-		"Skipped before AI because the RSS item and article page did not include a usable image thumbnail.",
+	summary: '',
+	reason: 'Skipped before AI because the RSS item and article page did not include a usable image thumbnail.',
 };
 
 async function resolveValue(value: MaybeSecretBinding) {
 	if (!value) {
-		return "";
+		return '';
 	}
 
-	if (typeof value === "string") {
+	if (typeof value === 'string') {
 		return value;
 	}
 
@@ -609,32 +617,22 @@ function emptyOpenAiUsage(): OpenAiUsage {
 }
 
 function estimateOpenAiCost(usage: OpenAiUsage, config: RuntimeConfig) {
-	const inputCost =
-		(usage.promptTokens / 1_000_000) * config.openAiInputCostPer1MTokens;
-	const outputCost =
-		(usage.completionTokens / 1_000_000) *
-		config.openAiOutputCostPer1MTokens;
+	const inputCost = (usage.promptTokens / 1_000_000) * config.openAiInputCostPer1MTokens;
+	const outputCost = (usage.completionTokens / 1_000_000) * config.openAiOutputCostPer1MTokens;
 
 	return inputCost + outputCost;
 }
 
 function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
-	if (!value || typeof value !== "object") {
+	if (!value || typeof value !== 'object') {
 		return emptyOpenAiUsage();
 	}
 
 	const record = value as Record<string, unknown>;
 
-	const promptTokens =
-		typeof record.prompt_tokens === "number" ? record.prompt_tokens : 0;
-	const completionTokens =
-		typeof record.completion_tokens === "number"
-			? record.completion_tokens
-			: 0;
-	const totalTokens =
-		typeof record.total_tokens === "number"
-			? record.total_tokens
-			: promptTokens + completionTokens;
+	const promptTokens = typeof record.prompt_tokens === 'number' ? record.prompt_tokens : 0;
+	const completionTokens = typeof record.completion_tokens === 'number' ? record.completion_tokens : 0;
+	const totalTokens = typeof record.total_tokens === 'number' ? record.total_tokens : promptTokens + completionTokens;
 
 	return {
 		promptTokens,
@@ -643,11 +641,7 @@ function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
 	};
 }
 
-function buildAiClassificationResult(
-	aiDecision: AiArticleDecision,
-	usage: OpenAiUsage,
-	config: RuntimeConfig,
-): AiClassificationResult {
+function buildAiClassificationResult(aiDecision: AiArticleDecision, usage: OpenAiUsage, config: RuntimeConfig): AiClassificationResult {
 	return {
 		aiDecision,
 		usage,
@@ -657,29 +651,20 @@ function buildAiClassificationResult(
 }
 
 function sumOpenAiUsage(reviewedArticles: ReviewedArticleResult[]) {
-	return reviewedArticles.reduce(
-		(total, reviewedArticle) => {
-			if (!reviewedArticle.usage) {
-				return total;
-			}
+	return reviewedArticles.reduce((total, reviewedArticle) => {
+		if (!reviewedArticle.usage) {
+			return total;
+		}
 
-			return {
-				promptTokens:
-					total.promptTokens + reviewedArticle.usage.promptTokens,
-				completionTokens:
-					total.completionTokens +
-					reviewedArticle.usage.completionTokens,
-				totalTokens: total.totalTokens + reviewedArticle.usage.totalTokens,
-			};
-		},
-		emptyOpenAiUsage(),
-	);
+		return {
+			promptTokens: total.promptTokens + reviewedArticle.usage.promptTokens,
+			completionTokens: total.completionTokens + reviewedArticle.usage.completionTokens,
+			totalTokens: total.totalTokens + reviewedArticle.usage.totalTokens,
+		};
+	}, emptyOpenAiUsage());
 }
 
-function shouldTriggerOpenAiUsageWarning(
-	run: AiUsageRunInsert,
-	config: RuntimeConfig,
-) {
+function shouldTriggerOpenAiUsageWarning(run: AiUsageRunInsert, config: RuntimeConfig) {
 	return (
 		run.cost_protection_limit_reached ||
 		run.ai_reviewed_count >= config.aiReviewAlertRunLimit ||
@@ -690,57 +675,43 @@ function shouldTriggerOpenAiUsageWarning(
 
 async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
-	const supabaseServiceRoleKey = await resolveValue(
-		env.SUPABASE_SERVICE_ROLE_KEY,
-	);
+	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
 	const openAiApiKey = await resolveValue(env.OPENAI_API_KEY);
 
 	if (!supabaseUrl) {
-		throw new Error("Missing SUPABASE_URL secret.");
+		throw new Error('Missing SUPABASE_URL secret.');
 	}
 
 	if (!supabaseServiceRoleKey) {
-		throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY secret.");
+		throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY secret.');
 	}
 
 	if (!openAiApiKey) {
-		throw new Error("Missing OPENAI_API_KEY secret.");
+		throw new Error('Missing OPENAI_API_KEY secret.');
 	}
 
 	return {
 		supabaseUrl,
 		supabaseServiceRoleKey,
 		openAiApiKey,
-		openAiInputCostPer1MTokens: getOptionalNumber(
-			env.OPENAI_INPUT_COST_PER_1M_TOKENS,
-			DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS,
-		),
-		openAiOutputCostPer1MTokens: getOptionalNumber(
-			env.OPENAI_OUTPUT_COST_PER_1M_TOKENS,
-			DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS,
-		),
-		aiCostAlertRunUsd: getOptionalNumber(
-			env.AI_COST_ALERT_RUN_USD,
-			DEFAULT_AI_COST_ALERT_RUN_USD,
-		),
-		aiReviewAlertRunLimit: getOptionalNumber(
-			env.AI_REVIEW_ALERT_RUN_LIMIT,
-			DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT,
-		),
-		aiTokenAlertRunLimit: getOptionalNumber(
-			env.AI_TOKEN_ALERT_RUN_LIMIT,
-			DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT,
+		openAiInputCostPer1MTokens: getOptionalNumber(env.OPENAI_INPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS),
+		openAiOutputCostPer1MTokens: getOptionalNumber(env.OPENAI_OUTPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS),
+		aiCostAlertRunUsd: getOptionalNumber(env.AI_COST_ALERT_RUN_USD, DEFAULT_AI_COST_ALERT_RUN_USD),
+		aiReviewAlertRunLimit: getOptionalNumber(env.AI_REVIEW_ALERT_RUN_LIMIT, DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT),
+		aiTokenAlertRunLimit: getOptionalNumber(env.AI_TOKEN_ALERT_RUN_LIMIT, DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT),
+		articlePageImageLookupLimit: Math.max(
+			1,
+			Math.min(
+				getOptionalNumber(env.ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT, DEFAULT_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN),
+				HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN,
+			),
 		),
 	};
 }
 
-async function getWorkerRunSaveConfig(
-	env: Env,
-): Promise<WorkerRunSaveConfig | null> {
+async function getWorkerRunSaveConfig(env: Env): Promise<WorkerRunSaveConfig | null> {
 	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
-	const supabaseServiceRoleKey = await resolveValue(
-		env.SUPABASE_SERVICE_ROLE_KEY,
-	);
+	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
 
 	if (!supabaseUrl || !supabaseServiceRoleKey) {
 		return null;
@@ -753,7 +724,7 @@ async function getWorkerRunSaveConfig(
 }
 
 function getShardIndex(env: Env): number {
-	const shardIndex = Number(env.FEED_SHARD_INDEX ?? "0");
+	const shardIndex = Number(env.FEED_SHARD_INDEX ?? '0');
 
 	if (Number.isNaN(shardIndex) || shardIndex < 0) {
 		return 0;
@@ -763,7 +734,7 @@ function getShardIndex(env: Env): number {
 }
 
 function getFeedsPerShard(env: Env): number {
-	const feedsPerShard = Number(env.FEEDS_PER_SHARD ?? "20");
+	const feedsPerShard = Number(env.FEEDS_PER_SHARD ?? '20');
 
 	if (Number.isNaN(feedsPerShard) || feedsPerShard < 1) {
 		return 20;
@@ -780,26 +751,22 @@ function clampAiReviewLimit(value: number | undefined): number {
 	return Math.max(1, Math.min(value, HARD_MAX_AI_REVIEWS_PER_RUN));
 }
 
-function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number) {
-	const estimatedAvailableSubrequests =
-		MAX_ESTIMATED_SUBREQUESTS_PER_RUN -
-		feedCount -
-		maxAiReviews -
-		RESERVED_NON_FEED_SUBREQUESTS_PER_RUN;
+function clampArticlePageImageLookupLimit(value: number | undefined, fallback: number): number {
+	if (!value || Number.isNaN(value)) {
+		return fallback;
+	}
 
-	return Math.max(
-		0,
-		Math.min(
-			MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN,
-			estimatedAvailableSubrequests,
-		),
-	);
+	return Math.max(0, Math.min(value, HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN));
 }
 
-async function getFeedsForShard(
-	env: Env,
-	config: RuntimeConfig,
-): Promise<RssFeed[]> {
+function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number, requestedLookupLimit: number) {
+	const estimatedAvailableSubrequests =
+		MAX_ESTIMATED_SUBREQUESTS_PER_RUN - feedCount - maxAiReviews - RESERVED_NON_FEED_SUBREQUESTS_PER_RUN;
+
+	return Math.max(0, Math.min(requestedLookupLimit, estimatedAvailableSubrequests));
+}
+
+async function getFeedsForShard(env: Env, config: RuntimeConfig): Promise<RssFeed[]> {
 	const shardIndex = getShardIndex(env);
 	const feedsPerShard = getFeedsPerShard(env);
 	const offset = shardIndex * feedsPerShard;
@@ -807,7 +774,7 @@ async function getFeedsForShard(
 	const response = await fetch(
 		`${config.supabaseUrl}/rest/v1/rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${feedsPerShard}&offset=${offset}`,
 		{
-			method: "GET",
+			method: 'GET',
 			headers: {
 				apikey: config.supabaseServiceRoleKey,
 				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
@@ -818,27 +785,20 @@ async function getFeedsForShard(
 	if (!response.ok) {
 		const errorText = await response.text();
 
-		await logWarn(
-			env,
-			"worker.feeds.load_failed",
-			"Failed to load RSS feeds for shard",
-			{
-				shardIndex,
-				feedsPerShard,
-				offset,
-				status: response.status,
-				errorText,
-			},
-		);
+		await logWarn(env, 'worker.feeds.load_failed', 'Failed to load RSS feeds for shard', {
+			shardIndex,
+			feedsPerShard,
+			offset,
+			status: response.status,
+			errorText,
+		});
 
-		throw new Error(
-			`Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`,
-		);
+		throw new Error(`Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`);
 	}
 
 	const feeds = (await response.json()) as RssFeed[];
 
-	await logInfo(env, "worker.feeds.loaded", "Loaded RSS feeds for shard", {
+	await logInfo(env, 'worker.feeds.loaded', 'Loaded RSS feeds for shard', {
 		shardIndex,
 		feedsPerShard,
 		offset,
@@ -851,47 +811,40 @@ async function getFeedsForShard(
 
 function decodeHtml(value: string): string {
 	return value
-		.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-		.replace(/&#(\d+);/g, (_match, code) =>
-			String.fromCharCode(Number(code)),
-		)
-		.replace(/&#x([a-fA-F0-9]+);/g, (_match, code) =>
-			String.fromCharCode(Number.parseInt(code, 16)),
-		)
-		.replace(/&amp;/g, "&")
+		.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+		.replace(/&#(\d+);/g, (_match, code) => String.fromCharCode(Number(code)))
+		.replace(/&#x([a-fA-F0-9]+);/g, (_match, code) => String.fromCharCode(Number.parseInt(code, 16)))
+		.replace(/&amp;/g, '&')
 		.replace(/&quot;/g, '"')
 		.replace(/&apos;/g, "'")
 		.replace(/&#39;/g, "'")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">");
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>');
 }
 
 function stripHtml(value: string): string {
-	return decodeHtml(value.replace(/<[^>]*>/g, " "))
-		.replace(/\s+/g, " ")
+	return decodeHtml(value.replace(/<[^>]*>/g, ' '))
+		.replace(/\s+/g, ' ')
 		.trim();
 }
 
 function getTagValue(itemXml: string, tagName: string): string {
-	const regex = new RegExp(
-		`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`,
-		"i",
-	);
+	const regex = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
 	const match = itemXml.match(regex);
 
 	if (!match?.[1]) {
-		return "";
+		return '';
 	}
 
 	return decodeHtml(match[1].trim());
 }
 
 function getAttributeValue(tagXml: string, attributeName: string): string {
-	const regex = new RegExp(`${attributeName}=["']([^"']+)["']`, "i");
+	const regex = new RegExp(`${attributeName}=["']([^"']+)["']`, 'i');
 	const match = tagXml.match(regex);
 
 	if (!match?.[1]) {
-		return "";
+		return '';
 	}
 
 	return decodeHtml(match[1].trim());
@@ -901,10 +854,10 @@ function getAtomLink(itemXml: string): string {
 	const linkTags = itemXml.match(/<link\b[^>]*>/gi) ?? [];
 
 	for (const tag of linkTags) {
-		const rel = getAttributeValue(tag, "rel").toLowerCase();
-		const href = getAttributeValue(tag, "href");
+		const rel = getAttributeValue(tag, 'rel').toLowerCase();
+		const href = getAttributeValue(tag, 'href');
 
-		if (href && (!rel || rel === "alternate")) {
+		if (href && (!rel || rel === 'alternate')) {
 			return decodeHtml(href.trim());
 		}
 	}
@@ -912,7 +865,7 @@ function getAtomLink(itemXml: string): string {
 	const hrefMatch = itemXml.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i);
 
 	if (!hrefMatch?.[1]) {
-		return "";
+		return '';
 	}
 
 	return decodeHtml(hrefMatch[1].trim());
@@ -922,20 +875,11 @@ function normalizeUrl(url: string): string {
 	try {
 		const parsedUrl = new URL(url.trim());
 
-		[
-			"utm_source",
-			"utm_medium",
-			"utm_campaign",
-			"utm_term",
-			"utm_content",
-			"utm_id",
-			"fbclid",
-			"gclid",
-			"mc_cid",
-			"mc_eid",
-		].forEach((param) => parsedUrl.searchParams.delete(param));
+		['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id', 'fbclid', 'gclid', 'mc_cid', 'mc_eid'].forEach(
+			(param) => parsedUrl.searchParams.delete(param),
+		);
 
-		parsedUrl.hash = "";
+		parsedUrl.hash = '';
 
 		return parsedUrl.toString();
 	} catch {
@@ -948,9 +892,9 @@ function normalizeImageUrl(imageUrl: string, articleUrl: string): string | null 
 
 	if (
 		!cleanedImageUrl ||
-		cleanedImageUrl.startsWith("data:") ||
-		cleanedImageUrl.startsWith("blob:") ||
-		cleanedImageUrl.startsWith("javascript:")
+		cleanedImageUrl.startsWith('data:') ||
+		cleanedImageUrl.startsWith('blob:') ||
+		cleanedImageUrl.startsWith('javascript:')
 	) {
 		return null;
 	}
@@ -959,11 +903,11 @@ function normalizeImageUrl(imageUrl: string, articleUrl: string): string | null 
 		const absoluteImageUrl = new URL(cleanedImageUrl, articleUrl);
 		const protocol = absoluteImageUrl.protocol.toLowerCase();
 
-		if (protocol !== "http:" && protocol !== "https:") {
+		if (protocol !== 'http:' && protocol !== 'https:') {
 			return null;
 		}
 
-		absoluteImageUrl.hash = "";
+		absoluteImageUrl.hash = '';
 
 		return absoluteImageUrl.toString();
 	} catch {
@@ -974,16 +918,41 @@ function normalizeImageUrl(imageUrl: string, articleUrl: string): string | null 
 function isLikelyImageUrl(url: string): boolean {
 	const lowerUrl = url.toLowerCase();
 
-	return (
+	if (
 		/\.(?:jpg|jpeg|png|webp|gif|avif)(?:[?#]|$)/i.test(lowerUrl) ||
-		lowerUrl.includes("image") ||
-		lowerUrl.includes("thumbnail") ||
-		lowerUrl.includes("thumb") ||
-		lowerUrl.includes("media") ||
-		lowerUrl.includes("uploads") ||
-		lowerUrl.includes("wp-content") ||
-		lowerUrl.includes("cdn")
-	);
+		lowerUrl.includes('image') ||
+		lowerUrl.includes('images') ||
+		lowerUrl.includes('thumbnail') ||
+		lowerUrl.includes('thumb') ||
+		lowerUrl.includes('photo') ||
+		lowerUrl.includes('photos') ||
+		lowerUrl.includes('picture') ||
+		lowerUrl.includes('media') ||
+		lowerUrl.includes('uploads') ||
+		lowerUrl.includes('wp-content') ||
+		lowerUrl.includes('assets') ||
+		lowerUrl.includes('static') ||
+		lowerUrl.includes('cdn')
+	) {
+		return true;
+	}
+
+	try {
+		const hostname = new URL(url).hostname.toLowerCase();
+
+		return (
+			hostname.includes('imgix') ||
+			hostname.includes('cloudfront') ||
+			hostname.includes('akamai') ||
+			hostname.includes('fastly') ||
+			hostname.startsWith('images.') ||
+			hostname.startsWith('media.') ||
+			hostname.startsWith('static.') ||
+			hostname.startsWith('assets.')
+		);
+	} catch {
+		return false;
+	}
 }
 
 function getImageDimensionHints(imageUrl: string): {
@@ -995,18 +964,9 @@ function getImageDimensionHints(imageUrl: string): {
 
 	try {
 		const parsedUrl = new URL(imageUrl);
-		const widthParam =
-			parsedUrl.searchParams.get("width") ??
-			parsedUrl.searchParams.get("w") ??
-			parsedUrl.searchParams.get("resize_w");
-		const heightParam =
-			parsedUrl.searchParams.get("height") ??
-			parsedUrl.searchParams.get("h") ??
-			parsedUrl.searchParams.get("resize_h");
-		const fitParam =
-			parsedUrl.searchParams.get("fit") ??
-			parsedUrl.searchParams.get("resize") ??
-			parsedUrl.searchParams.get("dimensions");
+		const widthParam = parsedUrl.searchParams.get('width') ?? parsedUrl.searchParams.get('w') ?? parsedUrl.searchParams.get('resize_w');
+		const heightParam = parsedUrl.searchParams.get('height') ?? parsedUrl.searchParams.get('h') ?? parsedUrl.searchParams.get('resize_h');
+		const fitParam = parsedUrl.searchParams.get('fit') ?? parsedUrl.searchParams.get('resize') ?? parsedUrl.searchParams.get('dimensions');
 
 		if (widthParam && /^\d+$/.test(widthParam)) {
 			width = Number(widthParam);
@@ -1023,9 +983,7 @@ function getImageDimensionHints(imageUrl: string): {
 			height ??= Number(fitMatch[2]);
 		}
 
-		const pathDimensionMatch = parsedUrl.pathname.match(
-			/(?:^|[-_/])(\d{1,4})x(\d{1,4})(?:[-_.]|$)/,
-		);
+		const pathDimensionMatch = parsedUrl.pathname.match(/(?:^|[-_/])(\d{1,4})x(\d{1,4})(?:[-_.]|$)/);
 
 		if (pathDimensionMatch?.[1] && pathDimensionMatch[2]) {
 			width ??= Number(pathDimensionMatch[1]);
@@ -1060,18 +1018,18 @@ function isGenericGoogleImageCandidate(imageUrl: string): boolean {
 		const search = parsedUrl.search.toLowerCase();
 
 		return (
-			hostname === "news.google.com" ||
-			hostname.endsWith(".news.google.com") ||
-			(hostname.includes("google") &&
-				(pathname.includes("favicon") ||
-					pathname.includes("logo") ||
-					pathname.includes("icon") ||
-					pathname.includes("placeholder") ||
-					search.includes("favicon") ||
-					search.includes("logo") ||
-					search.includes("icon"))) ||
-			hostname.includes("gstatic.com") ||
-			hostname.includes("googleusercontent.com") && pathname.includes("favicon")
+			hostname === 'news.google.com' ||
+			hostname.endsWith('.news.google.com') ||
+			(hostname.includes('google') &&
+				(pathname.includes('favicon') ||
+					pathname.includes('logo') ||
+					pathname.includes('icon') ||
+					pathname.includes('placeholder') ||
+					search.includes('favicon') ||
+					search.includes('logo') ||
+					search.includes('icon'))) ||
+			hostname.includes('gstatic.com') ||
+			(hostname.includes('googleusercontent.com') && pathname.includes('favicon'))
 		);
 	} catch {
 		return false;
@@ -1084,38 +1042,38 @@ function isBadImageCandidate(imageUrl: string): boolean {
 	return (
 		isGenericGoogleImageCandidate(imageUrl) ||
 		hasTinyImageDimensionHints(imageUrl) ||
-		lowerUrl.includes("/logo") ||
-		lowerUrl.includes("logo.") ||
-		lowerUrl.includes("logo-") ||
-		lowerUrl.includes("/icon") ||
-		lowerUrl.includes("icon.") ||
-		lowerUrl.includes("apple-touch-icon") ||
-		lowerUrl.includes("favicon") ||
-		lowerUrl.includes("sprite") ||
-		lowerUrl.includes("avatar") ||
-		lowerUrl.includes("author") ||
-		lowerUrl.includes("profile") ||
-		lowerUrl.includes("placeholder") ||
-		lowerUrl.includes("default-image") ||
-		lowerUrl.includes("missing-image") ||
-		lowerUrl.includes("no-image") ||
-		lowerUrl.includes("blank") ||
-		lowerUrl.includes("transparent") ||
-		lowerUrl.includes("tracking") ||
-		lowerUrl.includes("pixel") ||
-		lowerUrl.includes("spacer") ||
-		lowerUrl.includes("loader") ||
-		lowerUrl.includes("spinner") ||
-		lowerUrl.includes("1x1") ||
-		lowerUrl.includes("gravatar") ||
-		lowerUrl.endsWith(".svg") ||
-		lowerUrl.includes(".svg?")
+		lowerUrl.includes('/logo') ||
+		lowerUrl.includes('logo.') ||
+		lowerUrl.includes('logo-') ||
+		lowerUrl.includes('/icon') ||
+		lowerUrl.includes('icon.') ||
+		lowerUrl.includes('apple-touch-icon') ||
+		lowerUrl.includes('favicon') ||
+		lowerUrl.includes('sprite') ||
+		lowerUrl.includes('avatar') ||
+		lowerUrl.includes('author') ||
+		lowerUrl.includes('profile') ||
+		lowerUrl.includes('placeholder') ||
+		lowerUrl.includes('default-image') ||
+		lowerUrl.includes('missing-image') ||
+		lowerUrl.includes('no-image') ||
+		lowerUrl.includes('blank') ||
+		lowerUrl.includes('transparent') ||
+		lowerUrl.includes('tracking') ||
+		lowerUrl.includes('pixel') ||
+		lowerUrl.includes('spacer') ||
+		lowerUrl.includes('loader') ||
+		lowerUrl.includes('spinner') ||
+		lowerUrl.includes('1x1') ||
+		lowerUrl.includes('gravatar') ||
+		lowerUrl.endsWith('.svg') ||
+		lowerUrl.includes('.svg?')
 	);
 }
 
 function extractBestUrlFromSrcset(srcset: string) {
 	const candidates = srcset
-		.split(",")
+		.split(',')
 		.map((part) => {
 			const [url, descriptor] = part.trim().split(/\s+/);
 			const widthMatch = descriptor?.match(/^(\d+)w$/);
@@ -1134,13 +1092,10 @@ function extractBestUrlFromSrcset(srcset: string) {
 				score,
 			};
 		})
-		.filter(
-			(candidate): candidate is { url: string; score: number } =>
-				Boolean(candidate.url),
-		)
+		.filter((candidate): candidate is { url: string; score: number } => Boolean(candidate.url))
 		.sort((a, b) => b.score - a.score);
 
-	return candidates[0]?.url ?? "";
+	return candidates[0]?.url ?? '';
 }
 
 function isUsableImageUrl(imageUrl: string) {
@@ -1179,10 +1134,7 @@ function extractImageFromHtml(html: string, articleUrl: string): string | null {
 	const sourceTags = html.match(/<source\b[^>]*>/gi) ?? [];
 
 	for (const tag of [...sourceTags, ...imageTags]) {
-		const srcset =
-			getAttributeValue(tag, "srcset") ||
-			getAttributeValue(tag, "data-srcset") ||
-			getAttributeValue(tag, "data-lazy-srcset");
+		const srcset = getAttributeValue(tag, 'srcset') || getAttributeValue(tag, 'data-srcset') || getAttributeValue(tag, 'data-lazy-srcset');
 
 		if (srcset) {
 			const bestSrcsetUrl = extractBestUrlFromSrcset(srcset);
@@ -1193,19 +1145,19 @@ function extractImageFromHtml(html: string, articleUrl: string): string | null {
 		}
 
 		[
-			"data-original",
-			"data-original-src",
-			"data-image",
-			"data-img",
-			"data-src",
-			"data-lazy-src",
-			"data-orig-file",
-			"data-medium-file",
-			"data-large-file",
-			"data-fallback-src",
-			"data-hi-res-src",
-			"poster",
-			"src",
+			'data-original',
+			'data-original-src',
+			'data-image',
+			'data-img',
+			'data-src',
+			'data-lazy-src',
+			'data-orig-file',
+			'data-medium-file',
+			'data-large-file',
+			'data-fallback-src',
+			'data-hi-res-src',
+			'poster',
+			'src',
 		].forEach((attributeName) => {
 			const value = getAttributeValue(tag, attributeName);
 
@@ -1222,31 +1174,26 @@ function extractMetaImagesFromHtml(html: string) {
 	const candidates: string[] = [];
 	const metaTags = html.match(/<meta\b[^>]*>/gi) ?? [];
 	const imageMetaKeys = new Set([
-		"og:image",
-		"og:image:url",
-		"og:image:secure_url",
-		"twitter:image",
-		"twitter:image:src",
-		"thumbnail",
-		"thumbnailurl",
-		"image",
-		"parsely-image-url",
-		"sailthru.image.full",
-		"sailthru.image.thumb",
+		'og:image',
+		'og:image:url',
+		'og:image:secure_url',
+		'twitter:image',
+		'twitter:image:src',
+		'thumbnail',
+		'thumbnailurl',
+		'image',
+		'parsely-image-url',
+		'sailthru.image.full',
+		'sailthru.image.thumb',
 	]);
 
 	for (const tag of metaTags) {
-		const property = getAttributeValue(tag, "property").toLowerCase();
-		const name = getAttributeValue(tag, "name").toLowerCase();
-		const itemprop = getAttributeValue(tag, "itemprop").toLowerCase();
-		const content = getAttributeValue(tag, "content");
+		const property = getAttributeValue(tag, 'property').toLowerCase();
+		const name = getAttributeValue(tag, 'name').toLowerCase();
+		const itemprop = getAttributeValue(tag, 'itemprop').toLowerCase();
+		const content = getAttributeValue(tag, 'content');
 
-		if (
-			content &&
-			(imageMetaKeys.has(property) ||
-				imageMetaKeys.has(name) ||
-				imageMetaKeys.has(itemprop))
-		) {
+		if (content && (imageMetaKeys.has(property) || imageMetaKeys.has(name) || imageMetaKeys.has(itemprop))) {
 			candidates.push(content);
 		}
 	}
@@ -1259,17 +1206,11 @@ function extractLinkImagesFromHtml(html: string) {
 	const linkTags = html.match(/<link\b[^>]*>/gi) ?? [];
 
 	for (const tag of linkTags) {
-		const rel = getAttributeValue(tag, "rel").toLowerCase();
-		const asValue = getAttributeValue(tag, "as").toLowerCase();
-		const href = getAttributeValue(tag, "href");
+		const rel = getAttributeValue(tag, 'rel').toLowerCase();
+		const asValue = getAttributeValue(tag, 'as').toLowerCase();
+		const href = getAttributeValue(tag, 'href');
 
-		if (
-			href &&
-			(rel.includes("image_src") ||
-				rel.includes("preload") ||
-				rel.includes("prefetch")) &&
-			(!asValue || asValue === "image")
-		) {
+		if (href && (rel.includes('image_src') || rel.includes('preload') || rel.includes('prefetch')) && (!asValue || asValue === 'image')) {
 			candidates.push(href);
 		}
 	}
@@ -1282,7 +1223,7 @@ function addJsonLdImageCandidate(value: unknown, candidates: string[]) {
 		return;
 	}
 
-	if (typeof value === "string") {
+	if (typeof value === 'string') {
 		candidates.push(value);
 		return;
 	}
@@ -1292,12 +1233,11 @@ function addJsonLdImageCandidate(value: unknown, candidates: string[]) {
 		return;
 	}
 
-	if (typeof value === "object") {
+	if (typeof value === 'object') {
 		const record = value as Record<string, unknown>;
-		const url =
-			record.url ?? record.contentUrl ?? record.thumbnailUrl ?? record["@id"];
+		const url = record.url ?? record.contentUrl ?? record.thumbnailUrl ?? record['@id'];
 
-		if (typeof url === "string") {
+		if (typeof url === 'string') {
 			candidates.push(url);
 		}
 
@@ -1317,26 +1257,20 @@ function extractJsonLdImagesFromValue(value: unknown, candidates: string[]) {
 		return;
 	}
 
-	if (typeof value !== "object") {
+	if (typeof value !== 'object') {
 		return;
 	}
 
 	const record = value as Record<string, unknown>;
 
-	[
-		"image",
-		"thumbnail",
-		"thumbnailUrl",
-		"primaryImageOfPage",
-		"associatedMedia",
-	].forEach((key) => {
+	['image', 'thumbnail', 'thumbnailUrl', 'primaryImageOfPage', 'associatedMedia'].forEach((key) => {
 		if (key in record) {
 			addJsonLdImageCandidate(record[key], candidates);
 		}
 	});
 
 	Object.values(record).forEach((nestedValue) => {
-		if (typeof nestedValue === "object") {
+		if (typeof nestedValue === 'object') {
 			extractJsonLdImagesFromValue(nestedValue, candidates);
 		}
 	});
@@ -1344,10 +1278,7 @@ function extractJsonLdImagesFromValue(value: unknown, candidates: string[]) {
 
 function extractJsonLdImagesFromHtml(html: string) {
 	const candidates: string[] = [];
-	const scriptTags =
-		html.match(
-			/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi,
-		) ?? [];
+	const scriptTags = html.match(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>[\s\S]*?<\/script>/gi) ?? [];
 
 	for (const scriptTag of scriptTags) {
 		const contentMatch = scriptTag.match(/<script\b[^>]*>([\s\S]*?)<\/script>/i);
@@ -1368,15 +1299,8 @@ function extractJsonLdImagesFromHtml(html: string) {
 	return candidates;
 }
 
-function extractArticlePageImageFromHtml(
-	html: string,
-	articleUrl: string,
-): string | null {
-	const candidates = [
-		...extractMetaImagesFromHtml(html),
-		...extractLinkImagesFromHtml(html),
-		...extractJsonLdImagesFromHtml(html),
-	];
+function extractArticlePageImageFromHtml(html: string, articleUrl: string): string | null {
+	const candidates = [...extractMetaImagesFromHtml(html), ...extractLinkImagesFromHtml(html), ...extractJsonLdImagesFromHtml(html)];
 
 	const metadataImage = firstValidImageUrl(candidates, articleUrl);
 
@@ -1393,14 +1317,11 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	const mediaContentTags = itemXml.match(/<media:content\b[^>]*>/gi) ?? [];
 
 	for (const tag of mediaContentTags) {
-		const medium = getAttributeValue(tag, "medium").toLowerCase();
-		const type = getAttributeValue(tag, "type").toLowerCase();
-		const url = getAttributeValue(tag, "url");
+		const medium = getAttributeValue(tag, 'medium').toLowerCase();
+		const type = getAttributeValue(tag, 'type').toLowerCase();
+		const url = getAttributeValue(tag, 'url');
 
-		if (
-			url &&
-			(medium === "image" || type.startsWith("image/") || isLikelyImageUrl(url))
-		) {
+		if (url && (medium === 'image' || type.startsWith('image/') || isLikelyImageUrl(url))) {
 			candidates.push(url);
 		}
 	}
@@ -1408,7 +1329,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	const mediaThumbnailTags = itemXml.match(/<media:thumbnail\b[^>]*>/gi) ?? [];
 
 	for (const tag of mediaThumbnailTags) {
-		const url = getAttributeValue(tag, "url");
+		const url = getAttributeValue(tag, 'url');
 
 		if (url) {
 			candidates.push(url);
@@ -1418,18 +1339,30 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	const enclosureTags = itemXml.match(/<enclosure\b[^>]*>/gi) ?? [];
 
 	for (const tag of enclosureTags) {
-		const type = getAttributeValue(tag, "type").toLowerCase();
-		const url = getAttributeValue(tag, "url");
+		const type = getAttributeValue(tag, 'type').toLowerCase();
+		const url = getAttributeValue(tag, 'url');
 
-		if (url && (type.startsWith("image/") || isLikelyImageUrl(url))) {
+		if (url && (type.startsWith('image/') || isLikelyImageUrl(url))) {
 			candidates.push(url);
+		}
+	}
+
+	const atomImageLinkTags = itemXml.match(/<link\b[^>]*>/gi) ?? [];
+
+	for (const tag of atomImageLinkTags) {
+		const rel = getAttributeValue(tag, 'rel').toLowerCase();
+		const type = getAttributeValue(tag, 'type').toLowerCase();
+		const href = getAttributeValue(tag, 'href');
+
+		if (href && (rel.includes('enclosure') || rel.includes('image')) && (type.startsWith('image/') || isLikelyImageUrl(href))) {
+			candidates.push(href);
 		}
 	}
 
 	const itunesImageTags = itemXml.match(/<itunes:image\b[^>]*>/gi) ?? [];
 
 	for (const tag of itunesImageTags) {
-		const href = getAttributeValue(tag, "href");
+		const href = getAttributeValue(tag, 'href');
 
 		if (href) {
 			candidates.push(href);
@@ -1439,7 +1372,7 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	const imageTags = itemXml.match(/<image\b[^>]*>[\s\S]*?<\/image>/gi) ?? [];
 
 	for (const tag of imageTags) {
-		const url = getTagValue(tag, "url") || getAttributeValue(tag, "url");
+		const url = getTagValue(tag, 'url') || getAttributeValue(tag, 'url');
 
 		if (url) {
 			candidates.push(url);
@@ -1453,10 +1386,10 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	}
 
 	const embeddedHtmlBlocks = [
-		getTagValue(itemXml, "description"),
-		getTagValue(itemXml, "summary"),
-		getTagValue(itemXml, "content:encoded"),
-		getTagValue(itemXml, "content"),
+		getTagValue(itemXml, 'description'),
+		getTagValue(itemXml, 'summary'),
+		getTagValue(itemXml, 'content:encoded'),
+		getTagValue(itemXml, 'content'),
 	].filter(Boolean);
 
 	for (const embeddedHtml of embeddedHtmlBlocks) {
@@ -1478,9 +1411,8 @@ async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
 	try {
 		const response = await fetch(article.url, {
 			headers: {
-				"User-Agent":
-					"Mozilla/5.0 (compatible; NutsNewsBot/1.0; +https://www.nutsnews.com)",
-				Accept: "text/html,application/xhtml+xml",
+				'User-Agent': 'Mozilla/5.0 (compatible; NutsNewsBot/1.0; +https://www.nutsnews.com)',
+				Accept: 'text/html,application/xhtml+xml',
 			},
 		});
 
@@ -1488,13 +1420,9 @@ async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
 			return article;
 		}
 
-		const contentType = response.headers.get("content-type") ?? "";
+		const contentType = response.headers.get('content-type') ?? '';
 
-		if (
-			contentType &&
-			!contentType.toLowerCase().includes("text/html") &&
-			!contentType.toLowerCase().includes("application/xhtml")
-		) {
+		if (contentType && !contentType.toLowerCase().includes('text/html') && !contentType.toLowerCase().includes('application/xhtml')) {
 			return article;
 		}
 
@@ -1514,11 +1442,7 @@ async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
 	}
 }
 
-async function hydrateMissingArticleImages(
-	env: Env,
-	articles: RssArticle[],
-	lookupLimit: number,
-): Promise<ImageHydrationResult> {
+async function hydrateMissingArticleImages(env: Env, articles: RssArticle[], lookupLimit: number): Promise<ImageHydrationResult> {
 	if (lookupLimit <= 0) {
 		return {
 			articles,
@@ -1527,9 +1451,7 @@ async function hydrateMissingArticleImages(
 		};
 	}
 
-	const missingImageArticles = articles.filter(
-		(article) => !hasUsableThumbnail(article),
-	);
+	const missingImageArticles = articles.filter((article) => !hasUsableThumbnail(article));
 	const lookupCandidates = missingImageArticles.slice(0, lookupLimit);
 
 	if (lookupCandidates.length === 0) {
@@ -1540,15 +1462,9 @@ async function hydrateMissingArticleImages(
 		};
 	}
 
-	const hydratedCandidates = await mapWithConcurrency(
-		lookupCandidates,
-		ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY,
-		fetchArticlePageImage,
-	);
+	const hydratedCandidates = await mapWithConcurrency(lookupCandidates, ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY, fetchArticlePageImage);
 
-	const hydratedByUrl = new Map(
-		hydratedCandidates.map((article) => [article.url, article]),
-	);
+	const hydratedByUrl = new Map(hydratedCandidates.map((article) => [article.url, article]));
 
 	const hydratedArticles = articles.map((article) => {
 		return hydratedByUrl.get(article.url) ?? article;
@@ -1556,20 +1472,13 @@ async function hydrateMissingArticleImages(
 
 	const foundCount = hydratedCandidates.filter(hasUsableThumbnail).length;
 
-	await logInfo(
-		env,
-		"worker.images.hydration_completed",
-		"Article page image hydration completed",
-		{
-			lookupLimit,
-			lookupCount: lookupCandidates.length,
-			foundCount,
-			missingBeforeCount: missingImageArticles.length,
-			missingAfterCount: hydratedArticles.filter(
-				(article) => !hasUsableThumbnail(article),
-			).length,
-		},
-	);
+	await logInfo(env, 'worker.images.hydration_completed', 'Article page image hydration completed', {
+		lookupLimit,
+		lookupCount: lookupCandidates.length,
+		foundCount,
+		missingBeforeCount: missingImageArticles.length,
+		missingAfterCount: hydratedArticles.filter((article) => !hasUsableThumbnail(article)).length,
+	});
 
 	return {
 		articles: hydratedArticles,
@@ -1598,21 +1507,18 @@ function parseRss(xml: string, source: string): RssArticle[] {
 	const matches = itemMatches.length > 0 ? itemMatches : entryMatches;
 
 	return matches.slice(0, MAX_ITEMS_PER_FEED).map((itemXml) => {
-		const title = stripHtml(getTagValue(itemXml, "title"));
-		const rssLink = getTagValue(itemXml, "link");
+		const title = stripHtml(getTagValue(itemXml, 'title'));
+		const rssLink = getTagValue(itemXml, 'link');
 		const atomLink = getAtomLink(itemXml);
 		const url = normalizeUrl(rssLink || atomLink);
 
 		const description =
-			getTagValue(itemXml, "description") ||
-			getTagValue(itemXml, "summary") ||
-			getTagValue(itemXml, "content:encoded") ||
-			getTagValue(itemXml, "content");
+			getTagValue(itemXml, 'description') ||
+			getTagValue(itemXml, 'summary') ||
+			getTagValue(itemXml, 'content:encoded') ||
+			getTagValue(itemXml, 'content');
 
-		const pubDate =
-			getTagValue(itemXml, "pubDate") ||
-			getTagValue(itemXml, "published") ||
-			getTagValue(itemXml, "updated");
+		const pubDate = getTagValue(itemXml, 'pubDate') || getTagValue(itemXml, 'published') || getTagValue(itemXml, 'updated');
 
 		return {
 			source,
@@ -1638,16 +1544,11 @@ function uniqueArticlesByUrl(articles: RssArticle[]): RssArticle[] {
 	});
 }
 
-function hasUsableThumbnail(
-	article: RssArticle,
-): article is RssArticle & { imageUrl: string } {
+function hasUsableThumbnail(article: RssArticle): article is RssArticle & { imageUrl: string } {
 	return Boolean(article.imageUrl?.trim() && isUsableImageUrl(article.imageUrl));
 }
 
-function scoreArticleCandidate(
-	article: RssArticle,
-	positiveSources: Set<string>,
-): number {
+function scoreArticleCandidate(article: RssArticle, positiveSources: Set<string>): number {
 	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 	let score = 0;
 
@@ -1676,8 +1577,7 @@ function scoreArticleCandidate(
 	}
 
 	if (article.publishedAt) {
-		const ageInHours =
-			(Date.now() - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
+		const ageInHours = (Date.now() - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
 
 		if (ageInHours <= 24) {
 			score += 6;
@@ -1697,24 +1597,15 @@ function countKeywordMatches(text: string, keywords: string[]): number {
 	}, 0);
 }
 
-function shouldSkipBeforeAi(
-	article: RssArticle,
-	positiveSources: Set<string>,
-): boolean {
+function shouldSkipBeforeAi(article: RssArticle, positiveSources: Set<string>): boolean {
 	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
-	const hardNegativeMatchCount = countKeywordMatches(
-		text,
-		HARD_NEGATIVE_KEYWORDS,
-	);
+	const hardNegativeMatchCount = countKeywordMatches(text, HARD_NEGATIVE_KEYWORDS);
 
 	if (hardNegativeMatchCount === 0) {
 		return false;
 	}
 
-	const positiveEscapeMatchCount = countKeywordMatches(
-		text,
-		HARD_POSITIVE_ESCAPE_KEYWORDS,
-	);
+	const positiveEscapeMatchCount = countKeywordMatches(text, HARD_POSITIVE_ESCAPE_KEYWORDS);
 
 	if (positiveSources.has(article.source)) {
 		return hardNegativeMatchCount >= 3 && positiveEscapeMatchCount === 0;
@@ -1738,18 +1629,13 @@ function buildRejectedArticles(
 			...baseDecision,
 			reason: reasonBuilder(article),
 		},
-		reviewSource: "local",
+		reviewSource: 'local',
 	}));
 }
 
-function sortArticlesForReview(
-	articles: RssArticle[],
-	positiveSources: Set<string>,
-): RssArticle[] {
+function sortArticlesForReview(articles: RssArticle[], positiveSources: Set<string>): RssArticle[] {
 	return [...articles].sort((a, b) => {
-		const scoreDifference =
-			scoreArticleCandidate(b, positiveSources) -
-			scoreArticleCandidate(a, positiveSources);
+		const scoreDifference = scoreArticleCandidate(b, positiveSources) - scoreArticleCandidate(a, positiveSources);
 
 		if (scoreDifference !== 0) {
 			return scoreDifference;
@@ -1762,11 +1648,7 @@ function sortArticlesForReview(
 	});
 }
 
-async function mapWithConcurrency<T, R>(
-	items: T[],
-	concurrency: number,
-	mapper: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
 	const results: R[] = new Array(items.length);
 	let nextIndex = 0;
 
@@ -1774,10 +1656,7 @@ async function mapWithConcurrency<T, R>(
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex;
 			nextIndex += 1;
-			results[currentIndex] = await mapper(
-				items[currentIndex] as T,
-				currentIndex,
-			);
+			results[currentIndex] = await mapper(items[currentIndex] as T, currentIndex);
 		}
 	}
 
@@ -1794,21 +1673,16 @@ async function mapWithConcurrency<T, R>(
 }
 
 function truncateText(value: string, maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH) {
-	const normalizedValue = value.replace(/\s+/g, " ").trim();
+	const normalizedValue = value.replace(/\s+/g, ' ').trim();
 
 	if (normalizedValue.length <= maxLength) {
 		return normalizedValue;
 	}
 
-	return `${normalizedValue.slice(0, maxLength)}... [truncated ${
-		normalizedValue.length - maxLength
-	} chars]`;
+	return `${normalizedValue.slice(0, maxLength)}... [truncated ${normalizedValue.length - maxLength} chars]`;
 }
 
-async function readResponseTextSafely(
-	response: Response,
-	maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH,
-): Promise<string> {
+async function readResponseTextSafely(response: Response, maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH): Promise<string> {
 	try {
 		return truncateText(await response.text(), maxLength);
 	} catch (error) {
@@ -1816,9 +1690,7 @@ async function readResponseTextSafely(
 	}
 }
 
-async function readResponseJsonSafely<T>(
-	response: Response,
-): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+async function readResponseJsonSafely<T>(response: Response): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
 	try {
 		return {
 			ok: true,
@@ -1832,34 +1704,26 @@ async function readResponseJsonSafely<T>(
 	}
 }
 
-async function fetchSingleFeed(
-	env: Env,
-	feed: RssFeed,
-): Promise<FeedFetchResult> {
+async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<FeedFetchResult> {
 	const startedAt = Date.now();
 
 	try {
 		const response = await fetch(feed.url, {
 			headers: {
-				"User-Agent": "NutsNewsBot/1.0",
+				'User-Agent': 'NutsNewsBot/1.0',
 			},
 		});
 
 		if (!response.ok) {
 			const errorText = await readResponseTextSafely(response);
 
-			await logWarn(
-				env,
-				"worker.rss.fetch_failed_status",
-				"RSS feed fetch failed",
-				{
-					source: feed.source,
-					feedUrl: feed.url,
-					status: response.status,
-					errorText,
-					durationMs: Date.now() - startedAt,
-				},
-			);
+			await logWarn(env, 'worker.rss.fetch_failed_status', 'RSS feed fetch failed', {
+				source: feed.source,
+				feedUrl: feed.url,
+				status: response.status,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			});
 
 			return {
 				feed,
@@ -1872,12 +1736,10 @@ async function fetchSingleFeed(
 		}
 
 		const xml = await response.text();
-		const articles = parseRss(xml, feed.source).filter(
-			(article) => article.title && article.url,
-		);
+		const articles = parseRss(xml, feed.source).filter((article) => article.title && article.url);
 		const imageCount = articles.filter((article) => article.imageUrl).length;
 
-		await logInfo(env, "worker.rss.feed_fetched", "RSS feed fetched", {
+		await logInfo(env, 'worker.rss.feed_fetched', 'RSS feed fetched', {
 			source: feed.source,
 			feedUrl: feed.url,
 			articleCount: articles.length,
@@ -1894,17 +1756,11 @@ async function fetchSingleFeed(
 			durationMs: Date.now() - startedAt,
 		};
 	} catch (error) {
-		await logError(
-			env,
-			"worker.rss.fetch_failed_exception",
-			"RSS feed fetch threw an exception",
-			error,
-			{
-				source: feed.source,
-				feedUrl: feed.url,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.rss.fetch_failed_exception', 'RSS feed fetch threw an exception', error, {
+			source: feed.source,
+			feedUrl: feed.url,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return {
 			feed,
@@ -1917,14 +1773,8 @@ async function fetchSingleFeed(
 	}
 }
 
-async function fetchRssArticles(
-	env: Env,
-	feeds: RssFeed[],
-	positiveSources: Set<string>,
-): Promise<RssFetchResult> {
-	const feedResults = await Promise.all(
-		feeds.map((feed) => fetchSingleFeed(env, feed)),
-	);
+async function fetchRssArticles(env: Env, feeds: RssFeed[], positiveSources: Set<string>): Promise<RssFetchResult> {
+	const feedResults = await Promise.all(feeds.map((feed) => fetchSingleFeed(env, feed)));
 	const failedFeeds = feedResults
 		.filter((result) => !result.ok)
 		.map((result) => ({
@@ -1936,36 +1786,54 @@ async function fetchRssArticles(
 	const allArticles = feedResults.flatMap((result) => result.articles);
 
 	if (failedFeeds.length > 0) {
-		await logWarn(
-			env,
-			"worker.rss.fetch_completed_with_failures",
-			"RSS fetch completed with one or more feed failures",
-			{
-				feedCount: feeds.length,
-				feedFetchSuccessCount: feedResults.length - failedFeeds.length,
-				feedFetchFailureCount: failedFeeds.length,
-				failedFeeds,
-			},
-		);
+		await logWarn(env, 'worker.rss.fetch_completed_with_failures', 'RSS fetch completed with one or more feed failures', {
+			feedCount: feeds.length,
+			feedFetchSuccessCount: feedResults.length - failedFeeds.length,
+			feedFetchFailureCount: failedFeeds.length,
+			failedFeeds,
+		});
 	}
 
 	return {
 		feedResults,
-		articles: sortArticlesForReview(
-			uniqueArticlesByUrl(allArticles),
-			positiveSources,
-		),
+		articles: sortArticlesForReview(uniqueArticlesByUrl(allArticles), positiveSources),
 		feedFetchSuccessCount: feedResults.length - failedFeeds.length,
 		feedFetchFailureCount: failedFeeds.length,
 		failedFeeds,
 	};
 }
 
-async function getReviewedUrls(
-	env: Env,
-	config: RuntimeConfig,
-	urls: string[],
-): Promise<Set<string>> {
+function isNoThumbnailReview(row: ReviewedUrlRow): boolean {
+	if (row.decision !== 'reject') {
+		return false;
+	}
+
+	const reason = (row.reason ?? '').toLowerCase();
+
+	return reason.includes('thumbnail') || reason.includes('usable image') || reason.includes('no image');
+}
+
+function shouldTreatReviewedRowAsProcessed(row: ReviewedUrlRow, nowMs: number): boolean {
+	if (!isNoThumbnailReview(row)) {
+		return true;
+	}
+
+	if (!row.reviewed_at) {
+		return false;
+	}
+
+	const reviewedAtMs = Date.parse(row.reviewed_at);
+
+	if (Number.isNaN(reviewedAtMs)) {
+		return false;
+	}
+
+	const retryAfterMs = NO_THUMBNAIL_RETRY_AFTER_HOURS * 60 * 60 * 1000;
+
+	return nowMs - reviewedAtMs < retryAfterMs;
+}
+
+async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]): Promise<Set<string>> {
 	const startedAt = Date.now();
 
 	if (urls.length === 0) {
@@ -1978,12 +1846,14 @@ async function getReviewedUrls(
 	let publishedLookupRowCount = 0;
 	let matchedReviewUrlCount = 0;
 	let matchedPublishedUrlCount = 0;
+	let retryableNoThumbnailReviewCount = 0;
+	const nowMs = Date.now();
 
 	try {
 		const response = await fetch(
-			`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+			`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url,decision,reason,reviewed_at&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
 			{
-				method: "GET",
+				method: 'GET',
 				headers: {
 					apikey: config.supabaseServiceRoleKey,
 					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
@@ -1996,8 +1866,8 @@ async function getReviewedUrls(
 
 			await logWarn(
 				env,
-				"worker.supabase.review_lookup_failed",
-				"Failed to load recent reviewed URLs from Supabase; continuing with published article lookup",
+				'worker.supabase.review_lookup_failed',
+				'Failed to load recent reviewed URLs from Supabase; continuing with published article lookup',
 				{
 					status: response.status,
 					errorText,
@@ -2011,8 +1881,8 @@ async function getReviewedUrls(
 			if (!jsonResult.ok) {
 				await logError(
 					env,
-					"worker.supabase.review_lookup_parse_failed",
-					"Failed to parse Supabase reviewed URL lookup response; continuing with published article lookup",
+					'worker.supabase.review_lookup_parse_failed',
+					'Failed to parse Supabase reviewed URL lookup response; continuing with published article lookup',
 					jsonResult.error,
 					{
 						candidateUrlCount: urls.length,
@@ -2023,18 +1893,25 @@ async function getReviewedUrls(
 				reviewedLookupRowCount = jsonResult.value.length;
 
 				for (const row of jsonResult.value) {
-					if (candidateUrls.has(row.original_url)) {
-						reviewedUrls.add(row.original_url);
-						matchedReviewUrlCount += 1;
+					if (!candidateUrls.has(row.original_url)) {
+						continue;
 					}
+
+					if (!shouldTreatReviewedRowAsProcessed(row, nowMs)) {
+						retryableNoThumbnailReviewCount += 1;
+						continue;
+					}
+
+					reviewedUrls.add(row.original_url);
+					matchedReviewUrlCount += 1;
 				}
 			}
 		}
 	} catch (error) {
 		await logError(
 			env,
-			"worker.supabase.review_lookup_exception",
-			"Supabase reviewed URL lookup threw an exception; continuing with published article lookup",
+			'worker.supabase.review_lookup_exception',
+			'Supabase reviewed URL lookup threw an exception; continuing with published article lookup',
 			error,
 			{
 				candidateUrlCount: urls.length,
@@ -2047,7 +1924,7 @@ async function getReviewedUrls(
 		const response = await fetch(
 			`${config.supabaseUrl}/rest/v1/articles?select=original_url&order=published_on_site_at.desc&limit=${PUBLISHED_URL_LOOKBACK_LIMIT}`,
 			{
-				method: "GET",
+				method: 'GET',
 				headers: {
 					apikey: config.supabaseServiceRoleKey,
 					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
@@ -2058,27 +1935,20 @@ async function getReviewedUrls(
 		if (!response.ok) {
 			const errorText = await readResponseTextSafely(response);
 
-			await logWarn(
-				env,
-				"worker.supabase.published_url_lookup_failed",
-				"Failed to load recently published article URLs from Supabase",
-				{
-					status: response.status,
-					errorText,
-					candidateUrlCount: urls.length,
-					durationMs: Date.now() - startedAt,
-				},
-			);
+			await logWarn(env, 'worker.supabase.published_url_lookup_failed', 'Failed to load recently published article URLs from Supabase', {
+				status: response.status,
+				errorText,
+				candidateUrlCount: urls.length,
+				durationMs: Date.now() - startedAt,
+			});
 		} else {
-			const jsonResult = await readResponseJsonSafely<PublishedArticleUrlRow[]>(
-				response,
-			);
+			const jsonResult = await readResponseJsonSafely<PublishedArticleUrlRow[]>(response);
 
 			if (!jsonResult.ok) {
 				await logError(
 					env,
-					"worker.supabase.published_url_lookup_parse_failed",
-					"Failed to parse Supabase published article URL lookup response",
+					'worker.supabase.published_url_lookup_parse_failed',
+					'Failed to parse Supabase published article URL lookup response',
 					jsonResult.error,
 					{
 						candidateUrlCount: urls.length,
@@ -2102,8 +1972,8 @@ async function getReviewedUrls(
 	} catch (error) {
 		await logError(
 			env,
-			"worker.supabase.published_url_lookup_exception",
-			"Supabase published article URL lookup threw an exception",
+			'worker.supabase.published_url_lookup_exception',
+			'Supabase published article URL lookup threw an exception',
 			error,
 			{
 				candidateUrlCount: urls.length,
@@ -2112,36 +1982,30 @@ async function getReviewedUrls(
 		);
 	}
 
-	await logInfo(
-		env,
-		"worker.supabase.processed_url_lookup_completed",
-		"Loaded previously processed article URLs from Supabase",
-		{
-			reviewedLookbackCount: reviewedLookupRowCount,
-			publishedLookbackCount: publishedLookupRowCount,
-			candidateUrlCount: urls.length,
-			matchedReviewUrlCount,
-			matchedPublishedUrlCount,
-			matchedProcessedUrlCount: reviewedUrls.size,
-			durationMs: Date.now() - startedAt,
-		},
-	);
+	await logInfo(env, 'worker.supabase.processed_url_lookup_completed', 'Loaded previously processed article URLs from Supabase', {
+		reviewedLookbackCount: reviewedLookupRowCount,
+		publishedLookbackCount: publishedLookupRowCount,
+		candidateUrlCount: urls.length,
+		matchedReviewUrlCount,
+		matchedPublishedUrlCount,
+		retryableNoThumbnailReviewCount,
+		noThumbnailRetryAfterHours: NO_THUMBNAIL_RETRY_AFTER_HOURS,
+		matchedProcessedUrlCount: reviewedUrls.size,
+		durationMs: Date.now() - startedAt,
+	});
 
 	return reviewedUrls;
 }
 
-function normalizeAiDecision(
-	value: Partial<AiArticleDecision>,
-): AiArticleDecision {
-	const decision = value.decision === "accept" ? "accept" : "reject";
+function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecision {
+	const decision = value.decision === 'accept' ? 'accept' : 'reject';
 
 	return {
 		decision,
-		category: value.category || "Uplifting",
-		positivity_score:
-			typeof value.positivity_score === "number" ? value.positivity_score : 0,
-		summary: value.summary || "",
-		reason: value.reason || "No reason provided by OpenAI.",
+		category: value.category || 'Uplifting',
+		positivity_score: typeof value.positivity_score === 'number' ? value.positivity_score : 0,
+		summary: value.summary || '',
+		reason: value.reason || 'No reason provided by OpenAI.',
 	};
 }
 
@@ -2152,10 +2016,10 @@ function buildRejectedAiClassificationResult(
 ): AiClassificationResult {
 	return buildAiClassificationResult(
 		{
-			decision: "reject",
-			category: "Uplifting",
+			decision: 'reject',
+			category: 'Uplifting',
 			positivity_score: 0,
-			summary: "",
+			summary: '',
 			reason,
 		},
 		usage,
@@ -2163,34 +2027,30 @@ function buildRejectedAiClassificationResult(
 	);
 }
 
-async function classifyAndSummarizeArticle(
-	env: Env,
-	config: RuntimeConfig,
-	article: RssArticle,
-): Promise<AiClassificationResult> {
+async function classifyAndSummarizeArticle(env: Env, config: RuntimeConfig, article: RssArticle): Promise<AiClassificationResult> {
 	const startedAt = Date.now();
 	let response: Response;
 
 	try {
-		response = await fetch("https://api.openai.com/v1/chat/completions", {
-			method: "POST",
+		response = await fetch('https://api.openai.com/v1/chat/completions', {
+			method: 'POST',
 			headers: {
 				Authorization: `Bearer ${config.openAiApiKey}`,
-				"Content-Type": "application/json",
+				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify({
 				model: OPENAI_MODEL,
 				response_format: {
-					type: "json_object",
+					type: 'json_object',
 				},
 				messages: [
 					{
-						role: "system",
+						role: 'system',
 						content:
-							"You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence.\nAccept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories.\nBe selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.",
+							'You are filtering articles for NutsNews, a peaceful uplifting news feed.\nReject politics, war, money, crime, tragedy, fear, conflict, elections, government, markets, inflation, business, stocks, military, and violence.\nAccept positive, uplifting, inspiring, human-interest, wellness, lifestyle, science, culture, animals, travel, community, nature, space, creativity, and remarkable achievement stories.\nBe selective, but do not reject a clearly positive article just because it comes from a broad news source.\nReturn only valid JSON.',
 					},
 					{
-						role: "user",
+						role: 'user',
 						content: `Article:
 Source: ${article.source}
 Title: ${article.title}
@@ -2209,29 +2069,20 @@ Return JSON exactly like this:
 			}),
 		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.openai.request_exception",
-			"OpenAI request threw an exception",
-			error,
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.openai.request_exception', 'OpenAI request threw an exception', error, {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			durationMs: Date.now() - startedAt,
+		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			`OpenAI request exception: ${getErrorMessage(error)}`,
-		);
+		return buildRejectedAiClassificationResult(config, `OpenAI request exception: ${getErrorMessage(error)}`);
 	}
 
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(env, "worker.openai.request_failed", "OpenAI request failed", {
+		await logWarn(env, 'worker.openai.request_failed', 'OpenAI request failed', {
 			status: response.status,
 			source: article.source,
 			title: article.title,
@@ -2240,10 +2091,7 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			`OpenAI request failed: ${response.status}`,
-		);
+		return buildRejectedAiClassificationResult(config, `OpenAI request failed: ${response.status}`);
 	}
 
 	const jsonResult = await readResponseJsonSafely<{
@@ -2256,23 +2104,14 @@ Return JSON exactly like this:
 	}>(response);
 
 	if (!jsonResult.ok) {
-		await logError(
-			env,
-			"worker.openai.response_json_failed",
-			"Failed to parse OpenAI response JSON",
-			jsonResult.error,
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.openai.response_json_failed', 'Failed to parse OpenAI response JSON', jsonResult.error, {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			durationMs: Date.now() - startedAt,
+		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			"OpenAI response JSON parse failed",
-		);
+		return buildRejectedAiClassificationResult(config, 'OpenAI response JSON parse failed');
 	}
 
 	const data = jsonResult.value;
@@ -2280,84 +2119,56 @@ Return JSON exactly like this:
 	const content = data.choices?.[0]?.message?.content;
 
 	if (!content) {
-		await logWarn(
-			env,
-			"worker.openai.empty_response",
-			"OpenAI returned empty content",
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				promptTokens: usage.promptTokens,
-				completionTokens: usage.completionTokens,
-				totalTokens: usage.totalTokens,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.openai.empty_response', 'OpenAI returned empty content', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			promptTokens: usage.promptTokens,
+			completionTokens: usage.completionTokens,
+			totalTokens: usage.totalTokens,
+			durationMs: Date.now() - startedAt,
+		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			"OpenAI returned empty content",
-			usage,
-		);
+		return buildRejectedAiClassificationResult(config, 'OpenAI returned empty content', usage);
 	}
 
 	try {
-		const parsedDecision = normalizeAiDecision(
-			JSON.parse(content) as Partial<AiArticleDecision>,
-		);
+		const parsedDecision = normalizeAiDecision(JSON.parse(content) as Partial<AiArticleDecision>);
 		const estimatedCostUsd = estimateOpenAiCost(usage, config);
 
-		await logInfo(
-			env,
-			"worker.openai.article_reviewed",
-			"OpenAI reviewed article",
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				decision: parsedDecision.decision,
-				category: parsedDecision.category,
-				positivityScore: parsedDecision.positivity_score,
-				openAiModel: OPENAI_MODEL,
-				promptTokens: usage.promptTokens,
-				completionTokens: usage.completionTokens,
-				totalTokens: usage.totalTokens,
-				estimatedCostUsd,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logInfo(env, 'worker.openai.article_reviewed', 'OpenAI reviewed article', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			decision: parsedDecision.decision,
+			category: parsedDecision.category,
+			positivityScore: parsedDecision.positivity_score,
+			openAiModel: OPENAI_MODEL,
+			promptTokens: usage.promptTokens,
+			completionTokens: usage.completionTokens,
+			totalTokens: usage.totalTokens,
+			estimatedCostUsd,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return buildAiClassificationResult(parsedDecision, usage, config);
 	} catch (error) {
-		await logError(
-			env,
-			"worker.openai.invalid_json",
-			"OpenAI returned invalid JSON",
-			error,
-			{
-				source: article.source,
-				title: article.title,
-				articleUrl: article.url,
-				rawContent: content,
-				promptTokens: usage.promptTokens,
-				completionTokens: usage.completionTokens,
-				totalTokens: usage.totalTokens,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.openai.invalid_json', 'OpenAI returned invalid JSON', error, {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			rawContent: content,
+			promptTokens: usage.promptTokens,
+			completionTokens: usage.completionTokens,
+			totalTokens: usage.totalTokens,
+			durationMs: Date.now() - startedAt,
+		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			"OpenAI returned invalid JSON",
-			usage,
-		);
+		return buildRejectedAiClassificationResult(config, 'OpenAI returned invalid JSON', usage);
 	}
 }
 
-function buildFeedOutcomeCounts(
-	reviewedArticles: ReviewedArticleResult[],
-): Map<string, FeedOutcomeCounts> {
+function buildFeedOutcomeCounts(reviewedArticles: ReviewedArticleResult[]): Map<string, FeedOutcomeCounts> {
 	const countsBySource = new Map<string, FeedOutcomeCounts>();
 
 	for (const reviewedArticle of reviewedArticles) {
@@ -2367,8 +2178,7 @@ function buildFeedOutcomeCounts(
 			rejected: 0,
 		};
 		const hasThumbnail = hasUsableThumbnail(reviewedArticle.article);
-		const accepted =
-			reviewedArticle.aiDecision.decision === "accept" && hasThumbnail;
+		const accepted = reviewedArticle.aiDecision.decision === 'accept' && hasThumbnail;
 
 		if (accepted) {
 			current.accepted += 1;
@@ -2382,10 +2192,7 @@ function buildFeedOutcomeCounts(
 	return countsBySource;
 }
 
-async function getFeedHealthSnapshots(
-	env: Env,
-	config: RuntimeConfig,
-): Promise<Map<string, FeedHealthSnapshotRow>> {
+async function getFeedHealthSnapshots(env: Env, config: RuntimeConfig): Promise<Map<string, FeedHealthSnapshotRow>> {
 	const startedAt = Date.now();
 	let response: Response;
 
@@ -2393,7 +2200,7 @@ async function getFeedHealthSnapshots(
 		response = await fetch(
 			`${config.supabaseUrl}/rest/v1/feed_health?select=feed_url,consecutive_failure_count,total_fetch_count,total_success_count,total_failure_count,total_article_count,total_image_count,total_accepted_count,total_rejected_count,last_success_at,last_failure_at&limit=10000`,
 			{
-				method: "GET",
+				method: 'GET',
 				headers: {
 					apikey: config.supabaseServiceRoleKey,
 					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
@@ -2401,15 +2208,9 @@ async function getFeedHealthSnapshots(
 			},
 		);
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.feed_health_lookup_exception",
-			"Supabase feed health lookup threw an exception",
-			error,
-			{
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.feed_health_lookup_exception', 'Supabase feed health lookup threw an exception', error, {
+			durationMs: Date.now() - startedAt,
+		});
 
 		return new Map();
 	}
@@ -2417,16 +2218,11 @@ async function getFeedHealthSnapshots(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.feed_health_lookup_failed",
-			"Failed to load feed health snapshots",
-			{
-				status: response.status,
-				errorText,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.feed_health_lookup_failed', 'Failed to load feed health snapshots', {
+			status: response.status,
+			errorText,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return new Map();
 	}
@@ -2434,15 +2230,9 @@ async function getFeedHealthSnapshots(
 	const rows = await readResponseJsonSafely<FeedHealthSnapshotRow[]>(response);
 
 	if (!rows.ok) {
-		await logError(
-			env,
-			"worker.supabase.feed_health_lookup_parse_failed",
-			"Failed to parse feed health lookup response",
-			rows.error,
-			{
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.feed_health_lookup_parse_failed', 'Failed to parse feed health lookup response', rows.error, {
+			durationMs: Date.now() - startedAt,
+		});
 
 		return new Map();
 	}
@@ -2464,8 +2254,7 @@ function buildFeedHealthRows(
 			accepted: 0,
 			rejected: 0,
 		};
-		const previousConsecutiveFailureCount =
-			previous?.consecutive_failure_count ?? 0;
+		const previousConsecutiveFailureCount = previous?.consecutive_failure_count ?? 0;
 		const previousTotalFetchCount = previous?.total_fetch_count ?? 0;
 		const previousTotalSuccessCount = previous?.total_success_count ?? 0;
 		const previousTotalFailureCount = previous?.total_failure_count ?? 0;
@@ -2475,12 +2264,8 @@ function buildFeedHealthRows(
 		const previousTotalRejectedCount = previous?.total_rejected_count ?? 0;
 		const articleCount = result.articles.length;
 		const imageCount = result.articles.filter(hasUsableThumbnail).length;
-		const lastSuccessAt = result.ok
-			? checkedAtIso
-			: previous?.last_success_at ?? null;
-		const lastFailureAt = result.ok
-			? previous?.last_failure_at ?? null
-			: checkedAtIso;
+		const lastSuccessAt = result.ok ? checkedAtIso : (previous?.last_success_at ?? null);
+		const lastFailureAt = result.ok ? (previous?.last_failure_at ?? null) : checkedAtIso;
 
 		return {
 			source: result.feed.source,
@@ -2494,9 +2279,7 @@ function buildFeedHealthRows(
 			last_image_count: imageCount,
 			last_accepted_count: outcome.accepted,
 			last_rejected_count: outcome.rejected,
-			consecutive_failure_count: result.ok
-				? 0
-				: previousConsecutiveFailureCount + 1,
+			consecutive_failure_count: result.ok ? 0 : previousConsecutiveFailureCount + 1,
 			total_fetch_count: previousTotalFetchCount + 1,
 			total_success_count: previousTotalSuccessCount + (result.ok ? 1 : 0),
 			total_failure_count: previousTotalFailureCount + (result.ok ? 0 : 1),
@@ -2509,11 +2292,7 @@ function buildFeedHealthRows(
 	});
 }
 
-async function saveFeedHealthBatch(
-	env: Env,
-	config: RuntimeConfig,
-	feedHealthRows: FeedHealthUpsert[],
-): Promise<boolean> {
+async function saveFeedHealthBatch(env: Env, config: RuntimeConfig, feedHealthRows: FeedHealthUpsert[]): Promise<boolean> {
 	const startedAt = Date.now();
 
 	if (feedHealthRows.length === 0) {
@@ -2523,30 +2302,21 @@ async function saveFeedHealthBatch(
 	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/feed_health?on_conflict=feed_url`,
-			{
-				method: "POST",
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-					"Content-Type": "application/json",
-					Prefer: "resolution=merge-duplicates,return=minimal",
-				},
-				body: JSON.stringify(feedHealthRows),
+		response = await fetch(`${config.supabaseUrl}/rest/v1/feed_health?on_conflict=feed_url`, {
+			method: 'POST',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
 			},
-		);
+			body: JSON.stringify(feedHealthRows),
+		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.feed_health_batch_save_exception",
-			"Supabase feed health batch save threw an exception",
-			error,
-			{
-				feedHealthRowCount: feedHealthRows.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.feed_health_batch_save_exception', 'Supabase feed health batch save threw an exception', error, {
+			feedHealthRowCount: feedHealthRows.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
@@ -2554,39 +2324,25 @@ async function saveFeedHealthBatch(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.feed_health_batch_save_failed",
-			"Failed to batch-save feed health rows",
-			{
-				status: response.status,
-				errorText,
-				feedHealthRowCount: feedHealthRows.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.feed_health_batch_save_failed', 'Failed to batch-save feed health rows', {
+			status: response.status,
+			errorText,
+			feedHealthRowCount: feedHealthRows.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
 
-	await logInfo(
-		env,
-		"worker.supabase.feed_health_batch_saved",
-		"Batch-saved feed health rows",
-		{
-			feedHealthRowCount: feedHealthRows.length,
-			durationMs: Date.now() - startedAt,
-		},
-	);
+	await logInfo(env, 'worker.supabase.feed_health_batch_saved', 'Batch-saved feed health rows', {
+		feedHealthRowCount: feedHealthRows.length,
+		durationMs: Date.now() - startedAt,
+	});
 
 	return true;
 }
 
-async function saveArticleReviewsBatch(
-	env: Env,
-	config: RuntimeConfig,
-	reviews: ArticleReviewInsert[],
-): Promise<boolean> {
+async function saveArticleReviewsBatch(env: Env, config: RuntimeConfig, reviews: ArticleReviewInsert[]): Promise<boolean> {
 	const startedAt = Date.now();
 
 	if (reviews.length === 0) {
@@ -2596,30 +2352,21 @@ async function saveArticleReviewsBatch(
 	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`,
-			{
-				method: "POST",
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-					"Content-Type": "application/json",
-					Prefer: "resolution=ignore-duplicates,return=minimal",
-				},
-				body: JSON.stringify(reviews),
+		response = await fetch(`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`, {
+			method: 'POST',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
 			},
-		);
+			body: JSON.stringify(reviews),
+		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.review_batch_save_exception",
-			"Supabase article AI review batch save threw an exception",
-			error,
-			{
-				reviewCount: reviews.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.review_batch_save_exception', 'Supabase article AI review batch save threw an exception', error, {
+			reviewCount: reviews.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
@@ -2627,39 +2374,25 @@ async function saveArticleReviewsBatch(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.review_batch_save_failed",
-			"Failed to batch-save article AI reviews",
-			{
-				status: response.status,
-				errorText,
-				reviewCount: reviews.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.review_batch_save_failed', 'Failed to batch-save article AI reviews', {
+			status: response.status,
+			errorText,
+			reviewCount: reviews.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
 
-	await logInfo(
-		env,
-		"worker.supabase.review_batch_saved",
-		"Batch-saved article AI reviews",
-		{
-			reviewCount: reviews.length,
-			durationMs: Date.now() - startedAt,
-		},
-	);
+	await logInfo(env, 'worker.supabase.review_batch_saved', 'Batch-saved article AI reviews', {
+		reviewCount: reviews.length,
+		durationMs: Date.now() - startedAt,
+	});
 
 	return true;
 }
 
-async function saveAcceptedArticlesBatch(
-	env: Env,
-	config: RuntimeConfig,
-	articles: ArticleInsert[],
-): Promise<boolean> {
+async function saveAcceptedArticlesBatch(env: Env, config: RuntimeConfig, articles: ArticleInsert[]): Promise<boolean> {
 	const startedAt = Date.now();
 
 	if (articles.length === 0) {
@@ -2669,30 +2402,21 @@ async function saveAcceptedArticlesBatch(
 	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`,
-			{
-				method: "POST",
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-					"Content-Type": "application/json",
-					Prefer: "resolution=ignore-duplicates,return=minimal",
-				},
-				body: JSON.stringify(articles),
+		response = await fetch(`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`, {
+			method: 'POST',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=ignore-duplicates,return=minimal',
 			},
-		);
+			body: JSON.stringify(articles),
+		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.article_batch_save_exception",
-			"Supabase accepted article batch save threw an exception",
-			error,
-			{
-				articleCount: articles.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.article_batch_save_exception', 'Supabase accepted article batch save threw an exception', error, {
+			articleCount: articles.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
@@ -2700,66 +2424,46 @@ async function saveAcceptedArticlesBatch(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.article_batch_save_failed",
-			"Failed to batch-save accepted articles",
-			{
-				status: response.status,
-				errorText,
-				articleCount: articles.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.article_batch_save_failed', 'Failed to batch-save accepted articles', {
+			status: response.status,
+			errorText,
+			articleCount: articles.length,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
 
-	await logInfo(
-		env,
-		"worker.supabase.article_batch_saved",
-		"Batch-saved accepted articles",
-		{
-			articleCount: articles.length,
-			durationMs: Date.now() - startedAt,
-		},
-	);
+	await logInfo(env, 'worker.supabase.article_batch_saved', 'Batch-saved accepted articles', {
+		articleCount: articles.length,
+		durationMs: Date.now() - startedAt,
+	});
 
 	return true;
 }
 
-async function saveAiUsageRun(
-	env: Env,
-	config: RuntimeConfig,
-	run: AiUsageRunInsert,
-): Promise<boolean> {
+async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunInsert): Promise<boolean> {
 	const startedAt = Date.now();
 	let response: Response;
 
 	try {
 		response = await fetch(`${config.supabaseUrl}/rest/v1/ai_usage_runs`, {
-			method: "POST",
+			method: 'POST',
 			headers: {
 				apikey: config.supabaseServiceRoleKey,
 				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				"Content-Type": "application/json",
-				Prefer: "return=minimal",
+				'Content-Type': 'application/json',
+				Prefer: 'return=minimal',
 			},
 			body: JSON.stringify(run),
 		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.ai_usage_run_save_exception",
-			"Supabase AI usage run save threw an exception",
-			error,
-			{
-				shardIndex: run.shard_index,
-				openAiCallCount: run.openai_call_count,
-				estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.ai_usage_run_save_exception', 'Supabase AI usage run save threw an exception', error, {
+			shardIndex: run.shard_index,
+			openAiCallCount: run.openai_call_count,
+			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
@@ -2767,74 +2471,54 @@ async function saveAiUsageRun(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.ai_usage_run_save_failed",
-			"Failed to save AI usage run",
-			{
-				status: response.status,
-				errorText,
-				shardIndex: run.shard_index,
-				openAiCallCount: run.openai_call_count,
-				estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.ai_usage_run_save_failed', 'Failed to save AI usage run', {
+			status: response.status,
+			errorText,
+			shardIndex: run.shard_index,
+			openAiCallCount: run.openai_call_count,
+			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
 
-	await logInfo(
-		env,
-		"worker.supabase.ai_usage_run_saved",
-		"Saved AI usage run",
-		{
-			shardIndex: run.shard_index,
-			openAiCallCount: run.openai_call_count,
-			openAiPromptTokens: run.openai_prompt_tokens,
-			openAiCompletionTokens: run.openai_completion_tokens,
-			openAiTotalTokens: run.openai_total_tokens,
-			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
-			durationMs: Date.now() - startedAt,
-		},
-	);
+	await logInfo(env, 'worker.supabase.ai_usage_run_saved', 'Saved AI usage run', {
+		shardIndex: run.shard_index,
+		openAiCallCount: run.openai_call_count,
+		openAiPromptTokens: run.openai_prompt_tokens,
+		openAiCompletionTokens: run.openai_completion_tokens,
+		openAiTotalTokens: run.openai_total_tokens,
+		estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+		durationMs: Date.now() - startedAt,
+	});
 
 	return true;
 }
 
-async function saveWorkerRun(
-	env: Env,
-	config: WorkerRunSaveConfig,
-	run: WorkerRunInsert,
-): Promise<boolean> {
+async function saveWorkerRun(env: Env, config: WorkerRunSaveConfig, run: WorkerRunInsert): Promise<boolean> {
 	const startedAt = Date.now();
 	let response: Response;
 
 	try {
 		response = await fetch(`${config.supabaseUrl}/rest/v1/worker_runs`, {
-			method: "POST",
+			method: 'POST',
 			headers: {
 				apikey: config.supabaseServiceRoleKey,
 				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				"Content-Type": "application/json",
-				Prefer: "return=minimal",
+				'Content-Type': 'application/json',
+				Prefer: 'return=minimal',
 			},
 			body: JSON.stringify(run),
 		});
 	} catch (error) {
-		await logError(
-			env,
-			"worker.supabase.worker_run_save_exception",
-			"Supabase Worker run save threw an exception",
-			error,
-			{
-				shardIndex: run.shard_index,
-				runSource: run.run_source,
-				success: run.success,
-				errorName: run.error_name,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logError(env, 'worker.supabase.worker_run_save_exception', 'Supabase Worker run save threw an exception', error, {
+			shardIndex: run.shard_index,
+			runSource: run.run_source,
+			success: run.success,
+			errorName: run.error_name,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
@@ -2842,25 +2526,20 @@ async function saveWorkerRun(
 	if (!response.ok) {
 		const errorText = await readResponseTextSafely(response);
 
-		await logWarn(
-			env,
-			"worker.supabase.worker_run_save_failed",
-			"Failed to save Worker run",
-			{
-				status: response.status,
-				errorText,
-				shardIndex: run.shard_index,
-				runSource: run.run_source,
-				success: run.success,
-				errorName: run.error_name,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.supabase.worker_run_save_failed', 'Failed to save Worker run', {
+			status: response.status,
+			errorText,
+			shardIndex: run.shard_index,
+			runSource: run.run_source,
+			success: run.success,
+			errorName: run.error_name,
+			durationMs: Date.now() - startedAt,
+		});
 
 		return false;
 	}
 
-	await logInfo(env, "worker.supabase.worker_run_saved", "Saved Worker run", {
+	await logInfo(env, 'worker.supabase.worker_run_saved', 'Saved Worker run', {
 		shardIndex: run.shard_index,
 		runSource: run.run_source,
 		success: run.success,
@@ -2874,11 +2553,11 @@ async function saveWorkerRun(
 }
 
 function buildSuccessfulWorkerRun(
-	result: Omit<RefreshResult, "workerRunSaveOk">,
+	result: Omit<RefreshResult, 'workerRunSaveOk'>,
 	options: {
 		runStartedAt: number;
 		runCompletedAt: Date;
-		runSource: "manual" | "scheduled" | "unknown";
+		runSource: 'manual' | 'scheduled' | 'unknown';
 		requestId: string | null;
 	},
 ): WorkerRunInsert {
@@ -2916,7 +2595,7 @@ function buildSuccessfulWorkerRun(
 }
 
 function getErrorName(error: unknown) {
-	return error instanceof Error ? error.name : "UnknownError";
+	return error instanceof Error ? error.name : 'UnknownError';
 }
 
 function getErrorMessage(error: unknown) {
@@ -2927,7 +2606,7 @@ async function saveFailedWorkerRun(
 	env: Env,
 	options: {
 		runStartedAt: number;
-		runSource: "manual" | "scheduled" | "unknown";
+		runSource: 'manual' | 'scheduled' | 'unknown';
 		requestId: string | null;
 		maxAiReviews?: number;
 		error: unknown;
@@ -2938,8 +2617,8 @@ async function saveFailedWorkerRun(
 	if (!config) {
 		await logWarn(
 			env,
-			"worker.supabase.worker_run_failed_save_skipped",
-			"Skipped saving failed Worker run because Supabase config is missing",
+			'worker.supabase.worker_run_failed_save_skipped',
+			'Skipped saving failed Worker run because Supabase config is missing',
 			{
 				requestId: options.requestId,
 				shardIndex: getShardIndex(env),
@@ -2989,11 +2668,7 @@ async function saveFailedWorkerRun(
 	});
 }
 
-async function reviewArticleWithOpenAi(
-	env: Env,
-	config: RuntimeConfig,
-	article: RssArticle,
-): Promise<ReviewedArticleResult> {
+async function reviewArticleWithOpenAi(env: Env, config: RuntimeConfig, article: RssArticle): Promise<ReviewedArticleResult> {
 	try {
 		const aiResult = await classifyAndSummarizeArticle(env, config, article);
 
@@ -3003,13 +2678,13 @@ async function reviewArticleWithOpenAi(
 			usage: aiResult.usage,
 			estimatedCostUsd: aiResult.estimatedCostUsd,
 			openAiModel: aiResult.openAiModel,
-			reviewSource: "openai",
+			reviewSource: 'openai',
 		};
 	} catch (error) {
 		await logError(
 			env,
-			"worker.openai.article_review_exception",
-			"OpenAI article review failed unexpectedly and was converted to a safe rejection",
+			'worker.openai.article_review_exception',
+			'OpenAI article review failed unexpectedly and was converted to a safe rejection',
 			error,
 			{
 				source: article.source,
@@ -3021,16 +2696,16 @@ async function reviewArticleWithOpenAi(
 		return {
 			article,
 			aiDecision: {
-				decision: "reject",
-				category: "Uplifting",
+				decision: 'reject',
+				category: 'Uplifting',
 				positivity_score: 0,
-				summary: "",
+				summary: '',
 				reason: `OpenAI review exception: ${getErrorMessage(error)}`,
 			},
 			usage: emptyOpenAiUsage(),
 			estimatedCostUsd: 0,
 			openAiModel: OPENAI_MODEL,
-			reviewSource: "openai",
+			reviewSource: 'openai',
 		};
 	}
 }
@@ -3045,17 +2720,15 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
 		const hasThumbnail = hasUsableThumbnail(article);
-		const requestedDecision =
-			aiDecision.decision === "accept" ? "accept" : "reject";
-		const normalizedDecision: "accept" | "reject" =
-			requestedDecision === "accept" && hasThumbnail ? "accept" : "reject";
-		const normalizedCategory = aiDecision.category || "Uplifting";
+		const requestedDecision = aiDecision.decision === 'accept' ? 'accept' : 'reject';
+		const normalizedDecision: 'accept' | 'reject' = requestedDecision === 'accept' && hasThumbnail ? 'accept' : 'reject';
+		const normalizedCategory = aiDecision.category || 'Uplifting';
 		const normalizedScore = aiDecision.positivity_score ?? 0;
 		const normalizedSummary = aiDecision.summary || article.excerpt || article.title;
 		const normalizedReason =
-			requestedDecision === "accept" && !hasThumbnail
-				? "Rejected before publish because the RSS item and article page did not include a usable image thumbnail."
-				: aiDecision.reason || "No reason provided";
+			requestedDecision === 'accept' && !hasThumbnail
+				? 'Rejected before publish because the RSS item and article page did not include a usable image thumbnail.'
+				: aiDecision.reason || 'No reason provided';
 
 		reviewRows.push({
 			original_url: article.url,
@@ -3069,7 +2742,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			reviewed_at: new Date().toISOString(),
 		});
 
-		if (normalizedDecision === "reject") {
+		if (normalizedDecision === 'reject') {
 			rejectedCount += 1;
 			continue;
 		}
@@ -3094,7 +2767,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			ai_summary: normalizedSummary,
 			category: normalizedCategory,
 			positivity_score: normalizedScore || 7,
-			status: "published",
+			status: 'published',
 		});
 	}
 
@@ -3106,169 +2779,113 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 	};
 }
 
-async function refreshArticles(
-	env: Env,
-	options: RefreshOptions = {},
-): Promise<RefreshResult> {
+async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<RefreshResult> {
 	const refreshStartedAt = Date.now();
 	const config = await getRuntimeConfig(env);
 	const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
 	const shardIndex = getShardIndex(env);
 	const feedsPerShard = getFeedsPerShard(env);
 
-	await logInfo(env, "worker.refresh.started", "NutsNews Worker refresh started", {
+	await logInfo(env, 'worker.refresh.started', 'NutsNews Worker refresh started', {
 		shardIndex,
 		feedsPerShard,
 		maxAiReviews,
-		runSource: options.runSource ?? "unknown",
+		runSource: options.runSource ?? 'unknown',
 		requestId: options.requestId ?? null,
 	});
 
 	const shardFeeds = await getFeedsForShard(env, config);
-	const articlePageImageLookupLimit = getArticlePageImageLookupLimit(
-		shardFeeds.length,
-		maxAiReviews,
-	);
+	const requestedImageLookupLimit = clampArticlePageImageLookupLimit(options.imageLookupLimit, config.articlePageImageLookupLimit);
+	const articlePageImageLookupLimit = getArticlePageImageLookupLimit(shardFeeds.length, maxAiReviews, requestedImageLookupLimit);
 
-	const positiveSources = new Set(
-		shardFeeds
-			.filter((feed) => feed.is_positive_source)
-			.map((feed) => feed.source),
-	);
+	const positiveSources = new Set(shardFeeds.filter((feed) => feed.is_positive_source).map((feed) => feed.source));
 
 	const rssFetchResult = await fetchRssArticles(env, shardFeeds, positiveSources);
 	const fetchedArticles = rssFetchResult.articles;
 	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
 	const candidateUrls = candidateArticles.map((article) => article.url);
 
-	await logInfo(env, "worker.refresh.candidates_loaded", "RSS candidates loaded", {
+	await logInfo(env, 'worker.refresh.candidates_loaded', 'RSS candidates loaded', {
 		shardIndex,
 		fetchedCount: fetchedArticles.length,
 		feedFetchSuccessCount: rssFetchResult.feedFetchSuccessCount,
 		feedFetchFailureCount: rssFetchResult.feedFetchFailureCount,
 		failedFeeds: rssFetchResult.failedFeeds,
 		candidateCount: candidateArticles.length,
-		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail)
-			.length,
-		noRssThumbnailCandidateCount: candidateArticles.filter(
-			(article) => !hasUsableThumbnail(article),
-		).length,
+		rssThumbnailCandidateCount: candidateArticles.filter(hasUsableThumbnail).length,
+		noRssThumbnailCandidateCount: candidateArticles.filter((article) => !hasUsableThumbnail(article)).length,
+		requestedImageLookupLimit,
 		articlePageImageLookupLimit,
 		maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
 	});
 
 	const reviewedUrls = await getReviewedUrls(env, config, candidateUrls);
 
-	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter(
-		(article) => !reviewedUrls.has(article.url),
-	);
+	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter((article) => !reviewedUrls.has(article.url));
 
-	const imageHydrationResult = await hydrateMissingArticleImages(
-		env,
-		unreviewedArticlesBeforeImageHydration,
-		articlePageImageLookupLimit,
-	);
+	const imageHydrationResult = await hydrateMissingArticleImages(env, unreviewedArticlesBeforeImageHydration, articlePageImageLookupLimit);
 
 	const unreviewedArticles = imageHydrationResult.articles;
-	const noThumbnailArticles = unreviewedArticles.filter(
-		(article) => !hasUsableThumbnail(article),
-	);
-	const unreviewedArticlesWithThumbnails =
-		unreviewedArticles.filter(hasUsableThumbnail);
+	const noThumbnailArticles = unreviewedArticles.filter((article) => !hasUsableThumbnail(article));
+	const unreviewedArticlesWithThumbnails = unreviewedArticles.filter(hasUsableThumbnail);
 
 	const localFilterResults = unreviewedArticlesWithThumbnails.map((article) => ({
 		article,
 		shouldSkip: shouldSkipBeforeAi(article, positiveSources),
 	}));
 
-	const locallyRejectedArticles = localFilterResults
-		.filter((result) => result.shouldSkip)
-		.map((result) => result.article);
+	const locallyRejectedArticles = localFilterResults.filter((result) => result.shouldSkip).map((result) => result.article);
 
-	const articlesEligibleForAi = localFilterResults
-		.filter((result) => !result.shouldSkip)
-		.map((result) => result.article);
+	const articlesEligibleForAi = localFilterResults.filter((result) => !result.shouldSkip).map((result) => result.article);
 
 	const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
 
-	await logInfo(
-		env,
-		"worker.refresh.filtering_completed",
-		"Local filtering completed",
-		{
-			shardIndex,
-			alreadyReviewedCount: reviewedUrls.size,
-			unreviewedCount: unreviewedArticles.length,
-			imageHydrationLookupCount: imageHydrationResult.lookupCount,
-			imageHydrationFoundCount: imageHydrationResult.foundCount,
-			noThumbnailRejectedCount: noThumbnailArticles.length,
-			locallyRejectedCount: locallyRejectedArticles.length,
-			eligibleForAiCount: articlesEligibleForAi.length,
-			aiReviewCount: articlesForAi.length,
-		},
-	);
+	await logInfo(env, 'worker.refresh.filtering_completed', 'Local filtering completed', {
+		shardIndex,
+		alreadyReviewedCount: reviewedUrls.size,
+		unreviewedCount: unreviewedArticles.length,
+		imageHydrationLookupCount: imageHydrationResult.lookupCount,
+		imageHydrationFoundCount: imageHydrationResult.foundCount,
+		noThumbnailRejectedCount: noThumbnailArticles.length,
+		locallyRejectedCount: locallyRejectedArticles.length,
+		eligibleForAiCount: articlesEligibleForAi.length,
+		aiReviewCount: articlesForAi.length,
+	});
 
 	const noThumbnailRejectedResults = buildRejectedArticles(
 		noThumbnailArticles,
 		NO_THUMBNAIL_REJECT_DECISION,
-		(article) =>
-			`Skipped before AI from ${article.source}: RSS item and article page did not include a usable image thumbnail.`,
+		(article) => `Skipped before AI from ${article.source}: RSS item and article page did not include a usable image thumbnail.`,
 	);
 
 	const locallyRejectedResults = buildRejectedArticles(
 		locallyRejectedArticles,
 		LOCAL_PREFILTER_REJECT_DECISION,
-		(article) =>
-			`Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+		(article) => `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
 	);
 
-	const aiReviewedArticles = await mapWithConcurrency(
-		articlesForAi,
-		AI_REVIEW_CONCURRENCY,
-		(article) => reviewArticleWithOpenAi(env, config, article),
+	const aiReviewedArticles = await mapWithConcurrency(articlesForAi, AI_REVIEW_CONCURRENCY, (article) =>
+		reviewArticleWithOpenAi(env, config, article),
 	);
 
-	const reviewedArticles = [
-		...noThumbnailRejectedResults,
-		...locallyRejectedResults,
-		...aiReviewedArticles,
-	];
+	const reviewedArticles = [...noThumbnailRejectedResults, ...locallyRejectedResults, ...aiReviewedArticles];
 
-	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } =
-		buildRowsFromReviewedArticles(reviewedArticles);
+	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } = buildRowsFromReviewedArticles(reviewedArticles);
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
-	const articleSaveOk = await saveAcceptedArticlesBatch(
-		env,
-		config,
-		acceptedArticleRows,
-	);
+	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
 
 	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
-	const feedHealthRows = buildFeedHealthRows(
-		rssFetchResult.feedResults,
-		feedOutcomeCounts,
-		previousFeedHealth,
-		new Date(),
-	);
-	const feedHealthSaveOk = await saveFeedHealthBatch(
-		env,
-		config,
-		feedHealthRows,
-	);
+	const feedHealthRows = buildFeedHealthRows(rssFetchResult.feedResults, feedOutcomeCounts, previousFeedHealth, new Date());
+	const feedHealthSaveOk = await saveFeedHealthBatch(env, config, feedHealthRows);
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
 
 	const openAiUsage = sumOpenAiUsage(aiReviewedArticles);
 	const estimatedOpenAiCostUsd = estimateOpenAiCost(openAiUsage, config);
-	const openAiAcceptedCount = aiReviewedArticles.filter(
-		(reviewedArticle) => reviewedArticle.aiDecision.decision === "accept",
-	).length;
-	const openAiRejectedCount = aiReviewedArticles.filter(
-		(reviewedArticle) => reviewedArticle.aiDecision.decision === "reject",
-	).length;
-	const costProtectionLimitReached =
-		articlesEligibleForAi.length > articlesForAi.length;
+	const openAiAcceptedCount = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
+	const openAiRejectedCount = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
+	const costProtectionLimitReached = articlesEligibleForAi.length > articlesForAi.length;
 
 	const runCompletedAt = new Date();
 	const durationMs = Date.now() - refreshStartedAt;
@@ -3276,7 +2893,7 @@ async function refreshArticles(
 	const aiUsageRunBase: AiUsageRunInsert = {
 		run_started_at: new Date(refreshStartedAt).toISOString(),
 		run_completed_at: runCompletedAt.toISOString(),
-		run_source: options.runSource ?? "unknown",
+		run_source: options.runSource ?? 'unknown',
 		request_id: options.requestId ?? null,
 		shard_index: shardIndex,
 		feeds_per_shard: feedsPerShard,
@@ -3309,10 +2926,7 @@ async function refreshArticles(
 		duration_ms: durationMs,
 	};
 
-	const spikeWarningTriggered = shouldTriggerOpenAiUsageWarning(
-		aiUsageRunBase,
-		config,
-	);
+	const spikeWarningTriggered = shouldTriggerOpenAiUsageWarning(aiUsageRunBase, config);
 
 	const aiUsageRun: AiUsageRunInsert = {
 		...aiUsageRunBase,
@@ -3320,39 +2934,32 @@ async function refreshArticles(
 	};
 
 	if (spikeWarningTriggered) {
-		await logWarn(
-			env,
-			"worker.openai.usage_spike",
-			"OpenAI usage warning threshold reached",
-			{
-				shardIndex,
-				runSource: aiUsageRun.run_source,
-				requestId: aiUsageRun.request_id,
-				maxAiReviews,
-				eligibleForAiCount: articlesEligibleForAi.length,
-				aiReviewedCount: aiReviewedArticles.length,
-				openAiPromptTokens: openAiUsage.promptTokens,
-				openAiCompletionTokens: openAiUsage.completionTokens,
-				openAiTotalTokens: openAiUsage.totalTokens,
-				estimatedOpenAiCostUsd: aiUsageRun.estimated_openai_cost_usd,
-				costProtectionLimitReached,
-				aiCostAlertRunUsd: config.aiCostAlertRunUsd,
-				aiReviewAlertRunLimit: config.aiReviewAlertRunLimit,
-				aiTokenAlertRunLimit: config.aiTokenAlertRunLimit,
-			},
-		);
+		await logWarn(env, 'worker.openai.usage_spike', 'OpenAI usage warning threshold reached', {
+			shardIndex,
+			runSource: aiUsageRun.run_source,
+			requestId: aiUsageRun.request_id,
+			maxAiReviews,
+			eligibleForAiCount: articlesEligibleForAi.length,
+			aiReviewedCount: aiReviewedArticles.length,
+			openAiPromptTokens: openAiUsage.promptTokens,
+			openAiCompletionTokens: openAiUsage.completionTokens,
+			openAiTotalTokens: openAiUsage.totalTokens,
+			estimatedOpenAiCostUsd: aiUsageRun.estimated_openai_cost_usd,
+			costProtectionLimitReached,
+			aiCostAlertRunUsd: config.aiCostAlertRunUsd,
+			aiReviewAlertRunLimit: config.aiReviewAlertRunLimit,
+			aiTokenAlertRunLimit: config.aiTokenAlertRunLimit,
+		});
 	}
 
 	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
 
-	const resultWithoutWorkerRunSaveStatus: Omit<
-		RefreshResult,
-		"workerRunSaveOk"
-	> = {
-		message: "NutsNews refresh complete",
+	const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
+		message: 'NutsNews refresh complete',
 		shardIndex,
 		feedsPerShard,
 		maxAiReviews,
+		articlePageImageLookupLimit,
 		feedCount: shardFeeds.length,
 		feedFetchSuccessCount: rssFetchResult.feedFetchSuccessCount,
 		feedFetchFailureCount: rssFetchResult.feedFetchFailureCount,
@@ -3392,7 +2999,7 @@ async function refreshArticles(
 		buildSuccessfulWorkerRun(resultWithoutWorkerRunSaveStatus, {
 			runStartedAt: refreshStartedAt,
 			runCompletedAt,
-			runSource: options.runSource ?? "unknown",
+			runSource: options.runSource ?? 'unknown',
 			requestId: options.requestId ?? null,
 		}),
 	);
@@ -3402,18 +3009,13 @@ async function refreshArticles(
 		workerRunSaveOk,
 	};
 
-	await logInfo(
-		env,
-		"worker.refresh.completed",
-		"NutsNews Worker refresh completed",
-		result,
-	);
+	await logInfo(env, 'worker.refresh.completed', 'NutsNews Worker refresh completed', result);
 
 	return result;
 }
 
 function parseManualLimit(url: URL): number | undefined {
-	const limitParam = url.searchParams.get("limit");
+	const limitParam = url.searchParams.get('limit');
 
 	if (!limitParam) {
 		return undefined;
@@ -3428,6 +3030,22 @@ function parseManualLimit(url: URL): number | undefined {
 	return Math.floor(limit);
 }
 
+function parseManualImageLookupLimit(url: URL): number | undefined {
+	const lookupParam = url.searchParams.get('imageLookups') ?? url.searchParams.get('imageLookupLimit');
+
+	if (!lookupParam) {
+		return undefined;
+	}
+
+	const lookupLimit = Number(lookupParam);
+
+	if (Number.isNaN(lookupLimit) || lookupLimit < 0) {
+		return undefined;
+	}
+
+	return Math.floor(lookupLimit);
+}
+
 function createRequestId() {
 	return crypto.randomUUID();
 }
@@ -3438,41 +3056,36 @@ export default {
 		const requestId = createRequestId();
 		const url = new URL(request.url);
 
-		if (url.pathname === "/favicon.ico") {
+		if (url.pathname === '/favicon.ico') {
 			return new Response(null, {
 				status: 204,
 			});
 		}
 
-		if (url.pathname === "/log-test") {
-			await logInfo(
-				env,
-				"worker.log_test.completed",
-				"Worker Better Stack log test completed",
-				{
-					requestId,
-					path: url.pathname,
-					shardIndex: getShardIndex(env),
-				},
-			);
+		if (url.pathname === '/log-test') {
+			await logInfo(env, 'worker.log_test.completed', 'Worker Better Stack log test completed', {
+				requestId,
+				path: url.pathname,
+				shardIndex: getShardIndex(env),
+			});
 
 			return Response.json({
 				ok: true,
-				message: "Worker Better Stack test log emitted.",
+				message: 'Worker Better Stack test log emitted.',
 				searchInBetterStackFor: {
-					service: "nutsnews-worker",
-					event: "worker.log_test.completed",
-					level: "info",
+					service: 'nutsnews-worker',
+					event: 'worker.log_test.completed',
+					level: 'info',
 					shardIndex: getShardIndex(env),
 				},
 			});
 		}
 
-		if (url.pathname === "/sentry-test") {
-			throw new Error("NutsNews Worker Sentry test error");
+		if (url.pathname === '/sentry-test') {
+			throw new Error('NutsNews Worker Sentry test error');
 		}
 
-		await logInfo(env, "worker.request.started", "Worker manual request started", {
+		await logInfo(env, 'worker.request.started', 'Worker manual request started', {
 			requestId,
 			method: request.method,
 			path: url.pathname,
@@ -3481,64 +3094,55 @@ export default {
 		});
 
 		const maxAiReviews = parseManualLimit(url);
+		const imageLookupLimit = parseManualImageLookupLimit(url);
 
 		try {
 			const result = await refreshArticles(env, {
 				maxAiReviews,
-				runSource: "manual",
+				imageLookupLimit,
+				runSource: 'manual',
 				requestId,
 			});
 
-			await logInfo(
-				env,
-				"worker.request.completed",
-				"Worker manual request completed",
-				{
-					requestId,
-					status: 200,
-					shardIndex: getShardIndex(env),
-					durationMs: Date.now() - requestStartedAt,
-					result,
-				},
-			);
+			await logInfo(env, 'worker.request.completed', 'Worker manual request completed', {
+				requestId,
+				status: 200,
+				shardIndex: getShardIndex(env),
+				durationMs: Date.now() - requestStartedAt,
+				result,
+			});
 
 			return Response.json({
 				...result,
-				mode: "manual",
+				mode: 'manual',
 				requestId,
 			});
 		} catch (error) {
 			await saveFailedWorkerRun(env, {
 				runStartedAt: requestStartedAt,
-				runSource: "manual",
+				runSource: 'manual',
 				requestId,
 				maxAiReviews,
 				error,
 			});
 
-			await logError(
-				env,
-				"worker.request.failed",
-				"Worker manual request failed",
-				error,
-				{
-					requestId,
-					status: 500,
-					shardIndex: getShardIndex(env),
-					durationMs: Date.now() - requestStartedAt,
-				},
-			);
+			await logError(env, 'worker.request.failed', 'Worker manual request failed', error, {
+				requestId,
+				status: 500,
+				shardIndex: getShardIndex(env),
+				durationMs: Date.now() - requestStartedAt,
+			});
 
 			return Response.json(
 				{
-					message: "NutsNews refresh failed",
+					message: 'NutsNews refresh failed',
 					requestId,
 					error:
 						error instanceof Error
 							? {
-								name: error.name,
-								message: error.message,
-							}
+									name: error.name,
+									message: error.message,
+								}
 							: String(error),
 				},
 				{
@@ -3552,52 +3156,36 @@ export default {
 		const requestStartedAt = Date.now();
 		const requestId = createRequestId();
 
-		await logInfo(
-			env,
-			"worker.scheduled.started",
-			"Worker scheduled refresh started",
-			{
-				requestId,
-				shardIndex: getShardIndex(env),
-			},
-		);
+		await logInfo(env, 'worker.scheduled.started', 'Worker scheduled refresh started', {
+			requestId,
+			shardIndex: getShardIndex(env),
+		});
 
 		try {
 			const result = await refreshArticles(env, {
-				runSource: "scheduled",
+				runSource: 'scheduled',
 				requestId,
 			});
 
-			await logInfo(
-				env,
-				"worker.scheduled.completed",
-				"Worker scheduled refresh completed",
-				{
-					requestId,
-					shardIndex: getShardIndex(env),
-					durationMs: Date.now() - requestStartedAt,
-					result,
-				},
-			);
+			await logInfo(env, 'worker.scheduled.completed', 'Worker scheduled refresh completed', {
+				requestId,
+				shardIndex: getShardIndex(env),
+				durationMs: Date.now() - requestStartedAt,
+				result,
+			});
 		} catch (error) {
 			await saveFailedWorkerRun(env, {
 				runStartedAt: requestStartedAt,
-				runSource: "scheduled",
+				runSource: 'scheduled',
 				requestId,
 				error,
 			});
 
-			await logError(
-				env,
-				"worker.scheduled.failed",
-				"Worker scheduled refresh failed",
-				error,
-				{
-					requestId,
-					shardIndex: getShardIndex(env),
-					durationMs: Date.now() - requestStartedAt,
-				},
-			);
+			await logError(env, 'worker.scheduled.failed', 'Worker scheduled refresh failed', error, {
+				requestId,
+				shardIndex: getShardIndex(env),
+				durationMs: Date.now() - requestStartedAt,
+			});
 
 			throw error;
 		}
