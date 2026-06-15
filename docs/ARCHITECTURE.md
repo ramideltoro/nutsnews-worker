@@ -234,9 +234,15 @@ Powers `/admin/shards`.
 
 ### `feed_health`
 
-Stores source-level health and quality metrics.
+Stores source-level health and operational metrics such as fetch success, failures, image coverage, accepted output, and rejected output.
 
-Powers `/admin/feed-health` and `/admin/feeds`.
+Powers `/admin/feed-health` and contributes to `/admin/feeds`.
+
+### `feed_quality_scores`
+
+Computed Supabase view that ranks RSS feeds from 0 to 100 using success rate, thumbnail rate, accepted rate, failure rate, and duplicate/already-seen rate.
+
+Powers source quality badges and rankings in `/admin/feeds`.
 
 ---
 

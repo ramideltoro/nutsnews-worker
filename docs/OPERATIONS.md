@@ -82,6 +82,7 @@ Purpose:
 * Show thumbnail coverage
 * Show accepted output
 * Identify weak feeds
+* Compare source quality signals
 
 ### Feed Management Dashboard
 
@@ -94,6 +95,8 @@ Route:
 Purpose:
 
 * List RSS feeds
+* Show 0-100 source quality scores
+* Show source quality grades
 * Enable feeds
 * Disable feeds
 * Inspect active/inactive status
@@ -362,6 +365,51 @@ select *
 from public.bad_feeds
 limit 25;
 ```
+
+### Rank feeds by source quality
+
+Use this query when deciding which feeds to keep, promote, disable, or replace:
+
+```sql
+select
+  source,
+  feed_url,
+  is_active,
+  quality_score,
+  quality_grade,
+  success_rate_pct,
+  thumbnail_rate_pct,
+  accepted_rate_pct,
+  failure_rate_pct,
+  duplicate_rate_pct,
+  total_fetch_count,
+  total_accepted_count,
+  quality_reason
+from public.feed_quality_scores
+order by quality_score desc, total_accepted_count desc, source asc;
+```
+
+Find low-quality active feeds quickly:
+
+```sql
+select
+  source,
+  feed_url,
+  quality_score,
+  quality_grade,
+  quality_reason
+from public.feed_quality_scores
+where is_active = true
+  and quality_score < 50
+order by quality_score asc, consecutive_failure_count desc, source asc;
+```
+
+Detailed scoring rules live in:
+
+```text
+docs/RSS_SOURCE_QUALITY.md
+```
+
 
 ### Validate a restored Supabase database
 
