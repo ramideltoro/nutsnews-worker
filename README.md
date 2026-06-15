@@ -96,6 +96,7 @@ NutsNews currently includes:
 * Production troubleshooting guide for issue #30
 * Controller and shard operations guide for issue #37
 * Worker article recovery improvements for no-thumbnail retries and image hydration
+* Truncated failed-feed error previews for cleaner Worker and controller responses
 * MIT license
 
 ---

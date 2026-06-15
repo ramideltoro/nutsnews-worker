@@ -307,3 +307,20 @@ imageHydrationFoundCount > 0
 eligibleForAiCount > 0
 acceptedCount > 0
 ```
+
+---
+
+## Failed Feed Error Truncation
+
+The Worker keeps partial RSS feed failure behavior, but failed feed error messages are kept short and readable.
+
+When a feed returns a large HTML error page, the Worker now:
+
+* strips noisy HTML, script, style, and noscript content
+* keeps the HTTP status visible
+* keeps a short readable response preview
+* caps the final message around 500 characters
+* keeps `feedFetchSuccessCount` and `feedFetchFailureCount` unchanged
+* continues returning `NutsNews refresh complete` when only some feeds fail
+
+This keeps manual `curl` checks, controller responses, Better Stack payloads, and admin debugging easier to read.

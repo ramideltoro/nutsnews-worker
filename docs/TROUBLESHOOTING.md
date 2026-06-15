@@ -683,3 +683,56 @@ limit 25;
 ```
 
 Then prefer direct publisher feeds with stronger RSS images.
+
+---
+
+## Large Failed Feed Error Bodies
+
+Use this when manual Worker or controller responses are hard to read because failed RSS feeds return large HTML error pages.
+
+### Symptoms
+
+```text
+failedFeeds[].errorMessage contains a large HTML page
+Controller response is hard to scan
+Better Stack log payloads are noisy
+```
+
+### Expected behavior
+
+Failed feed entries should stay readable and keep only the useful information:
+
+```json
+{
+  "source": "Good News Network Good Earth",
+  "url": "https://www.goodnewsnetwork.org/category/news/good-earth/feed/",
+  "status": 404,
+  "errorMessage": "HTTP 404 Not Found: Page not found - Good News Network... [truncated]"
+}
+```
+
+The Worker should still complete successfully when some feeds fail:
+
+```text
+message: NutsNews refresh complete
+feedFetchSuccessCount: <number>
+feedFetchFailureCount: <number>
+```
+
+### Verify
+
+```bash
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
+curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
+```
+
+Look for:
+
+```text
+failedFeeds
+feedFetchSuccessCount
+feedFetchFailureCount
+NutsNews refresh complete
+```
+
+The `failedFeeds[].errorMessage` values should be capped at roughly 500 characters and should not contain full HTML documents.

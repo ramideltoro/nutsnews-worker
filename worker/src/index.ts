@@ -325,6 +325,7 @@ const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 48;
 const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 10;
 const NO_THUMBNAIL_RETRY_AFTER_HOURS = 6;
 const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
+const TRUNCATED_TEXT_SUFFIX = '... [truncated]';
 
 const OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
@@ -1679,14 +1680,54 @@ function truncateText(value: string, maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH)
 		return normalizedValue;
 	}
 
-	return `${normalizedValue.slice(0, maxLength)}... [truncated ${normalizedValue.length - maxLength} chars]`;
+	const safeMaxLength = Math.max(TRUNCATED_TEXT_SUFFIX.length, maxLength);
+	const previewLength = safeMaxLength - TRUNCATED_TEXT_SUFFIX.length;
+
+	return `${normalizedValue.slice(0, previewLength).trimEnd()}${TRUNCATED_TEXT_SUFFIX}`;
+}
+
+function removeHtmlNoise(value: string) {
+	return value
+		.replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+		.replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
+		.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ');
+}
+
+function extractHtmlTitle(value: string) {
+	const titleMatch = value.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+
+	if (!titleMatch?.[1]) {
+		return '';
+	}
+
+	return stripHtml(titleMatch[1]);
+}
+
+function buildReadableResponsePreview(value: string) {
+	const htmlTitle = extractHtmlTitle(value);
+	const readableText = stripHtml(removeHtmlNoise(value));
+
+	if (htmlTitle && readableText && !readableText.toLowerCase().startsWith(htmlTitle.toLowerCase())) {
+		return `${htmlTitle}: ${readableText}`;
+	}
+
+	return readableText || htmlTitle;
 }
 
 async function readResponseTextSafely(response: Response, maxLength = MAX_RESPONSE_ERROR_TEXT_LENGTH): Promise<string> {
 	try {
-		return truncateText(await response.text(), maxLength);
+		const responseBody = await response.text();
+		const statusText = response.statusText ? ` ${response.statusText}` : '';
+		const readablePreview = buildReadableResponsePreview(responseBody);
+		const statusPrefix = `HTTP ${response.status}${statusText}`;
+
+		if (!readablePreview) {
+			return statusPrefix;
+		}
+
+		return truncateText(`${statusPrefix}: ${readablePreview}`, maxLength);
 	} catch (error) {
-		return `Failed to read response body: ${getErrorMessage(error)}`;
+		return truncateText(`Failed to read response body: ${getErrorMessage(error)}`, maxLength);
 	}
 }
 
@@ -1767,7 +1808,7 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<FeedFetchResult
 			articles: [],
 			ok: false,
 			status: null,
-			errorMessage: getErrorMessage(error),
+			errorMessage: truncateText(getErrorMessage(error)),
 			durationMs: Date.now() - startedAt,
 		};
 	}
@@ -1781,7 +1822,7 @@ async function fetchRssArticles(env: Env, feeds: RssFeed[], positiveSources: Set
 			source: result.feed.source,
 			url: result.feed.url,
 			status: result.status,
-			errorMessage: result.errorMessage,
+			errorMessage: result.errorMessage ? truncateText(result.errorMessage) : null,
 		}));
 	const allArticles = feedResults.flatMap((result) => result.articles);
 
