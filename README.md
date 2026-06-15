@@ -763,6 +763,27 @@ Important public routes include:
 
 The homepage and API can stay fresh while still allowing short-term CDN caching.
 
+### Database performance indexes
+
+NutsNews includes a dedicated Supabase migration for issue #6:
+
+```text
+supabase/migrations/20260614000900_add_public_feed_performance_indexes.sql
+```
+
+This migration strengthens the database layer used by the public feed and Worker ingestion pipeline.
+
+It adds or verifies indexes for:
+
+* Active RSS feed selection by `is_active` and `id`
+* Unique RSS feed URLs
+* Unique AI review records by `original_url`
+* Unique published article records by `original_url`
+* Published image-backed public feed ordering
+* Recent AI review-history scans by `reviewed_at desc`
+
+These indexes support the most important read and write paths in the platform: loading active feeds for Worker shards, avoiding duplicate AI reviews, avoiding duplicate article inserts, and keeping the public feed responsive as the article table grows.
+
 ### Homepage article API pagination
 
 The public article API is optimized for predictable mobile feed performance as the number of published articles grows.
@@ -1646,6 +1667,9 @@ NutsNews currently includes:
 * Optimized public article API pagination
 * Optional cursor pagination for article feed API calls
 * Supabase indexes for published article card queries
+* Supabase reviewed-at index for AI review history scans
+* Supabase unique-index protection for RSS URLs and article duplicate checks
+* Supabase indexes for active RSS feed selection
 * MIT license
 
 The project is active and designed to improve gradually.
@@ -1689,6 +1713,36 @@ order by indexname;
 ```
 
 ---
+
+### Issue #6 database index checks
+
+Use this Supabase SQL check after applying the issue #6 migration:
+
+```sql
+select
+  schemaname,
+  tablename,
+  indexname,
+  indexdef
+from pg_indexes
+where schemaname = 'public'
+  and (
+    indexname in (
+      'rss_feeds_active_id_idx',
+      'rss_feeds_url_unique_idx',
+      'article_ai_reviews_original_url_unique_idx',
+      'articles_original_url_unique_idx',
+      'articles_public_feed_status_published_score_idx',
+      'article_ai_reviews_reviewed_at_desc_idx'
+    )
+    or (tablename = 'rss_feeds' and indexdef ilike 'create unique%' and indexdef ilike '%(url)%')
+    or (tablename = 'article_ai_reviews' and indexdef ilike 'create unique%' and indexdef ilike '%(original_url)%')
+    or (tablename = 'articles' and indexdef ilike 'create unique%' and indexdef ilike '%(original_url)%')
+  )
+order by tablename, indexname;
+```
+
+Expected result: the named performance indexes should appear. For the unique URL indexes, an existing unique constraint index is also acceptable because Postgres backs unique constraints with unique indexes.
 
 ## Roadmap
 
