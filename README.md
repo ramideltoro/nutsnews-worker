@@ -25,6 +25,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Worker Health Dashboard | Admin dashboard for Worker shard health, failed executions, latest errors, stale shards, and consecutive failures |
 | Partial Failure Handling | Worker runs continue when individual RSS feeds, OpenAI calls, or Supabase saves fail safely |
 | Lightweight Homepage | Public feed, category filters, article cards, and pagination render on the server to reduce client-side JavaScript |
+| Article API Pagination | Public article API uses small card-only payloads, stable ordering, extra-row lookahead, and optional cursor pagination |
 | Failed Run Tracking | Dedicated Worker run table stores successful and failed shard executions |
 | CDN                | Cloudflare caches public pages and API responses                                                               |
 | Logging            | Better Stack centralizes structured logs                                                                       |
@@ -700,6 +701,52 @@ Important public routes include:
 * Public article API
 
 The homepage and API can stay fresh while still allowing short-term CDN caching.
+
+### Homepage article API pagination
+
+The public article API is optimized for predictable mobile feed performance as the number of published articles grows.
+
+The API keeps responses small by returning only the fields needed by article cards:
+
+```text
+id, source, title, original_url, image_url, published_at, published_on_site_at, ai_summary, category, positivity_score
+```
+
+Pagination uses a small page size:
+
+```text
+PAGE_SIZE = 5
+```
+
+Offset pagination still works for existing callers:
+
+```text
+/api/articles?page=0
+/api/articles?page=1
+```
+
+The API now fetches one extra row internally to determine whether another page exists, instead of assuming a full page always means there is more data. It also uses stable ordering by `published_on_site_at desc, id desc` so results stay predictable when articles are added.
+
+Cursor pagination is available for future infinite-scroll or high-volume use cases:
+
+```text
+/api/articles?cursor=<nextCursor>
+```
+
+The response includes `nextCursor` when more articles are available. Cursor pagination avoids deep offset scans and is the preferred option if the public feed grows large.
+
+A Supabase migration adds indexes for the feed query shape:
+
+```text
+supabase/migrations/20260614000800_optimize_article_pagination.sql
+```
+
+Those indexes support:
+
+* Published article ordering
+* Thumbnail-only card filtering
+* Category search with `ilike`
+* Fast article-card API responses
 
 ### Vercel edge delivery
 
@@ -1533,9 +1580,50 @@ NutsNews currently includes:
 * Source-friendly article linking
 * Dynamic Open Graph image generation
 * Branded social previews for homepage and article pages
+* Optimized public article API pagination
+* Optional cursor pagination for article feed API calls
+* Supabase indexes for published article card queries
 * MIT license
 
 The project is active and designed to improve gradually.
+
+### Article API pagination checks
+
+Use these quick checks after applying the pagination migration.
+
+Confirm the public API returns small card payloads:
+
+```bash
+curl "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Confirm pagination metadata is present:
+
+```bash
+curl -I "https://www.nutsnews.com/api/articles?page=0"
+```
+
+Expected headers include:
+
+```text
+X-NutsNews-Article-Page-Size: 5
+X-NutsNews-Article-Fields: card
+X-NutsNews-Article-Pagination: offset
+```
+
+Confirm the supporting indexes exist in Supabase:
+
+```sql
+select indexname
+from pg_indexes
+where schemaname = 'public'
+  and tablename = 'articles'
+  and indexname in (
+    'articles_published_card_pagination_idx',
+    'articles_published_card_category_trgm_idx'
+  )
+order by indexname;
+```
 
 ---
 
