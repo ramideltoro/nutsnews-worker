@@ -282,3 +282,32 @@ select *
 from public.bad_feeds
 limit 25;
 ```
+
+---
+
+## Controller and Manual Shard Operations
+
+Detailed controller and shard commands live in:
+
+```text
+docs/CONTROLLER_AND_SHARDS.md
+```
+
+Use that guide when you need to:
+
+* Trigger the controller manually
+* Trigger a specific shard through the controller
+* Trigger a shard directly
+* Tail controller logs
+* Tail shard logs
+* Understand expected controller response fields
+* Understand expected Worker shard response fields
+
+Quick commands:
+
+```bash
+curl "https://nutsnews-controller.nutsnews.workers.dev/"
+curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
+cd worker && npx wrangler tail --config generated-wrangler/wrangler.shard0.jsonc
+```

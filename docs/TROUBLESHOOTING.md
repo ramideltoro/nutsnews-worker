@@ -512,3 +512,46 @@ Frontend errors
 Server errors
 Worker errors
 ```
+
+---
+
+## Controller and Shard Manual Testing
+
+For detailed controller and shard commands, use:
+
+```text
+docs/CONTROLLER_AND_SHARDS.md
+```
+
+Fast checks:
+
+```bash
+curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
+curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
+cd worker && npx wrangler tail --config generated-wrangler/wrangler.shard0.jsonc
+```
+
+Expected controller response fields:
+
+```text
+message
+mode
+shardCount
+shardRunIntervalMinutes
+maxAiReviewsPerShard
+requestId
+shardIndex
+shardUrl
+ok
+status
+response
+```
+
+Expected healthy values:
+
+```text
+message = NutsNews controller run complete
+ok = true
+status = 200
+response.message = NutsNews refresh complete
+```

@@ -184,3 +184,30 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
 ```bash
 curl "https://www.nutsnews.com/api/log-test"
 ```
+
+---
+
+## Controller and Shard Debugging
+
+Detailed manual commands live in:
+
+```text
+docs/CONTROLLER_AND_SHARDS.md
+```
+
+Useful Better Stack searches:
+
+```text
+service:nutsnews-controller
+service:nutsnews-controller level:warn
+service:nutsnews-controller level:error
+service:nutsnews-worker shardIndex:0
+service:nutsnews-worker level:error
+```
+
+Useful Wrangler tail commands:
+
+```bash
+cd controller && npx wrangler tail nutsnews-controller
+cd worker && npx wrangler tail --config generated-wrangler/wrangler.shard0.jsonc
+```
