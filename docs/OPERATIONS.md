@@ -101,6 +101,37 @@ Purpose:
 
 ---
 
+## Deployment Checklist
+
+The repeatable production deployment checklist lives in:
+
+```text
+docs/DEPLOYMENT_CHECKLIST.md
+```
+
+Use that guide when releasing changes to:
+
+* Vercel web app
+* Cloudflare Worker shards
+* Controller Worker
+* Supabase migrations
+* Cloudflare cache behavior
+* Post-deploy verification commands
+
+Quick post-deploy verification:
+
+```bash
+./scripts/post_deploy_verify.sh
+```
+
+With an article path:
+
+```bash
+./scripts/post_deploy_verify.sh https://www.nutsnews.com /articles/<article-id>
+```
+
+---
+
 ## Deployment Model
 
 ### Web

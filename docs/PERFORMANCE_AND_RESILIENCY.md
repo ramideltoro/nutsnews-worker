@@ -84,6 +84,24 @@ cf-cache-status: HIT
 
 ---
 
+## Deployment and Cache Validation
+
+When a release changes public pages, article API behavior, cache headers, or Cloudflare rules, use the deployment checklist:
+
+```text
+docs/DEPLOYMENT_CHECKLIST.md
+```
+
+The checklist includes Cloudflare cache purge steps and post-deploy cache HIT verification.
+
+Quick cache validation:
+
+```bash
+./scripts/validate_cloudflare_cache_hit_rate.sh https://www.nutsnews.com
+```
+
+---
+
 ## Article API Pagination
 
 The public article API is optimized for predictable mobile feed performance.

@@ -22,6 +22,31 @@ Common issues can be diagnosed from one document.
 
 ---
 
+## Deployment Problems
+
+Use the deployment checklist when a release has failed or when you need to verify a new production deploy:
+
+```text
+docs/DEPLOYMENT_CHECKLIST.md
+```
+
+The checklist covers:
+
+* Web deployment checks
+* Worker shard deployment checks
+* Controller deployment checks
+* Supabase migration checks
+* Cloudflare cache purge checks
+* Post-deploy verification commands
+
+Quick verification command:
+
+```bash
+./scripts/post_deploy_verify.sh
+```
+
+---
+
 ## Quick Triage
 
 Start here when something looks wrong.
