@@ -738,6 +738,154 @@ Article cards, category filters, and pagination are server-rendered. The browser
 
 This keeps the mobile frontend lighter and makes the homepage easier to reason about during Lighthouse testing.
 
+### Cloudflare cache HIT rate tuning
+
+Issue #7 focuses on increasing the number of public requests served directly by Cloudflare cache.
+
+The web app now sends explicit cache headers for the public reader routes:
+
+```text
+/
+/about
+/articles/*
+/api/articles
+/opengraph-image
+/articles/*/opengraph-image
+/robots.txt
+/sitemap.xml
+```
+
+Public routes include these cache signals:
+
+```text
+Cache-Control: public, max-age=60, s-maxage=300, stale-while-revalidate=3600
+CDN-Cache-Control: public, max-age=300, stale-while-revalidate=3600
+Cloudflare-CDN-Cache-Control: public, max-age=300, stale-while-revalidate=3600
+Vercel-CDN-Cache-Control: public, max-age=300, stale-while-revalidate=3600
+X-NutsNews-Cache-Issue: 7
+```
+
+Routes that should never be cached now send explicit bypass headers:
+
+```text
+/admin/*
+/api/auth/*
+/api/log-test
+/monitoring
+```
+
+This protects admin pages, Auth.js routes, Better Stack log testing, and the Sentry tunnel from being cached while keeping public reader pages cache eligible.
+
+
+### Middleware cache header enforcement
+
+Next.js/Vercel can still return `private, no-cache, no-store, max-age=0, must-revalidate` for dynamic server-rendered pages even when route headers are configured in `next.config.ts`.
+
+To keep issue #7 enforceable at the edge, NutsNews now includes:
+
+```text
+web/middleware.ts
+```
+
+The middleware applies the same public cache headers to reader routes and no-store headers to private or operational routes before the response leaves the app. This gives Cloudflare a cacheable origin response for homepage and article page requests while keeping admin, auth, log-test, and monitoring routes uncached.
+
+### Recommended Cloudflare Cache Rules
+
+Cloudflare does not cache HTML or JSON by default, so NutsNews still needs Cloudflare Cache Rules for the homepage and article API to become cache eligible at the edge.
+
+Create the bypass rule first, above the cache-eligible rule.
+
+#### Rule 1: bypass private and operational routes
+
+Expression:
+
+```text
+(http.host eq "www.nutsnews.com" and (
+  starts_with(http.request.uri.path, "/admin") or
+  starts_with(http.request.uri.path, "/api/auth") or
+  starts_with(http.request.uri.path, "/api/log-test") or
+  starts_with(http.request.uri.path, "/monitoring")
+))
+```
+
+Settings:
+
+```text
+Cache eligibility: Bypass cache
+```
+
+#### Rule 2: cache public reader routes
+
+Expression:
+
+```text
+(http.host eq "www.nutsnews.com" and (
+  http.request.uri.path eq "/" or
+  http.request.uri.path eq "/about" or
+  http.request.uri.path eq "/api/articles" or
+  starts_with(http.request.uri.path, "/articles/") or
+  http.request.uri.path eq "/opengraph-image" or
+  http.request.uri.path eq "/robots.txt" or
+  http.request.uri.path eq "/sitemap.xml"
+))
+```
+
+Settings:
+
+```text
+Cache eligibility: Eligible for cache
+Edge TTL: Use cache-control header if present
+Browser TTL: Respect existing headers
+Cache key: Standard cache key, including query string
+```
+
+Keeping the query string in the cache key matters because these URLs must remain separate cache objects:
+
+```text
+/api/articles?page=0
+/api/articles?page=1
+/api/articles?category=Science&page=0
+/?category=Community&page=1
+```
+
+### Cloudflare cache validation commands
+
+A validation script is included at:
+
+```text
+scripts/validate_cloudflare_cache_hit_rate.sh
+```
+
+Run it after deploying and creating the Cloudflare cache rules:
+
+```bash
+./scripts/validate_cloudflare_cache_hit_rate.sh https://www.nutsnews.com
+```
+
+To validate an article page too, pass an article path:
+
+```bash
+./scripts/validate_cloudflare_cache_hit_rate.sh https://www.nutsnews.com /articles/<article-id>
+```
+
+Manual curl checks:
+
+```bash
+curl -sI "https://www.nutsnews.com/" | grep -iE "cf-cache-status|age|cache-control|cdn-cache-control|x-nutsnews-cache"
+curl -sI "https://www.nutsnews.com/" | grep -iE "cf-cache-status|age|cache-control|cdn-cache-control|x-nutsnews-cache"
+
+curl -sI "https://www.nutsnews.com/api/articles?page=0" | grep -iE "cf-cache-status|age|cache-control|cdn-cache-control|x-nutsnews-cache"
+curl -sI "https://www.nutsnews.com/api/articles?page=0" | grep -iE "cf-cache-status|age|cache-control|cdn-cache-control|x-nutsnews-cache"
+
+curl -sI "https://www.nutsnews.com/api/log-test" | grep -iE "cf-cache-status|cache-control|cdn-cache-control|x-nutsnews-cache"
+```
+
+Expected behavior:
+
+* The first public request may show `MISS`, `BYPASS`, or `EXPIRED` while Cloudflare fills or revalidates the cache.
+* Repeated public requests should move toward `cf-cache-status: HIT` once the Cloudflare rule is active.
+* `/api/log-test`, `/api/auth/*`, `/admin/*`, and `/monitoring` should remain bypassed or uncached.
+
 ### Cloudflare CDN
 
 Cloudflare sits in front of the public site and caches eligible public pages and API responses.
@@ -1648,6 +1796,10 @@ NutsNews currently includes:
 * Clear Supabase save failure logging
 * Controller Worker orchestration
 * Cloudflare CDN caching
+* Cloudflare cache-rule guidance and curl validation script for cache HIT checks
+* Explicit no-store headers for admin, auth, log-test, and Sentry monitoring routes
+* Explicit public cache headers for homepage, article pages, article API, Open Graph images, robots, and sitemap
+* Middleware-enforced cache headers for public reader pages that Vercel may otherwise mark no-store
 * Better Stack uptime monitoring
 * Better Stack centralized structured logs
 * Sentry error monitoring
