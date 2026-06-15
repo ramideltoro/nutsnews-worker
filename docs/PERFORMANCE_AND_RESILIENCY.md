@@ -12,20 +12,17 @@ The public homepage is intentionally kept lightweight.
 
 It uses:
 
-* Server-rendered article cards
-* Server-rendered category links
-* URL-based category filtering
-* URL-based older/newer pagination
-* Native HTML disclosure behavior for the filter menu
-* No homepage infinite-scroll client state
+* Server-rendered first page for fast initial paint
+* Client-side automatic scroll loading for older stories
+* Cursor pagination through `/api/articles`
+* No manual older/newer pagination buttons
+* No homepage filter section
 * No extra frontend libraries for the public feed
 
-Examples:
+Example:
 
 ```text
 /
-/?category=Science
-/?category=Community&page=1
 ```
 
 ---
@@ -124,12 +121,14 @@ Page size:
 PAGE_SIZE = 5
 ```
 
-The API supports offset pagination and optional cursor pagination:
+The homepage uses cursor pagination for automatic scroll loading:
 
 ```text
 /api/articles?page=0
 /api/articles?cursor=<nextCursor>
 ```
+
+Offset pagination remains available for compatibility, but the public homepage no longer shows manual older/newer buttons.
 
 ---
 

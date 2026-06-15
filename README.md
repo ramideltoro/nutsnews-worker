@@ -77,7 +77,7 @@ nutsnews/
 
 NutsNews currently includes:
 
-* Mobile-first public article feed
+* Mobile-first public article feed with automatic scroll loading
 * RSS-based content discovery
 * AI-assisted article filtering and summaries
 * Thumbnail quality controls
