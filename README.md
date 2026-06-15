@@ -231,6 +231,7 @@ This gives NutsNews a safer foundation for future operational controls such as:
 * AI usage monitoring
 * Worker shard monitoring
 * RSS feed management
+* RSS feed health tracking
 * Article review tools
 * Backup status
 * Manual refresh controls
@@ -251,6 +252,7 @@ It lives at:
 /admin/ai-usage
 /admin/shards
 /admin/feed-health
+/admin/feeds
 ```
 
 The goal of this dashboard is to make OpenAI usage visible and reduce the risk of surprise AI spend.
@@ -403,6 +405,7 @@ NutsNews now tracks RSS feed quality over time in Supabase and exposes it throug
 
 ```text
 /admin/feed-health
+/admin/feeds
 ```
 
 This feature is designed for source quality management. The platform can now show which feeds are reliable, which feeds repeatedly fail, which feeds produce thumbnails, which feeds produce accepted articles, and which feeds should be disabled.
@@ -460,6 +463,7 @@ Dashboard route:
 
 ```text
 /admin/feed-health
+/admin/feeds
 ```
 
 ### Supabase views
@@ -501,6 +505,63 @@ where url in (
 ```
 
 This satisfies the RSS quality workflow: observe feed health, identify weak feeds, disable bad sources, and prioritize sources that actually produce usable uplifting stories.
+
+
+---
+
+## Feed Management Admin Dashboard
+
+NutsNews now includes a separate protected feed management dashboard at:
+
+```text
+/admin/feeds
+```
+
+This dashboard is focused on RSS source operations rather than read-only health analytics.
+
+It helps operators manage feed quality by showing:
+
+* Every RSS feed from `rss_feeds`
+* Active and inactive status
+* Positive-source flag
+* Current health status
+* Last checked time
+* Last HTTP status
+* Latest error message
+* Total fetch count
+* Total accepted count
+* Total rejected count
+* Image coverage
+* Consecutive failure count
+* Feeds recommended for disabling
+* Currently disabled feeds
+
+The dashboard includes safe enable and disable controls. These controls update:
+
+```sql
+public.rss_feeds.is_active
+```
+
+The Worker already loads feeds with:
+
+```sql
+where is_active = true
+```
+
+That means feeds can be enabled or disabled from the admin dashboard without a Worker code change or redeploy.
+
+### Dashboard separation
+
+NutsNews now has two source-related admin dashboards:
+
+```text
+/admin/feed-health
+/admin/feeds
+```
+
+`/admin/feed-health` is the analytics view for feed quality and long-term source performance.
+
+`/admin/feeds` is the management view for listing feeds and safely enabling or disabling them.
 
 ---
 
@@ -813,6 +874,7 @@ Example:
 /admin/ai-usage
 /admin/shards
 /admin/feed-health
+/admin/feeds
 ```
 
 Future dashboards can follow the same structure.
@@ -895,6 +957,7 @@ The admin portal creates a foundation for future dashboards such as:
 
 * Worker shard health
 * RSS feed health dashboard
+* Feed management dashboard
 * Article review activity
 * Source quality scoring
 * Backup status
@@ -1400,6 +1463,7 @@ Future possibilities include:
 * Multi-language summaries
 * Editorial review dashboard
 * Feed health dashboard with Supabase disable actions
+* Feed management dashboard with safe enable and disable controls
 * Worker shard health dashboard
 * Source scoring
 * Automated cache purging
