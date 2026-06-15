@@ -2,7 +2,7 @@
 
 This folder contains the long-form GitHub documentation for NutsNews.
 
-The root `README.md` is now intentionally short. It acts as the project landing page. Detailed product, architecture, operations, observability, performance, and troubleshooting documentation lives here.
+The root `README.md` is intentionally short. It acts as the project landing page. Detailed product, architecture, operations, observability, performance, recovery, and troubleshooting documentation lives here.
 
 ---
 
@@ -17,6 +17,7 @@ The root `README.md` is now intentionally short. It acts as the project landing 
 | [Controller and Shards](CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, pagination, database indexes, Worker sharding, failure handling, and cost controls |
 | [Observability](OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, monitoring, and health checks |
+| [Supabase Restore Procedure](SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](TROUBLESHOOTING.md) | Common production problems and how to diagnose them from one place |
 
 ---
@@ -32,6 +33,7 @@ Use the docs like this:
 * Use `CONTROLLER_AND_SHARDS.md` when manually testing the controller or individual Worker shards.
 * Use `PERFORMANCE_AND_RESILIENCY.md` when improving speed, cache HIT rate, database performance, Worker throughput, or reliability.
 * Use `OBSERVABILITY.md` when debugging logs, dashboards, monitoring, or errors.
+* Use `SUPABASE_RESTORE.md` when recovering from a bad deploy, accidental delete, hacked data, broken migration, or database crash.
 * Use `TROUBLESHOOTING.md` when something is broken in production.
 
 ---

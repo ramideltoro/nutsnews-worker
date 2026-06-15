@@ -204,6 +204,53 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
 
 ---
 
+## Supabase Backup and Restore
+
+The full restore runbook lives in:
+
+```text
+docs/SUPABASE_RESTORE.md
+```
+
+Use that guide when recovering from:
+
+* Bad deploy
+* Broken migration
+* Accidental delete
+* Corrupt data
+* Hacked data
+* Production database crash
+
+The restore process is:
+
+1. Pause database writers.
+2. Choose the backup.
+3. Restore into a temporary Supabase database first.
+4. Run validation queries.
+5. Test the app or Worker against the temporary database.
+6. Restore production only after the temporary restore passes.
+7. Re-enable Workers and monitoring.
+
+Restore validation SQL lives in:
+
+```text
+supabase/restore_validation.sql
+```
+
+Validation helper:
+
+```bash
+RESTORE_DATABASE_URL="postgresql://..." ./scripts/validate_supabase_restore.sh
+```
+
+If validating a dump file before running SQL validation:
+
+```bash
+RESTORE_DATABASE_URL="postgresql://..." ./scripts/validate_supabase_restore.sh backups/supabase/latest/nutsnews.dump
+```
+
+---
+
 ## Environment Variables
 
 ### Web / Vercel
@@ -266,6 +313,8 @@ NutsNews is maintained by keeping each system boundary clear:
 * Logs are structured.
 * Public routes are cacheable.
 * Admin routes are protected.
+* Restore instructions and validation SQL live in the repo.
+* Actual database backup files stay outside Git.
 * Docs live in `docs/`.
 
 ---
@@ -312,6 +361,12 @@ limit 25;
 select *
 from public.bad_feeds
 limit 25;
+```
+
+### Validate a restored Supabase database
+
+```bash
+RESTORE_DATABASE_URL="postgresql://..." ./scripts/validate_supabase_restore.sh
 ```
 
 ---

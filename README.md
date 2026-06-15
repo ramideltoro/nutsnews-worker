@@ -22,6 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Observability | Better Stack logs and uptime, Sentry errors, admin health dashboards |
+| Recovery | Documented Supabase restore runbook with validation SQL |
 | Cost model | Built around free-tier cloud services with OpenAI as the main variable cost |
 
 ---
@@ -36,9 +37,11 @@ The full project documentation lives in [`docs/`](docs/).
 | [Project Overview](docs/PROJECT.md) | Product story, mission, reader experience, and benefits |
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
+| [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
+| [Supabase Restore Procedure](docs/SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](docs/TROUBLESHOOTING.md) | Diagnose common production problems from one document |
 
 ---
@@ -50,7 +53,7 @@ nutsnews/
 ├── web/          # Next.js public site and admin portal
 ├── worker/       # Cloudflare Worker RSS ingestion engine
 ├── controller/   # Cloudflare Worker shard controller
-├── supabase/     # Supabase migrations and database configuration
+├── supabase/     # Supabase migrations, restore validation SQL, and database configuration
 ├── docs/         # GitHub documentation
 ├── scripts/      # Project utility scripts
 ├── README.md     # Short project entry point
@@ -69,6 +72,7 @@ nutsnews/
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
+| Supabase restore runbook | [docs/SUPABASE_RESTORE.md](docs/SUPABASE_RESTORE.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 
 ---
@@ -97,6 +101,7 @@ NutsNews currently includes:
 * Controller and shard operations guide for issue #37
 * Worker article recovery improvements for no-thumbnail retries and image hydration
 * Truncated failed-feed error previews for cleaner Worker and controller responses
+* Supabase restore runbook, restore validation SQL, and restore verification helper script
 * MIT license
 
 ---

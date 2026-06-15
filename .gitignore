@@ -19,8 +19,15 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# local backups and database exports
+backups/
+*.backup
+*.dump
+*.sql.gz
+*.tar.gz
+
 # Supabase local files
 supabase/.branches
-supabase/.tempq
+supabase/.temp/
 
 worker/.dev.vars
