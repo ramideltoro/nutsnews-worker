@@ -20,6 +20,7 @@ Current admin routes:
 /admin
 /admin/articles
 /admin/ai-usage
+/admin/local-ai
 /admin/shards
 /admin/feed-health
 /admin/feeds
@@ -50,6 +51,8 @@ Purpose:
 * Link to the original article
 * Link to the published NutsNews story when available
 * Support manual investigation of bad AI decisions
+* Show whether OpenAI, local AI, or local rules processed each article
+* Show the exact AI model name saved with the article review
 
 Detailed guide:
 
@@ -75,6 +78,30 @@ Purpose:
 * Track accepted/rejected reviews
 * Track cost protection hits
 * Track spike warnings
+
+### Local AI Dashboard
+
+Route:
+
+```text
+/admin/local-ai
+```
+
+Purpose:
+
+* Track Oracle-hosted local AI calls
+* Track qwen/Ollama model usage
+* Track local accepted/rejected decisions
+* Track local review latency
+* Track OpenAI fallback calls while local AI mode is enabled
+* Show recent local AI article decisions
+* Compare model-level quality signals while testing new local models
+
+Detailed guide:
+
+```text
+docs/ORACLE_LOCAL_AI.md
+```
 
 ### Worker Shard Health Dashboard
 
@@ -363,6 +390,12 @@ ADMIN_EMAIL
 SUPABASE_URL
 SUPABASE_SERVICE_ROLE_KEY
 OPENAI_API_KEY
+AI_PROVIDER
+LOCAL_AI_URL
+LOCAL_AI_MODEL
+LOCAL_AI_API_KEY
+AI_PROVIDER_FALLBACK_TO_OPENAI
+AI_REVIEW_CONCURRENCY
 BETTER_STACK_SOURCE_TOKEN
 BETTER_STACK_INGESTING_HOST
 SENTRY_DSN

@@ -1,0 +1,13 @@
+{
+  "name": "nutsnews-local-ai-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "health": "node -e \"fetch(process.env.LOCAL_AI_HEALTH_URL || 'http://127.0.0.1:8788/health').then(r=>r.text()).then(console.log)\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

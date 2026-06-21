@@ -13,7 +13,9 @@ Cloudflare Worker Shards
   ↓
 Local Filtering
   ↓
-OpenAI Review
+AI Review Provider
+  ├── OpenAI
+  └── Oracle Local AI Service → Ollama/qwen
   ↓
 Supabase Postgres
   ↓
@@ -101,6 +103,7 @@ Important routes:
 /admin
 /admin/articles
 /admin/ai-usage
+/admin/local-ai
 /admin/shards
 /admin/feed-health
 /admin/feeds
@@ -111,7 +114,20 @@ Important routes:
 
 The automated ingestion engine.
 
-It fetches RSS feeds, parses articles, applies local filters, calls OpenAI for review, stores accepted articles, stores rejected review history, saves Worker run records, saves AI usage, saves feed health, and logs structured activity.
+It fetches RSS feeds, parses articles, applies local filters, calls the configured AI review provider, stores accepted articles, stores rejected review history, saves Worker run records, saves AI usage, saves feed health, and logs structured activity. The configured provider can be OpenAI or the Oracle-hosted local AI service.
+
+### `local-ai-service`
+
+The optional Oracle-hosted AI endpoint.
+
+It exposes:
+
+```text
+GET /health
+POST /review
+```
+
+The service runs on Node, calls Ollama on localhost, and returns the same JSON review shape as the OpenAI path. The Worker protects the endpoint with `x-nutsnews-ai-key` and records the provider/model for each reviewed article.
 
 ### `controller`
 
@@ -154,6 +170,11 @@ nutsnews/
 │   ├── src/
 │   ├── wrangler.jsonc
 │   └── package.json
+│
+├── local-ai-service/
+│   ├── server.mjs
+│   ├── package.json
+│   └── .env.example
 │
 ├── supabase/
 │   └── migrations/

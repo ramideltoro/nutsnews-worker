@@ -18,7 +18,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Automation | Cloudflare Worker shards fetch and process RSS feeds |
 | Controller | Controller Worker coordinates shard execution |
 | Database | Supabase Postgres stores articles, feeds, review history, and operational data |
-| AI | OpenAI classifies, scores, and summarizes candidate stories |
+| AI | OpenAI or Oracle-hosted local AI classifies, scores, and summarizes candidate stories |
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
@@ -26,7 +26,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Documented Supabase restore runbook with validation SQL |
-| Cost model | Built around free-tier cloud services with OpenAI as the main variable cost |
+| Cost model | Built around free-tier cloud services, local AI support, and optional OpenAI fallback |
 
 ---
 
@@ -40,8 +40,9 @@ The full project documentation lives in [`docs/`](docs/).
 | [Project Overview](docs/PROJECT.md) | Product story, mission, reader experience, and benefits |
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
-| [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, and investigation workflow |
+| [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, provider/model tracking, and investigation workflow |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
+| [Oracle Local AI](docs/ORACLE_LOCAL_AI.md) | Oracle Free Tier, Ollama/qwen local AI service, Worker config, monitoring, and rollback |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
@@ -60,6 +61,7 @@ nutsnews/
 ├── web/          # Next.js public site and admin portal
 ├── worker/       # Cloudflare Worker RSS ingestion engine
 ├── controller/   # Cloudflare Worker shard controller
+├── local-ai-service/ # Oracle/Ollama local AI review endpoint
 ├── supabase/     # Supabase migrations, restore validation SQL, and database configuration
 ├── docs/         # GitHub documentation
 ├── scripts/      # Project utility scripts
@@ -77,6 +79,7 @@ nutsnews/
 | Admin portal | `/admin` |
 | Article review dashboard | `/admin/articles` |
 | AI usage dashboard | `/admin/ai-usage` |
+| Local AI dashboard | `/admin/local-ai` |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
@@ -95,6 +98,7 @@ NutsNews currently includes:
 * Mobile-first public article feed with automatic scroll loading
 * RSS-based content discovery
 * AI-assisted article filtering and summaries
+* Oracle-hosted local AI provider support with qwen/Ollama and optional OpenAI fallback
 * Thumbnail quality controls
 * Supabase article, feed, review, AI usage, Worker run, and feed health tables
 * Cloudflare Worker sharding
@@ -104,8 +108,9 @@ NutsNews currently includes:
 * Better Stack uptime monitoring and centralized logs
 * Sentry error monitoring
 * Google-protected admin portal
-* Article review dashboard for accepted/rejected story decisions
+* Article review dashboard for accepted/rejected story decisions with AI provider/model visibility
 * AI usage dashboard
+* Local AI dashboard for Oracle/Ollama model activity, fallback usage, latency, and recent decisions
 * Worker shard health dashboard
 * RSS feed health and feed management dashboards
 * RSS source quality scoring with 0-100 feed rankings

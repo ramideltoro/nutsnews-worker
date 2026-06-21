@@ -27,6 +27,8 @@ The article review dashboard helps operators answer:
 * What category and positivity score did the AI assign?
 * Was an accepted story published to the public site?
 * Which decisions need manual investigation?
+* Which AI provider processed the article: OpenAI, local AI, local prefilter, or no-thumbnail rule?
+* Which model processed the article, such as `gpt-4o-mini` or `qwen2.5:3b`?
 
 ---
 
@@ -89,11 +91,14 @@ Each review card shows:
 
 * Decision badge
 * Positivity score
+* AI provider badge
+* AI model badge
 * Published/not published badge
 * Title
 * Source
 * Category
 * Review time
+* Review duration
 * AI summary
 * Decision reason
 * Original article link
@@ -130,6 +135,9 @@ select
   source,
   category,
   positivity_score,
+  ai_provider,
+  ai_model,
+  review_duration_ms,
   title,
   reason,
   original_url
@@ -146,6 +154,9 @@ select
   source,
   category,
   positivity_score,
+  ai_provider,
+  ai_model,
+  review_duration_ms,
   title,
   reason,
   original_url
@@ -163,6 +174,9 @@ select
   source,
   category,
   positivity_score,
+  ai_provider,
+  ai_model,
+  review_duration_ms,
   title,
   summary,
   original_url

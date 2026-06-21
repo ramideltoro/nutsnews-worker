@@ -6,10 +6,20 @@ type SecretBinding = {
 
 type MaybeSecretBinding = string | SecretBinding | undefined;
 
+type AiProvider = 'openai' | 'local';
+
+type ReviewProvider = AiProvider | 'prefilter' | 'no_thumbnail';
+
 type Env = {
 	SUPABASE_URL: MaybeSecretBinding;
 	SUPABASE_SERVICE_ROLE_KEY: MaybeSecretBinding;
 	OPENAI_API_KEY: MaybeSecretBinding;
+	AI_PROVIDER?: string;
+	LOCAL_AI_URL?: MaybeSecretBinding;
+	LOCAL_AI_API_KEY?: MaybeSecretBinding;
+	LOCAL_AI_MODEL?: string;
+	AI_PROVIDER_FALLBACK_TO_OPENAI?: string;
+	AI_REVIEW_CONCURRENCY?: string;
 	FEED_SHARD_INDEX?: string;
 	FEEDS_PER_SHARD?: string;
 	BETTER_STACK_SOURCE_TOKEN?: MaybeSecretBinding;
@@ -26,6 +36,12 @@ type RuntimeConfig = {
 	supabaseUrl: string;
 	supabaseServiceRoleKey: string;
 	openAiApiKey: string;
+	aiProvider: AiProvider;
+	localAiUrl: string;
+	localAiApiKey: string;
+	localAiModel: string;
+	aiProviderFallbackToOpenAi: boolean;
+	aiReviewConcurrency: number;
 	openAiInputCostPer1MTokens: number;
 	openAiOutputCostPer1MTokens: number;
 	aiCostAlertRunUsd: number;
@@ -146,6 +162,9 @@ type ArticleReviewInsert = {
 	positivity_score: number;
 	summary: string;
 	reason: string;
+	ai_provider: ReviewProvider;
+	ai_model: string;
+	review_duration_ms: number;
 	reviewed_at: string;
 };
 
@@ -160,6 +179,8 @@ type ArticleInsert = {
 	ai_summary: string;
 	category: string;
 	positivity_score: number;
+	ai_provider: ReviewProvider;
+	ai_model: string;
 	status: 'published';
 };
 
@@ -180,7 +201,9 @@ type AiClassificationResult = {
 	aiDecision: AiArticleDecision;
 	usage: OpenAiUsage;
 	estimatedCostUsd: number;
-	openAiModel: string;
+	aiProvider: AiProvider;
+	aiModel: string;
+	durationMs: number;
 };
 
 type ReviewedArticleResult = {
@@ -188,8 +211,9 @@ type ReviewedArticleResult = {
 	aiDecision: AiArticleDecision;
 	usage?: OpenAiUsage;
 	estimatedCostUsd?: number;
-	openAiModel?: string;
-	reviewSource?: 'openai' | 'local';
+	aiProvider?: ReviewProvider;
+	aiModel?: string;
+	reviewDurationMs?: number;
 };
 
 type ImageHydrationResult = {
@@ -213,6 +237,15 @@ type AiUsageRunInsert = {
 	unreviewed_count: number;
 	eligible_for_ai_count: number;
 	ai_reviewed_count: number;
+	ai_provider: AiProvider;
+	local_ai_model: string;
+	local_ai_call_count: number;
+	local_ai_prompt_tokens: number;
+	local_ai_completion_tokens: number;
+	local_ai_total_tokens: number;
+	local_ai_accepted_count: number;
+	local_ai_rejected_count: number;
+	local_ai_duration_ms: number;
 	openai_model: string;
 	openai_call_count: number;
 	openai_prompt_tokens: number;
@@ -291,6 +324,15 @@ type RefreshResult = {
 	locallyRejectedCount: number;
 	eligibleForAiCount: number;
 	aiReviewedCount: number;
+	aiProvider: AiProvider;
+	localAiModel: string;
+	localAiCallCount: number;
+	localAiPromptTokens: number;
+	localAiCompletionTokens: number;
+	localAiTotalTokens: number;
+	localAiAcceptedCount: number;
+	localAiRejectedCount: number;
+	localAiDurationMs: number;
 	acceptedCount: number;
 	rejectedCount: number;
 	reviewSaveOk: boolean;
@@ -329,6 +371,8 @@ const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
 const TRUNCATED_TEXT_SUFFIX = '... [truncated]';
 
 const OPENAI_MODEL = 'gpt-4o-mini';
+const DEFAULT_LOCAL_AI_MODEL = 'qwen2.5:3b';
+const DEFAULT_LOCAL_AI_TIMEOUT_MS = 120000;
 const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
 const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
@@ -643,18 +687,27 @@ function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
 	};
 }
 
-function buildAiClassificationResult(aiDecision: AiArticleDecision, usage: OpenAiUsage, config: RuntimeConfig): AiClassificationResult {
+function buildAiClassificationResult(
+	aiDecision: AiArticleDecision,
+	usage: OpenAiUsage,
+	config: RuntimeConfig,
+	aiProvider: AiProvider,
+	aiModel: string,
+	durationMs: number,
+): AiClassificationResult {
 	return {
 		aiDecision,
 		usage,
-		estimatedCostUsd: estimateOpenAiCost(usage, config),
-		openAiModel: OPENAI_MODEL,
+		estimatedCostUsd: aiProvider === 'openai' ? estimateOpenAiCost(usage, config) : 0,
+		aiProvider,
+		aiModel,
+		durationMs,
 	};
 }
 
-function sumOpenAiUsage(reviewedArticles: ReviewedArticleResult[]) {
+function sumProviderUsage(reviewedArticles: ReviewedArticleResult[], provider: AiProvider) {
 	return reviewedArticles.reduce((total, reviewedArticle) => {
-		if (!reviewedArticle.usage) {
+		if (reviewedArticle.aiProvider !== provider || !reviewedArticle.usage) {
 			return total;
 		}
 
@@ -666,6 +719,24 @@ function sumOpenAiUsage(reviewedArticles: ReviewedArticleResult[]) {
 	}, emptyOpenAiUsage());
 }
 
+function sumOpenAiUsage(reviewedArticles: ReviewedArticleResult[]) {
+	return sumProviderUsage(reviewedArticles, 'openai');
+}
+
+function sumLocalAiUsage(reviewedArticles: ReviewedArticleResult[]) {
+	return sumProviderUsage(reviewedArticles, 'local');
+}
+
+function sumReviewDuration(reviewedArticles: ReviewedArticleResult[], provider: AiProvider) {
+	return reviewedArticles.reduce((total, reviewedArticle) => {
+		if (reviewedArticle.aiProvider !== provider) {
+			return total;
+		}
+
+		return total + (reviewedArticle.reviewDurationMs ?? 0);
+	}, 0);
+}
+
 function shouldTriggerOpenAiUsageWarning(run: AiUsageRunInsert, config: RuntimeConfig) {
 	return (
 		run.cost_protection_limit_reached ||
@@ -675,10 +746,38 @@ function shouldTriggerOpenAiUsageWarning(run: AiUsageRunInsert, config: RuntimeC
 	);
 }
 
+function getAiProvider(value: string | undefined): AiProvider {
+	return value?.toLowerCase() === 'local' ? 'local' : 'openai';
+}
+
+function getBooleanConfig(value: string | undefined, fallback = false) {
+	if (!value) {
+		return fallback;
+	}
+
+	return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+function getAiReviewConcurrency(value: string | undefined, provider: AiProvider) {
+	const fallback = provider === 'local' ? 1 : AI_REVIEW_CONCURRENCY;
+	const parsed = Number(value ?? '');
+
+	if (!Number.isFinite(parsed) || parsed < 1) {
+		return fallback;
+	}
+
+	return Math.max(1, Math.min(Math.floor(parsed), AI_REVIEW_CONCURRENCY));
+}
+
 async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
 	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
 	const openAiApiKey = await resolveValue(env.OPENAI_API_KEY);
+	const aiProvider = getAiProvider(env.AI_PROVIDER);
+	const localAiUrl = await resolveValue(env.LOCAL_AI_URL);
+	const localAiApiKey = await resolveValue(env.LOCAL_AI_API_KEY);
+	const localAiModel = env.LOCAL_AI_MODEL?.trim() || DEFAULT_LOCAL_AI_MODEL;
+	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, false);
 
 	if (!supabaseUrl) {
 		throw new Error('Missing SUPABASE_URL secret.');
@@ -688,14 +787,28 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY secret.');
 	}
 
-	if (!openAiApiKey) {
+	if (aiProvider === 'openai' && !openAiApiKey) {
 		throw new Error('Missing OPENAI_API_KEY secret.');
+	}
+
+	if (aiProvider === 'local' && !localAiUrl) {
+		throw new Error('Missing LOCAL_AI_URL secret or environment variable.');
+	}
+
+	if (aiProvider === 'local' && !localAiApiKey) {
+		throw new Error('Missing LOCAL_AI_API_KEY secret or environment variable.');
 	}
 
 	return {
 		supabaseUrl,
 		supabaseServiceRoleKey,
 		openAiApiKey,
+		aiProvider,
+		localAiUrl: localAiUrl.replace(/\/+$/, ''),
+		localAiApiKey,
+		localAiModel,
+		aiProviderFallbackToOpenAi: aiProviderFallbackToOpenAi && Boolean(openAiApiKey),
+		aiReviewConcurrency: getAiReviewConcurrency(env.AI_REVIEW_CONCURRENCY, aiProvider),
 		openAiInputCostPer1MTokens: getOptionalNumber(env.OPENAI_INPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS),
 		openAiOutputCostPer1MTokens: getOptionalNumber(env.OPENAI_OUTPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS),
 		aiCostAlertRunUsd: getOptionalNumber(env.AI_COST_ALERT_RUN_USD, DEFAULT_AI_COST_ALERT_RUN_USD),
@@ -1624,6 +1737,8 @@ function buildRejectedArticles(
 	articles: RssArticle[],
 	baseDecision: AiArticleDecision,
 	reasonBuilder: (article: RssArticle) => string,
+	aiProvider: ReviewProvider,
+	aiModel: string,
 ): ReviewedArticleResult[] {
 	return articles.map((article) => ({
 		article,
@@ -1631,7 +1746,9 @@ function buildRejectedArticles(
 			...baseDecision,
 			reason: reasonBuilder(article),
 		},
-		reviewSource: 'local',
+		aiProvider,
+		aiModel,
+		reviewDurationMs: 0,
 	}));
 }
 
@@ -2047,7 +2164,7 @@ function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecisi
 		category: value.category || 'Uplifting',
 		positivity_score: typeof value.positivity_score === 'number' ? value.positivity_score : 0,
 		summary: value.summary || '',
-		reason: value.reason || 'No reason provided by OpenAI.',
+		reason: value.reason || 'No reason provided by AI provider.',
 	};
 }
 
@@ -2055,6 +2172,9 @@ function buildRejectedAiClassificationResult(
 	config: RuntimeConfig,
 	reason: string,
 	usage: OpenAiUsage = emptyOpenAiUsage(),
+	aiProvider: AiProvider = config.aiProvider,
+	aiModel = aiProvider === 'local' ? config.localAiModel : OPENAI_MODEL,
+	durationMs = 0,
 ): AiClassificationResult {
 	return buildAiClassificationResult(
 		{
@@ -2066,6 +2186,9 @@ function buildRejectedAiClassificationResult(
 		},
 		usage,
 		config,
+		aiProvider,
+		aiModel,
+		durationMs,
 	);
 }
 
@@ -2118,7 +2241,14 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(config, `OpenAI request exception: ${getErrorMessage(error)}`);
+		return buildRejectedAiClassificationResult(
+			config,
+			`OpenAI request exception: ${getErrorMessage(error)}`,
+			emptyOpenAiUsage(),
+			'openai',
+			OPENAI_MODEL,
+			Date.now() - startedAt,
+		);
 	}
 
 	if (!response.ok) {
@@ -2133,7 +2263,14 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(config, `OpenAI request failed: ${response.status}`);
+		return buildRejectedAiClassificationResult(
+			config,
+			`OpenAI request failed: ${response.status}`,
+			emptyOpenAiUsage(),
+			'openai',
+			OPENAI_MODEL,
+			Date.now() - startedAt,
+		);
 	}
 
 	const jsonResult = await readResponseJsonSafely<{
@@ -2153,7 +2290,14 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(config, 'OpenAI response JSON parse failed');
+		return buildRejectedAiClassificationResult(
+			config,
+			'OpenAI response JSON parse failed',
+			emptyOpenAiUsage(),
+			'openai',
+			OPENAI_MODEL,
+			Date.now() - startedAt,
+		);
 	}
 
 	const data = jsonResult.value;
@@ -2171,7 +2315,14 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(config, 'OpenAI returned empty content', usage);
+		return buildRejectedAiClassificationResult(
+			config,
+			'OpenAI returned empty content',
+			usage,
+			'openai',
+			OPENAI_MODEL,
+			Date.now() - startedAt,
+		);
 	}
 
 	try {
@@ -2193,7 +2344,7 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildAiClassificationResult(parsedDecision, usage, config);
+		return buildAiClassificationResult(parsedDecision, usage, config, 'openai', OPENAI_MODEL, Date.now() - startedAt);
 	} catch (error) {
 		await logError(env, 'worker.openai.invalid_json', 'OpenAI returned invalid JSON', error, {
 			source: article.source,
@@ -2206,8 +2357,176 @@ Return JSON exactly like this:
 			durationMs: Date.now() - startedAt,
 		});
 
-		return buildRejectedAiClassificationResult(config, 'OpenAI returned invalid JSON', usage);
+		return buildRejectedAiClassificationResult(
+			config,
+			'OpenAI returned invalid JSON',
+			usage,
+			'openai',
+			OPENAI_MODEL,
+			Date.now() - startedAt,
+		);
 	}
+}
+
+type LocalAiReviewResponse = Partial<AiArticleDecision> & {
+	model?: string;
+	ai_model?: string;
+	prompt_tokens?: number;
+	completion_tokens?: number;
+	total_tokens?: number;
+	duration_ms?: number;
+};
+
+function getLocalAiReviewUrl(config: RuntimeConfig) {
+	return `${config.localAiUrl}/review`;
+}
+
+async function classifyAndSummarizeArticleWithLocalAi(
+	env: Env,
+	config: RuntimeConfig,
+	article: RssArticle,
+): Promise<AiClassificationResult> {
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch(getLocalAiReviewUrl(config), {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-nutsnews-ai-key': config.localAiApiKey,
+			},
+			body: JSON.stringify({
+				model: config.localAiModel,
+				source: article.source,
+				title: article.title,
+				excerpt: article.excerpt,
+				url: article.url,
+			}),
+		});
+	} catch (error) {
+		await logError(env, 'worker.local_ai.request_exception', 'Local AI request threw an exception', error, {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			localAiUrl: config.localAiUrl,
+			durationMs: Date.now() - startedAt,
+		});
+
+		if (config.aiProviderFallbackToOpenAi) {
+			await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI request exception', {
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+			});
+
+			return classifyAndSummarizeArticle(env, config, article);
+		}
+
+		return buildRejectedAiClassificationResult(
+			config,
+			`Local AI request exception: ${getErrorMessage(error)}`,
+			emptyOpenAiUsage(),
+			'local',
+			config.localAiModel,
+			Date.now() - startedAt,
+		);
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+
+		await logWarn(env, 'worker.local_ai.request_failed', 'Local AI request failed', {
+			status: response.status,
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			errorText,
+			durationMs: Date.now() - startedAt,
+		});
+
+		if (config.aiProviderFallbackToOpenAi) {
+			await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI request failure', {
+				status: response.status,
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+			});
+
+			return classifyAndSummarizeArticle(env, config, article);
+		}
+
+		return buildRejectedAiClassificationResult(
+			config,
+			`Local AI request failed: ${response.status}`,
+			emptyOpenAiUsage(),
+			'local',
+			config.localAiModel,
+			Date.now() - startedAt,
+		);
+	}
+
+	const jsonResult = await readResponseJsonSafely<LocalAiReviewResponse>(response);
+
+	if (!jsonResult.ok) {
+		await logError(env, 'worker.local_ai.response_json_failed', 'Failed to parse local AI response JSON', jsonResult.error, {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			durationMs: Date.now() - startedAt,
+		});
+
+		return buildRejectedAiClassificationResult(
+			config,
+			'Local AI response JSON parse failed',
+			emptyOpenAiUsage(),
+			'local',
+			config.localAiModel,
+			Date.now() - startedAt,
+		);
+	}
+
+	const data = jsonResult.value;
+	const aiDecision = normalizeAiDecision(data);
+	const usage = {
+		promptTokens: typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0,
+		completionTokens: typeof data.completion_tokens === 'number' ? data.completion_tokens : 0,
+		totalTokens:
+			typeof data.total_tokens === 'number'
+				? data.total_tokens
+				: (typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0) +
+					(typeof data.completion_tokens === 'number' ? data.completion_tokens : 0),
+	};
+	const durationMs = typeof data.duration_ms === 'number' ? data.duration_ms : Date.now() - startedAt;
+	const aiModel = data.ai_model || data.model || config.localAiModel;
+
+	await logInfo(env, 'worker.local_ai.article_reviewed', 'Local AI reviewed article', {
+		source: article.source,
+		title: article.title,
+		articleUrl: article.url,
+		decision: aiDecision.decision,
+		category: aiDecision.category,
+		positivityScore: aiDecision.positivity_score,
+		localAiModel: aiModel,
+		promptTokens: usage.promptTokens,
+		completionTokens: usage.completionTokens,
+		totalTokens: usage.totalTokens,
+		durationMs,
+	});
+
+	return buildAiClassificationResult(aiDecision, usage, config, 'local', aiModel, durationMs);
+}
+
+async function classifyAndSummarizeArticleWithConfiguredProvider(
+	env: Env,
+	config: RuntimeConfig,
+	article: RssArticle,
+): Promise<AiClassificationResult> {
+	if (config.aiProvider === 'local') {
+		return classifyAndSummarizeArticleWithLocalAi(env, config, article);
+	}
+
+	return classifyAndSummarizeArticle(env, config, article);
 }
 
 function buildFeedOutcomeCounts(reviewedArticles: ReviewedArticleResult[]): Map<string, FeedOutcomeCounts> {
@@ -2500,9 +2819,15 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 			body: '{}',
 		});
 	} catch (error) {
-		await logError(env, 'worker.supabase.public_feed_snapshot_refresh_exception', 'Public feed snapshot refresh threw an exception', error, {
-			durationMs: Date.now() - startedAt,
-		});
+		await logError(
+			env,
+			'worker.supabase.public_feed_snapshot_refresh_exception',
+			'Public feed snapshot refresh threw an exception',
+			error,
+			{
+				durationMs: Date.now() - startedAt,
+			},
+		);
 
 		return false;
 	}
@@ -2752,23 +3077,24 @@ async function saveFailedWorkerRun(
 	});
 }
 
-async function reviewArticleWithOpenAi(env: Env, config: RuntimeConfig, article: RssArticle): Promise<ReviewedArticleResult> {
+async function reviewArticleWithConfiguredProvider(env: Env, config: RuntimeConfig, article: RssArticle): Promise<ReviewedArticleResult> {
 	try {
-		const aiResult = await classifyAndSummarizeArticle(env, config, article);
+		const aiResult = await classifyAndSummarizeArticleWithConfiguredProvider(env, config, article);
 
 		return {
 			article,
 			aiDecision: aiResult.aiDecision,
 			usage: aiResult.usage,
 			estimatedCostUsd: aiResult.estimatedCostUsd,
-			openAiModel: aiResult.openAiModel,
-			reviewSource: 'openai',
+			aiProvider: aiResult.aiProvider,
+			aiModel: aiResult.aiModel,
+			reviewDurationMs: aiResult.durationMs,
 		};
 	} catch (error) {
 		await logError(
 			env,
 			'worker.openai.article_review_exception',
-			'OpenAI article review failed unexpectedly and was converted to a safe rejection',
+			'AI article review failed unexpectedly and was converted to a safe rejection',
 			error,
 			{
 				source: article.source,
@@ -2784,12 +3110,13 @@ async function reviewArticleWithOpenAi(env: Env, config: RuntimeConfig, article:
 				category: 'Uplifting',
 				positivity_score: 0,
 				summary: '',
-				reason: `OpenAI review exception: ${getErrorMessage(error)}`,
+				reason: `AI review exception: ${getErrorMessage(error)}`,
 			},
 			usage: emptyOpenAiUsage(),
 			estimatedCostUsd: 0,
-			openAiModel: OPENAI_MODEL,
-			reviewSource: 'openai',
+			aiProvider: config.aiProvider,
+			aiModel: config.aiProvider === 'local' ? config.localAiModel : OPENAI_MODEL,
+			reviewDurationMs: 0,
 		};
 	}
 }
@@ -2803,6 +3130,9 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
+		const aiProvider = reviewedArticle.aiProvider ?? 'openai';
+		const aiModel = reviewedArticle.aiModel ?? (aiProvider === 'local' ? DEFAULT_LOCAL_AI_MODEL : OPENAI_MODEL);
+		const reviewDurationMs = reviewedArticle.reviewDurationMs ?? 0;
 		const hasThumbnail = hasUsableThumbnail(article);
 		const requestedDecision = aiDecision.decision === 'accept' ? 'accept' : 'reject';
 		const normalizedDecision: 'accept' | 'reject' = requestedDecision === 'accept' && hasThumbnail ? 'accept' : 'reject';
@@ -2823,6 +3153,9 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			positivity_score: normalizedScore,
 			summary: normalizedSummary,
 			reason: normalizedReason,
+			ai_provider: aiProvider,
+			ai_model: aiModel,
+			review_duration_ms: reviewDurationMs,
 			reviewed_at: new Date().toISOString(),
 		});
 
@@ -2851,6 +3184,8 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			ai_summary: normalizedSummary,
 			category: normalizedCategory,
 			positivity_score: normalizedScore || 7,
+			ai_provider: aiProvider,
+			ai_model: aiModel,
 			status: 'published',
 		});
 	}
@@ -2876,6 +3211,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		maxAiReviews,
 		runSource: options.runSource ?? 'unknown',
 		requestId: options.requestId ?? null,
+		aiProvider: config.aiProvider,
+		localAiModel: config.localAiModel,
+		aiReviewConcurrency: config.aiReviewConcurrency,
 	});
 
 	const shardFeeds = await getFeedsForShard(env, config);
@@ -2934,22 +3272,28 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		locallyRejectedCount: locallyRejectedArticles.length,
 		eligibleForAiCount: articlesEligibleForAi.length,
 		aiReviewCount: articlesForAi.length,
+		aiProvider: config.aiProvider,
+		aiReviewConcurrency: config.aiReviewConcurrency,
 	});
 
 	const noThumbnailRejectedResults = buildRejectedArticles(
 		noThumbnailArticles,
 		NO_THUMBNAIL_REJECT_DECISION,
 		(article) => `Skipped before AI from ${article.source}: RSS item and article page did not include a usable image thumbnail.`,
+		'no_thumbnail',
+		'local-rule',
 	);
 
 	const locallyRejectedResults = buildRejectedArticles(
 		locallyRejectedArticles,
 		LOCAL_PREFILTER_REJECT_DECISION,
 		(article) => `Skipped before AI from ${article.source}: obvious negative topic detected in title or excerpt.`,
+		'prefilter',
+		'local-rule',
 	);
 
-	const aiReviewedArticles = await mapWithConcurrency(articlesForAi, AI_REVIEW_CONCURRENCY, (article) =>
-		reviewArticleWithOpenAi(env, config, article),
+	const aiReviewedArticles = await mapWithConcurrency(articlesForAi, config.aiReviewConcurrency, (article) =>
+		reviewArticleWithConfiguredProvider(env, config, article),
 	);
 
 	const reviewedArticles = [...noThumbnailRejectedResults, ...locallyRejectedResults, ...aiReviewedArticles];
@@ -2966,10 +3310,16 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
 
+	const openAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'openai');
+	const localAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'local');
 	const openAiUsage = sumOpenAiUsage(aiReviewedArticles);
+	const localAiUsage = sumLocalAiUsage(aiReviewedArticles);
 	const estimatedOpenAiCostUsd = estimateOpenAiCost(openAiUsage, config);
-	const openAiAcceptedCount = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
-	const openAiRejectedCount = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
+	const openAiAcceptedCount = openAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
+	const openAiRejectedCount = openAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
+	const localAiAcceptedCount = localAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
+	const localAiRejectedCount = localAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
+	const localAiDurationMs = sumReviewDuration(aiReviewedArticles, 'local');
 	const costProtectionLimitReached = articlesEligibleForAi.length > articlesForAi.length;
 
 	const runCompletedAt = new Date();
@@ -2990,8 +3340,17 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		unreviewed_count: unreviewedArticles.length,
 		eligible_for_ai_count: articlesEligibleForAi.length,
 		ai_reviewed_count: aiReviewedArticles.length,
+		ai_provider: config.aiProvider,
+		local_ai_model: config.localAiModel,
+		local_ai_call_count: localAiReviewedArticles.length,
+		local_ai_prompt_tokens: localAiUsage.promptTokens,
+		local_ai_completion_tokens: localAiUsage.completionTokens,
+		local_ai_total_tokens: localAiUsage.totalTokens,
+		local_ai_accepted_count: localAiAcceptedCount,
+		local_ai_rejected_count: localAiRejectedCount,
+		local_ai_duration_ms: localAiDurationMs,
 		openai_model: OPENAI_MODEL,
-		openai_call_count: aiReviewedArticles.length,
+		openai_call_count: openAiReviewedArticles.length,
 		openai_prompt_tokens: openAiUsage.promptTokens,
 		openai_completion_tokens: openAiUsage.completionTokens,
 		openai_total_tokens: openAiUsage.totalTokens,
@@ -3059,6 +3418,15 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		locallyRejectedCount: locallyRejectedArticles.length,
 		eligibleForAiCount: articlesEligibleForAi.length,
 		aiReviewedCount: aiReviewedArticles.length,
+		aiProvider: config.aiProvider,
+		localAiModel: config.localAiModel,
+		localAiCallCount: localAiReviewedArticles.length,
+		localAiPromptTokens: localAiUsage.promptTokens,
+		localAiCompletionTokens: localAiUsage.completionTokens,
+		localAiTotalTokens: localAiUsage.totalTokens,
+		localAiAcceptedCount,
+		localAiRejectedCount,
+		localAiDurationMs,
 		acceptedCount,
 		rejectedCount,
 		reviewSaveOk,
@@ -3067,7 +3435,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		feedHealthSaveOk,
 		aiUsageSaveOk,
 		openAiModel: OPENAI_MODEL,
-		openAiCallCount: aiReviewedArticles.length,
+		openAiCallCount: openAiReviewedArticles.length,
 		openAiPromptTokens: openAiUsage.promptTokens,
 		openAiCompletionTokens: openAiUsage.completionTokens,
 		openAiTotalTokens: openAiUsage.totalTokens,
