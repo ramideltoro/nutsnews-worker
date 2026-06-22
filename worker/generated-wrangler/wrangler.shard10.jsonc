@@ -13,7 +13,12 @@
   },
   "vars": {
     "FEED_SHARD_INDEX": "10",
-    "FEEDS_PER_SHARD": "20"
+    "FEEDS_PER_SHARD": "20",
+    "AI_PROVIDER": "local",
+    "LOCAL_AI_URL": "https://ai.nutsnews.com",
+    "LOCAL_AI_MODEL": "qwen2.5:3b",
+    "AI_PROVIDER_FALLBACK_TO_OPENAI": "true",
+    "AI_REVIEW_CONCURRENCY": "1"
   },
   "secrets_store_secrets": [
     {
@@ -40,6 +45,11 @@
       "binding": "BETTER_STACK_INGESTING_HOST",
       "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "BETTER_STACK_INGESTING_HOST"
+    },
+    {
+      "binding": "LOCAL_AI_API_KEY",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "secret_name": "LOCAL_AI_API_KEY"
     }
   ]
 }
