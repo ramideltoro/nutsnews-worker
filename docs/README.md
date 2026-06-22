@@ -14,6 +14,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [Architecture](ARCHITECTURE.md) | System design, components, data flow, data model, and repository layout |
 | [Operations](OPERATIONS.md) | Admin portal, deployment, maintenance workflows, environment variables, and operating model |
 | [Admin Article Reviews](ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, provider/model tracking, and investigation workflow |
+| [Responsive Admin Dashboards](ADMIN_RESPONSIVE_DASHBOARDS.md) | Mobile responsiveness layer for protected admin dashboards, tables, cards, headings, and touch controls |
 | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
 | [Home Server Dashboard](HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
 | [Oracle Local AI Alternative](ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
@@ -38,6 +39,7 @@ Use the docs like this:
 * Use `ARCHITECTURE.md` when making system or code changes.
 * Use `OPERATIONS.md` when deploying or maintaining the platform.
 * Use `ADMIN_ARTICLE_REVIEWS.md` when reviewing accepted/rejected story decisions or investigating AI review mistakes.
+* Use `ADMIN_RESPONSIVE_DASHBOARDS.md` when changing mobile behavior for protected admin pages.
 * Use `HOME_SERVER_LOCAL_AI.md` when setting up, operating, debugging, or rolling back the current home-server local AI provider.
 * Use `HOME_SERVER_DASHBOARD.md` when setting up or troubleshooting the protected home-server instance stats dashboard.
 * Use `ORACLE_LOCAL_AI.md` only as the older Oracle Free Tier alternative design if Oracle capacity becomes available later.

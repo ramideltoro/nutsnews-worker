@@ -41,6 +41,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Architecture](docs/ARCHITECTURE.md) | System design, major components, and data flow |
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
 | [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, provider/model tracking, and investigation workflow |
+| [Responsive Admin Dashboards](docs/ADMIN_RESPONSIVE_DASHBOARDS.md) | Mobile responsiveness layer for protected admin dashboards, tables, cards, headings, and touch controls |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
 | [Home Server Local AI](docs/HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
 | [Home Server Dashboard](docs/HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
@@ -111,6 +112,7 @@ NutsNews currently includes:
 * Better Stack uptime monitoring and centralized logs
 * Sentry error monitoring
 * Google-protected admin portal
+* Responsive admin dashboard shell for mobile-friendly protected dashboard pages
 * Article review dashboard for accepted/rejected story decisions with AI provider/model visibility
 * AI usage dashboard
 * Local AI dashboard for home-server/Ollama model activity, fallback usage, latency, and recent decisions
