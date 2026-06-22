@@ -1,12 +1,22 @@
 import http from "node:http";
+import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PORT ?? "8788");
 const LOCAL_AI_API_KEY = process.env.LOCAL_AI_API_KEY ?? "";
 const OLLAMA_URL = (process.env.OLLAMA_URL ?? "http://127.0.0.1:11434").replace(/\/$/, "");
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:3b";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "120000");
-const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "6000");
+const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "3000");
+const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
+const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? "2048");
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "180");
+const OLLAMA_TEMPERATURE = Number(process.env.OLLAMA_TEMPERATURE ?? "0");
 const SERVICE_STARTED_AT = new Date().toISOString();
 
 function jsonResponse(res, statusCode, body) {
@@ -41,6 +51,22 @@ function readRequestBody(req, maxBytes = 1024 * 1024) {
 
 function normalizeString(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function normalizeHeaderValue(value) {
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+
+  return typeof value === "string" ? value : "";
+}
+
+function isAuthorized(req) {
+  if (!LOCAL_AI_API_KEY) {
+    return false;
+  }
+
+  return normalizeHeaderValue(req.headers["x-nutsnews-ai-key"]) === LOCAL_AI_API_KEY;
 }
 
 function normalizeScore(value) {
@@ -93,10 +119,12 @@ async function callOllama({ model, prompt, signal }) {
       model,
       stream: false,
       format: "json",
+      keep_alive: OLLAMA_KEEP_ALIVE,
       options: {
-        temperature: 0.1,
-        top_p: 0.9,
-        num_predict: 450,
+        temperature: OLLAMA_TEMPERATURE,
+        top_p: 0.8,
+        num_ctx: OLLAMA_NUM_CTX,
+        num_predict: OLLAMA_NUM_PREDICT,
       },
       messages: [
         {
@@ -121,25 +149,38 @@ async function callOllama({ model, prompt, signal }) {
   return response.json();
 }
 
+async function getOllamaModels(signal) {
+  const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal });
+  const body = response.ok ? await response.json() : null;
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    models: Array.isArray(body?.models)
+      ? body.models.map((model) => ({
+          name: normalizeString(model.name),
+          size: Number(model.size ?? 0) || 0,
+          modifiedAt: normalizeString(model.modified_at, null),
+        })).filter((model) => model.name).slice(0, 20)
+      : [],
+  };
+}
+
 async function handleHealth(res) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
 
   try {
-    const response = await fetch(`${OLLAMA_URL}/api/tags`, { signal: controller.signal });
-    const body = response.ok ? await response.json() : null;
-    const models = Array.isArray(body?.models)
-      ? body.models.map((model) => model.name).slice(0, 20)
-      : [];
+    const ollama = await getOllamaModels(controller.signal);
 
-    jsonResponse(res, response.ok ? 200 : 503, {
-      ok: response.ok,
+    jsonResponse(res, ollama.ok ? 200 : 503, {
+      ok: ollama.ok,
       service: "nutsnews-local-ai-service",
       startedAt: SERVICE_STARTED_AT,
       timestamp: new Date().toISOString(),
       ollamaUrl: OLLAMA_URL,
       defaultModel: OLLAMA_MODEL,
-      availableModels: models,
+      availableModels: ollama.models.map((model) => model.name),
     });
   } catch (error) {
     jsonResponse(res, 503, {
@@ -156,6 +197,182 @@ async function handleHealth(res) {
   }
 }
 
+function bytesFromKb(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed * 1024 : 0;
+}
+
+async function readMemoryInfo() {
+  const meminfo = await readFile("/proc/meminfo", "utf8");
+  const values = new Map();
+
+  for (const line of meminfo.split("\n")) {
+    const match = line.match(/^([^:]+):\s+(\d+)/);
+    if (match) {
+      values.set(match[1], Number(match[2]));
+    }
+  }
+
+  const totalBytes = bytesFromKb(values.get("MemTotal"));
+  const availableBytes = bytesFromKb(values.get("MemAvailable"));
+  const freeBytes = bytesFromKb(values.get("MemFree"));
+  const usedBytes = Math.max(0, totalBytes - availableBytes);
+  const swapTotalBytes = bytesFromKb(values.get("SwapTotal"));
+  const swapFreeBytes = bytesFromKb(values.get("SwapFree"));
+
+  return {
+    totalBytes,
+    usedBytes,
+    freeBytes,
+    availableBytes,
+    usagePercent: totalBytes === 0 ? 0 : Math.round((usedBytes / totalBytes) * 100),
+    swapTotalBytes,
+    swapUsedBytes: Math.max(0, swapTotalBytes - swapFreeBytes),
+    swapFreeBytes,
+  };
+}
+
+async function readLoadAverage() {
+  const loadavg = await readFile("/proc/loadavg", "utf8");
+  const [oneMinute, fiveMinute, fifteenMinute] = loadavg.trim().split(/\s+/).map(Number);
+  const cpuThreads = os.cpus().length;
+
+  return {
+    oneMinute: Number.isFinite(oneMinute) ? oneMinute : 0,
+    fiveMinute: Number.isFinite(fiveMinute) ? fiveMinute : 0,
+    fifteenMinute: Number.isFinite(fifteenMinute) ? fifteenMinute : 0,
+    normalizedOneMinutePercent: cpuThreads === 0 ? 0 : Math.round((oneMinute / cpuThreads) * 100),
+  };
+}
+
+async function readDiskInfo() {
+  const { stdout } = await execFileAsync("df", ["-B1", "/"], { timeout: 3000 });
+  const lines = stdout.trim().split("\n");
+  const row = lines[1]?.trim().split(/\s+/) ?? [];
+  const [filesystem, size, used, available, usePercent, mount] = row;
+
+  return {
+    filesystem: filesystem ?? "unknown",
+    mount: mount ?? "/",
+    totalBytes: Number(size ?? 0) || 0,
+    usedBytes: Number(used ?? 0) || 0,
+    availableBytes: Number(available ?? 0) || 0,
+    usagePercent: Number(String(usePercent ?? "0").replace("%", "")) || 0,
+  };
+}
+
+async function readServiceStatus(serviceName) {
+  try {
+    const { stdout } = await execFileAsync("systemctl", ["is-active", serviceName], { timeout: 3000 });
+    const status = stdout.trim();
+
+    return {
+      name: serviceName,
+      active: status === "active",
+      status: status || "unknown",
+    };
+  } catch (error) {
+    const stdout = typeof error?.stdout === "string" ? error.stdout.trim() : "";
+    const stderr = typeof error?.stderr === "string" ? error.stderr.trim() : "";
+    const status = stdout || stderr || "inactive";
+
+    return {
+      name: serviceName,
+      active: status === "active",
+      status,
+    };
+  }
+}
+
+async function handleStats(req, res) {
+  if (!LOCAL_AI_API_KEY) {
+    jsonResponse(res, 500, {
+      error: "LOCAL_AI_API_KEY is not configured on the local AI service.",
+    });
+    return;
+  }
+
+  if (!isAuthorized(req)) {
+    jsonResponse(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const [memory, loadAverage, disk, ollama, services] = await Promise.all([
+      readMemoryInfo(),
+      readLoadAverage(),
+      readDiskInfo(),
+      getOllamaModels(controller.signal),
+      Promise.all([
+        readServiceStatus("ollama"),
+        readServiceStatus("nutsnews-local-ai"),
+        readServiceStatus("cloudflared"),
+      ]),
+    ]);
+
+    jsonResponse(res, 200, {
+      ok: true,
+      requestId,
+      service: "nutsnews-local-ai-service",
+      timestamp: new Date().toISOString(),
+      generatedInMs: Date.now() - startedAt,
+      server: {
+        hostname: os.hostname(),
+        platform: os.platform(),
+        arch: os.arch(),
+        kernel: os.release(),
+        uptimeSeconds: Math.round(os.uptime()),
+        startedAt: SERVICE_STARTED_AT,
+      },
+      cpu: {
+        model: os.cpus()[0]?.model ?? "unknown",
+        threads: os.cpus().length,
+        loadAverage,
+      },
+      memory,
+      disk,
+      services,
+      localAi: {
+        port: PORT,
+        ollamaUrl: OLLAMA_URL,
+        defaultModel: OLLAMA_MODEL,
+        requestTimeoutMs: REQUEST_TIMEOUT_MS,
+        maxArticleChars: MAX_ARTICLE_CHARS,
+        keepAlive: OLLAMA_KEEP_ALIVE,
+        numCtx: OLLAMA_NUM_CTX,
+        numPredict: OLLAMA_NUM_PREDICT,
+        temperature: OLLAMA_TEMPERATURE,
+      },
+      ollama: {
+        ok: ollama.ok,
+        status: ollama.status,
+        models: ollama.models,
+      },
+      process: {
+        pid: process.pid,
+        nodeVersion: process.version,
+        uptimeSeconds: Math.round(process.uptime()),
+        memoryUsage: process.memoryUsage(),
+      },
+    });
+  } catch (error) {
+    jsonResponse(res, 500, {
+      ok: false,
+      requestId,
+      timestamp: new Date().toISOString(),
+      error: error instanceof Error ? error.message : "Unknown stats error",
+      generatedInMs: Date.now() - startedAt,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function handleReview(req, res) {
   if (!LOCAL_AI_API_KEY) {
     jsonResponse(res, 500, {
@@ -164,8 +381,7 @@ async function handleReview(req, res) {
     return;
   }
 
-  const providedKey = req.headers["x-nutsnews-ai-key"];
-  if (providedKey !== LOCAL_AI_API_KEY) {
+  if (!isAuthorized(req)) {
     jsonResponse(res, 401, { error: "Unauthorized" });
     return;
   }
@@ -245,6 +461,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/stats") {
+    await handleStats(req, res);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/review") {
     await handleReview(req, res);
     return;
@@ -252,7 +473,7 @@ const server = http.createServer(async (req, res) => {
 
   jsonResponse(res, 404, {
     error: "Not found",
-    routes: ["GET /health", "POST /review"],
+    routes: ["GET /health", "GET /stats", "POST /review"],
   });
 });
 

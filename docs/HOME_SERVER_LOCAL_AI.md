@@ -219,6 +219,34 @@ Expected shape:
 
 ---
 
+## Home Server Dashboard
+
+The local AI home server is also monitored from a protected NutsNews admin dashboard:
+
+```text
+/admin/home-server
+```
+
+The dashboard reads from the protected local AI service stats endpoint:
+
+```text
+GET https://ai.nutsnews.com/stats
+Header: x-nutsnews-ai-key: <HOME_SERVER_STATS_API_KEY>
+```
+
+It shows server identity, uptime, CPU load, memory usage, root disk usage, critical systemd services, Ollama status, installed models, and local AI runtime settings.
+
+Required web environment variables:
+
+```text
+HOME_SERVER_STATS_URL=https://ai.nutsnews.com/stats
+HOME_SERVER_STATS_API_KEY=<same value as LOCAL_AI_API_KEY on the home server>
+```
+
+For full setup, deployment, and troubleshooting details, see [Home Server Admin Dashboard](HOME_SERVER_DASHBOARD.md).
+
+---
+
 ## Local AI Review API
 
 The Worker calls:

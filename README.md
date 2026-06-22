@@ -43,6 +43,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, provider/model tracking, and investigation workflow |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
 | [Home Server Local AI](docs/HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
+| [Home Server Dashboard](docs/HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
 | [Oracle Local AI Alternative](docs/ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
@@ -81,6 +82,7 @@ nutsnews/
 | Article review dashboard | `/admin/articles` |
 | AI usage dashboard | `/admin/ai-usage` |
 | Local AI dashboard | `/admin/local-ai` |
+| Home server dashboard | `/admin/home-server` |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
@@ -112,6 +114,7 @@ NutsNews currently includes:
 * Article review dashboard for accepted/rejected story decisions with AI provider/model visibility
 * AI usage dashboard
 * Local AI dashboard for home-server/Ollama model activity, fallback usage, latency, and recent decisions
+* Home server dashboard for CPU, memory, disk, uptime, critical service status, Ollama models, and local AI runtime configuration
 * Worker shard health dashboard
 * RSS feed health and feed management dashboards
 * RSS source quality scoring with 0-100 feed rankings
