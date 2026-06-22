@@ -18,7 +18,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Automation | Cloudflare Worker shards fetch and process RSS feeds |
 | Controller | Controller Worker coordinates shard execution |
 | Database | Supabase Postgres stores articles, feeds, review history, and operational data |
-| AI | OpenAI or Oracle-hosted local AI classifies, scores, and summarizes candidate stories |
+| AI | Home-server local AI with Ollama/qwen classifies, scores, and summarizes candidate stories, with OpenAI fallback |
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
@@ -42,7 +42,8 @@ The full project documentation lives in [`docs/`](docs/).
 | [Operations](docs/OPERATIONS.md) | Admin portal, deployment, maintenance, and operational workflows |
 | [Admin Article Reviews](docs/ADMIN_ARTICLE_REVIEWS.md) | Article review dashboard, filters, time sorting, rejection reasons, provider/model tracking, and investigation workflow |
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
-| [Oracle Local AI](docs/ORACLE_LOCAL_AI.md) | Oracle Free Tier, Ollama/qwen local AI service, Worker config, monitoring, and rollback |
+| [Home Server Local AI](docs/HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
+| [Oracle Local AI Alternative](docs/ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
 | [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
@@ -61,7 +62,7 @@ nutsnews/
 ├── web/          # Next.js public site and admin portal
 ├── worker/       # Cloudflare Worker RSS ingestion engine
 ├── controller/   # Cloudflare Worker shard controller
-├── local-ai-service/ # Oracle/Ollama local AI review endpoint
+├── local-ai-service/ # Home-server/Ollama local AI review endpoint
 ├── supabase/     # Supabase migrations, restore validation SQL, and database configuration
 ├── docs/         # GitHub documentation
 ├── scripts/      # Project utility scripts
@@ -98,7 +99,7 @@ NutsNews currently includes:
 * Mobile-first public article feed with automatic scroll loading
 * RSS-based content discovery
 * AI-assisted article filtering and summaries
-* Oracle-hosted local AI provider support with qwen/Ollama and optional OpenAI fallback
+* Home-server local AI provider support with qwen/Ollama, Cloudflare Tunnel, and optional OpenAI fallback
 * Thumbnail quality controls
 * Supabase article, feed, review, AI usage, Worker run, and feed health tables
 * Cloudflare Worker sharding
@@ -110,7 +111,7 @@ NutsNews currently includes:
 * Google-protected admin portal
 * Article review dashboard for accepted/rejected story decisions with AI provider/model visibility
 * AI usage dashboard
-* Local AI dashboard for Oracle/Ollama model activity, fallback usage, latency, and recent decisions
+* Local AI dashboard for home-server/Ollama model activity, fallback usage, latency, and recent decisions
 * Worker shard health dashboard
 * RSS feed health and feed management dashboards
 * RSS source quality scoring with 0-100 feed rankings

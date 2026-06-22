@@ -1,8 +1,10 @@
 # Oracle Local AI Provider
 
-NutsNews can now run article review through a local AI service instead of sending every candidate article directly to OpenAI.
+> **Current production note:** NutsNews currently uses the home-server local AI setup documented in [Home Server Local AI Provider](HOME_SERVER_LOCAL_AI.md). This Oracle document remains as an alternative runbook if Oracle Free Tier capacity becomes available later.
 
-The first production-ready version is intentionally simple:
+This document describes the Oracle Free Tier alternative for running article review through a local AI service instead of sending every candidate article directly to OpenAI.
+
+The Oracle alternative design is intentionally simple:
 
 ```text
 Cloudflare Worker Shards
@@ -20,7 +22,7 @@ OpenAI support remains in place. The worker can run in OpenAI mode, local AI mod
 
 ---
 
-## What This Update Adds
+## What This Oracle Alternative Adds
 
 ### Worker
 
