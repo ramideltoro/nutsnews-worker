@@ -27,6 +27,41 @@ Example:
 
 ---
 
+### Optimized Article Image Delivery
+
+The public feed uses a shared optimized article image component for article cards and article detail headers.
+
+The image layer improves feed speed by:
+
+* Serving responsive image candidates instead of forcing each phone to download a publisher's original full-size image
+* Requesting modern formats such as AVIF and WebP when supported by the browser
+* Eager-loading the first visible article image with high fetch priority
+* Lazy-loading lower article images so they do not compete with the first screen
+* Showing an amber loading backdrop while the final image downloads
+* Falling back to the raw publisher image if the optimizer cannot fetch a specific remote image
+* Showing branded fallback art if both optimized and raw publisher image loading fail
+
+The Next.js image optimizer is configured in:
+
+```text
+web/next.config.ts
+```
+
+Image behavior is centralized in:
+
+```text
+web/app/components/OptimizedArticleImage.tsx
+web/lib/imageDelivery.ts
+```
+
+Detailed guide:
+
+```text
+docs/IMAGE_DELIVERY.md
+```
+
+---
+
 ## Cloudflare CDN
 
 Cloudflare sits in front of the public site and caches eligible public pages and API responses.

@@ -48,7 +48,8 @@ The full project documentation lives in [`docs/`](docs/).
 | [Oracle Local AI Alternative](docs/ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
-| [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, failure handling, and cost controls |
+| [Performance and Resiliency](docs/PERFORMANCE_AND_RESILIENCY.md) | CDN, caching, Worker sharding, indexes, image delivery, failure handling, and cost controls |
+| [Image Delivery](docs/IMAGE_DELIVERY.md) | Next Image optimization, responsive article thumbnails, cache TTL, placeholders, and raw-image fallback behavior |
 | [Public Feed Snapshot](docs/PUBLIC_FEED_SNAPSHOT.md) | Materialized homepage/API feed snapshot, Worker refresh flow, fallback behavior, and validation checks |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
 | [RSS Source Quality](docs/RSS_SOURCE_QUALITY.md) | Quality score formula, Supabase ranking query, admin dashboard behavior, and feed promotion/disable rules |
@@ -108,6 +109,7 @@ NutsNews currently includes:
 * Cloudflare Worker sharding
 * Controller Worker orchestration
 * Supabase public feed snapshot for faster homepage/API reads
+* Optimized article image delivery with responsive Next Image thumbnails, AVIF/WebP support, and safe raw-image fallback
 * Cloudflare CDN caching for public reader routes
 * Better Stack uptime monitoring and centralized logs
 * Sentry error monitoring
