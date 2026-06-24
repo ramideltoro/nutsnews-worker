@@ -73,3 +73,4 @@ The docs should stay:
 * Linked from the root README
 
 Whenever a GitHub issue adds a meaningful operational feature, update the relevant doc in this folder.
+- [Multi-language summaries](./MULTI_LANGUAGE_SUMMARIES.md)

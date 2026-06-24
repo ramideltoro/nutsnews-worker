@@ -36,6 +36,7 @@ The automated backup exports the current operational tables needed for the publi
 | `public.articles` | Published positive news articles shown by the site and app |
 | `public.rss_feeds` | RSS source list and source configuration |
 | `public.article_ai_reviews` | AI accept/reject decisions, categories, reasons, model/provider metadata |
+| `public.article_summaries` | Localized titles and summaries for supported languages such as French |
 | `public.ai_usage_runs` | AI run accounting and Worker usage history |
 
 The script intentionally uses a focused `pg_dump` table list instead of dumping every Supabase object.
@@ -342,6 +343,7 @@ If a database URL or Grafana Cloud token is exposed in a chat, ticket, screensho
 | Export article data | Done: `public.articles` |
 | Export RSS feeds | Done: `public.rss_feeds` |
 | Export AI review history | Done: `public.article_ai_reviews` |
+| Export localized summaries | Done: `public.article_summaries` after updating the home-server backup script |
 | Export AI usage runs | Done: `public.ai_usage_runs` |
 | Store timestamped backups | Done: `nutsnews-db-yyyy-mm-dd_hh-mm-ss` folders |
 | Support on-demand backup | Done: `nutsnews-db-backup-now` and systemd service |

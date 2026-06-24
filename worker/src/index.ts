@@ -30,6 +30,8 @@ type Env = {
 	AI_REVIEW_ALERT_RUN_LIMIT?: string;
 	AI_TOKEN_ALERT_RUN_LIMIT?: string;
 	ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT?: string;
+	ENABLED_SUMMARY_LANGUAGES?: string;
+	SUMMARY_TRANSLATION_LIMIT?: string;
 };
 
 type RuntimeConfig = {
@@ -48,6 +50,8 @@ type RuntimeConfig = {
 	aiReviewAlertRunLimit: number;
 	aiTokenAlertRunLimit: number;
 	articlePageImageLookupLimit: number;
+	enabledSummaryLanguages: SummaryLanguageCode[];
+	summaryTranslationLimit: number;
 };
 
 type WorkerRunSaveConfig = {
@@ -98,6 +102,14 @@ type AiArticleDecision = {
 	positivity_score: number;
 	summary: string;
 	reason: string;
+};
+
+type SummaryLanguageCode = 'fr';
+
+type LocalizedSummaryDecision = {
+	language_code: SummaryLanguageCode;
+	title: string;
+	summary: string;
 };
 
 type ReviewedUrlRow = {
@@ -182,6 +194,17 @@ type ArticleInsert = {
 	ai_provider: ReviewProvider;
 	ai_model: string;
 	status: 'published';
+};
+
+type ArticleSummaryInsert = {
+	original_url: string;
+	language_code: SummaryLanguageCode;
+	source_language_code: 'en';
+	title: string;
+	summary: string;
+	generated_by: 'openai';
+	model: string;
+	updated_at: string;
 };
 
 type RefreshOptions = {
@@ -337,6 +360,8 @@ type RefreshResult = {
 	rejectedCount: number;
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
+	articleSummaryTranslationCount: number;
+	articleSummarySaveOk: boolean;
 	publicFeedSnapshotRefreshOk: boolean;
 	feedHealthSaveOk: boolean;
 	aiUsageSaveOk: boolean;
@@ -379,6 +404,9 @@ const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
 const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
+const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr';
+const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 12;
+const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
 
 const POSITIVE_KEYWORDS = [
 	'good news',
@@ -751,6 +779,35 @@ function getAiProvider(value: string | undefined): AiProvider {
 	return value?.toLowerCase() === 'local' ? 'local' : 'openai';
 }
 
+function isSummaryLanguageCode(value: string): value is SummaryLanguageCode {
+	return value === 'fr';
+}
+
+function getEnabledSummaryLanguages(value: string | undefined): SummaryLanguageCode[] {
+	const rawValue = value?.trim() || DEFAULT_ENABLED_SUMMARY_LANGUAGES;
+
+	if (['', 'none', 'off', 'false', '0'].includes(rawValue.toLowerCase())) {
+		return [];
+	}
+
+	const languages = rawValue
+		.split(',')
+		.map((language) => language.trim().toLowerCase())
+		.filter(isSummaryLanguageCode);
+
+	return Array.from(new Set(languages));
+}
+
+function getSummaryTranslationLimit(value: string | undefined) {
+	const parsed = Number(value ?? '');
+
+	if (!Number.isFinite(parsed) || parsed < 0) {
+		return DEFAULT_SUMMARY_TRANSLATION_LIMIT;
+	}
+
+	return Math.max(0, Math.min(Math.floor(parsed), HARD_MAX_SUMMARY_TRANSLATION_LIMIT));
+}
+
 function getBooleanConfig(value: string | undefined, fallback = false) {
 	if (!value) {
 		return fallback;
@@ -822,6 +879,8 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 				HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN,
 			),
 		),
+		enabledSummaryLanguages: getEnabledSummaryLanguages(env.ENABLED_SUMMARY_LANGUAGES),
+		summaryTranslationLimit: getSummaryTranslationLimit(env.SUMMARY_TRANSLATION_LIMIT),
 	};
 }
 
@@ -2560,6 +2619,226 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 	return classifyAndSummarizeArticle(env, config, article);
 }
 
+function normalizeLocalizedSummaryDecision(
+	value: Partial<LocalizedSummaryDecision>,
+	languageCode: SummaryLanguageCode,
+	fallbackTitle: string,
+	fallbackSummary: string,
+): LocalizedSummaryDecision {
+	return {
+		language_code: languageCode,
+		title: normalizeTextWhitespace(value.title || fallbackTitle).slice(0, 220).trim() || fallbackTitle,
+		summary: trimAiSummary(value.summary || fallbackSummary),
+	};
+}
+
+async function translateArticleSummaryWithOpenAi(
+	env: Env,
+	config: RuntimeConfig,
+	article: ArticleInsert,
+	languageCode: SummaryLanguageCode,
+): Promise<ArticleSummaryInsert | null> {
+	if (!config.openAiApiKey) {
+		await logWarn(env, 'worker.translation.skipped_missing_openai_key', 'Skipped summary translation because OPENAI_API_KEY is missing', {
+			articleUrl: article.original_url,
+			languageCode,
+		});
+		return null;
+	}
+
+	const languageName = languageCode === 'fr' ? 'French' : languageCode;
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch('https://api.openai.com/v1/chat/completions', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${config.openAiApiKey}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				model: OPENAI_MODEL,
+				response_format: {
+					type: 'json_object',
+				},
+				messages: [
+					{
+						role: 'system',
+						content:
+							'You translate NutsNews article cards. Preserve the meaning and warm positive tone. Do not add facts. Do not translate URLs or source names. Return only valid JSON.',
+					},
+					{
+						role: 'user',
+						content: `Translate this NutsNews article card into ${languageName}.
+
+Source: ${article.source}
+English title: ${article.title}
+English summary: ${article.ai_summary}
+Category: ${article.category}
+
+Return JSON exactly like this:
+{
+  "language_code": "${languageCode}",
+  "title": "Natural ${languageName} title, no added facts",
+  "summary": "Natural ${languageName} summary between 200 and 250 characters, no added facts"
+}`,
+					},
+				],
+			}),
+		});
+	} catch (error) {
+		await logError(env, 'worker.translation.request_exception', 'OpenAI summary translation threw an exception', error, {
+			articleUrl: article.original_url,
+			languageCode,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.translation.request_failed', 'OpenAI summary translation request failed', {
+			status: response.status,
+			articleUrl: article.original_url,
+			languageCode,
+			errorText,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	const jsonResult = await readResponseJsonSafely<{
+		choices?: Array<{
+			message?: {
+				content?: string;
+			};
+		}>;
+	}>(response);
+
+	if (!jsonResult.ok) {
+		await logError(env, 'worker.translation.response_json_failed', 'Failed to parse OpenAI translation response JSON', jsonResult.error, {
+			articleUrl: article.original_url,
+			languageCode,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	const content = jsonResult.value.choices?.[0]?.message?.content;
+
+	if (!content) {
+		await logWarn(env, 'worker.translation.empty_response', 'OpenAI summary translation returned empty content', {
+			articleUrl: article.original_url,
+			languageCode,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	try {
+		const parsedSummary = normalizeLocalizedSummaryDecision(
+			JSON.parse(content) as Partial<LocalizedSummaryDecision>,
+			languageCode,
+			article.title,
+			article.ai_summary,
+		);
+
+		await logInfo(env, 'worker.translation.article_summary_translated', 'Translated article summary', {
+			articleUrl: article.original_url,
+			languageCode,
+			model: OPENAI_MODEL,
+			durationMs: Date.now() - startedAt,
+		});
+
+		return {
+			original_url: article.original_url,
+			language_code: parsedSummary.language_code,
+			source_language_code: 'en',
+			title: parsedSummary.title,
+			summary: parsedSummary.summary,
+			generated_by: 'openai',
+			model: OPENAI_MODEL,
+			updated_at: new Date().toISOString(),
+		};
+	} catch (error) {
+		await logError(env, 'worker.translation.invalid_json', 'OpenAI summary translation returned invalid JSON', error, {
+			articleUrl: article.original_url,
+			languageCode,
+			rawContent: content,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+}
+
+async function buildArticleSummaryTranslations(
+	env: Env,
+	config: RuntimeConfig,
+	acceptedArticles: ArticleInsert[],
+): Promise<ArticleSummaryInsert[]> {
+	if (acceptedArticles.length === 0 || config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
+		return [];
+	}
+
+	const translationTasks = acceptedArticles
+		.slice(0, config.summaryTranslationLimit)
+		.flatMap((article) => config.enabledSummaryLanguages.map((languageCode) => ({ article, languageCode })));
+
+	const translations = await mapWithConcurrency(translationTasks, 2, ({ article, languageCode }) =>
+		translateArticleSummaryWithOpenAi(env, config, article, languageCode),
+	);
+
+	return translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+}
+
+async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summaries: ArticleSummaryInsert[]): Promise<boolean> {
+	const startedAt = Date.now();
+
+	if (summaries.length === 0) {
+		return true;
+	}
+
+	let response: Response;
+
+	try {
+		response = await fetch(`${config.supabaseUrl}/rest/v1/article_summaries?on_conflict=original_url,language_code`, {
+			method: 'POST',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
+			},
+			body: JSON.stringify(summaries),
+		});
+	} catch (error) {
+		await logError(env, 'worker.supabase.article_summary_batch_save_exception', 'Supabase article summary batch save threw an exception', error, {
+			summaryCount: summaries.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return false;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.supabase.article_summary_batch_save_failed', 'Failed to batch-save article summaries', {
+			status: response.status,
+			errorText,
+			summaryCount: summaries.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return false;
+	}
+
+	await logInfo(env, 'worker.supabase.article_summary_batch_saved', 'Batch-saved article summaries', {
+		summaryCount: summaries.length,
+		durationMs: Date.now() - startedAt,
+	});
+
+	return true;
+}
+
 function buildFeedOutcomeCounts(reviewedArticles: ReviewedArticleResult[]): Map<string, FeedOutcomeCounts> {
 	const countsBySource = new Map<string, FeedOutcomeCounts>();
 
@@ -3333,7 +3612,18 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
+	const articleSummaryRows = articleSaveOk ? await buildArticleSummaryTranslations(env, config, acceptedArticleRows) : [];
+	const articleSummarySaveOk = articleSaveOk ? await saveArticleSummariesBatch(env, config, articleSummaryRows) : false;
 	const publicFeedSnapshotRefreshOk = articleSaveOk ? await refreshPublicFeedSnapshot(env, config) : false;
+
+	await logInfo(env, 'worker.translation.summary_completed', 'Article summary translation step completed', {
+		shardIndex,
+		enabledSummaryLanguages: config.enabledSummaryLanguages,
+		summaryTranslationLimit: config.summaryTranslationLimit,
+		acceptedArticleCount: acceptedArticleRows.length,
+		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummarySaveOk,
+	});
 
 	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
 	const feedHealthRows = buildFeedHealthRows(rssFetchResult.feedResults, feedOutcomeCounts, previousFeedHealth, new Date());
@@ -3462,6 +3752,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		rejectedCount,
 		reviewSaveOk,
 		articleSaveOk,
+		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummarySaveOk,
 		publicFeedSnapshotRefreshOk,
 		feedHealthSaveOk,
 		aiUsageSaveOk,

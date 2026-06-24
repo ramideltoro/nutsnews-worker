@@ -1,0 +1,125 @@
+# Multi-language summaries
+
+Issue #26 adds a future-ready language layer for NutsNews summaries.
+
+The first supported translated language is French (`fr`). The design keeps the original article/source link unchanged and stores generated translated titles and summaries separately from the canonical article row.
+
+## Supported languages
+
+Current public language options:
+
+| Code | Label |
+| --- | --- |
+| `en` | English |
+| `fr` | Français |
+
+Future languages should be added to `web/lib/languages.ts` and to the Worker `SummaryLanguageCode` union/config parsing.
+
+## Database design
+
+Canonical articles stay in `public.articles`.
+
+Localized summaries are stored in:
+
+```text
+public.article_summaries
+```
+
+Important columns:
+
+| Column | Purpose |
+| --- | --- |
+| `original_url` | Stable key back to `public.articles.original_url` |
+| `language_code` | Target language such as `fr` |
+| `source_language_code` | Original summary language, currently `en` |
+| `title` | Localized card title |
+| `summary` | Localized card summary |
+| `generated_by` | Translation provider, currently `openai` |
+| `model` | Translation model |
+
+`unique(original_url, language_code)` makes each article/language pair upsertable.
+
+## Worker behavior
+
+When an article is accepted and saved, the Worker:
+
+1. Saves the English/default article row in `public.articles`.
+2. Generates French title + summary using OpenAI when `ENABLED_SUMMARY_LANGUAGES` includes `fr`.
+3. Upserts the result into `public.article_summaries`.
+4. Keeps `original_url` unchanged.
+
+Default Worker config:
+
+```text
+ENABLED_SUMMARY_LANGUAGES=fr
+SUMMARY_TRANSLATION_LIMIT=12
+```
+
+To disable translations temporarily:
+
+```text
+ENABLED_SUMMARY_LANGUAGES=none
+```
+
+## Public API behavior
+
+The articles API supports a `lang` query parameter:
+
+```text
+/api/articles?page=0&lang=fr
+```
+
+Fallback behavior:
+
+```text
+French summary exists → return French title/summary
+French summary missing → return English/default title/summary
+```
+
+This lets the site show French when available without blocking new articles or requiring a full historical backfill first.
+
+## Web UI behavior
+
+The Settings panel includes a Language selector:
+
+```text
+English
+Français
+```
+
+The selected language is stored in local storage under:
+
+```text
+nutsnews.web.language
+```
+
+Changing language refetches the feed with the selected language.
+
+## Backfilling existing articles
+
+Use the backfill script for existing articles that were published before the feature existed:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews2
+
+SUPABASE_URL="https://YOUR_PROJECT.supabase.co" \
+SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY" \
+OPENAI_API_KEY="YOUR_OPENAI_KEY" \
+BACKFILL_LIMIT=25 \
+node scripts/backfill_french_summaries.mjs
+```
+
+Run small batches first to control cost.
+
+## Adding another language later
+
+1. Add the language to `SUPPORTED_LANGUAGES` in `web/lib/languages.ts`.
+2. Add the code to the Worker `SummaryLanguageCode` union.
+3. Update `isSummaryLanguageCode`.
+4. Add the language code to `ENABLED_SUMMARY_LANGUAGES`, for example:
+
+```text
+ENABLED_SUMMARY_LANGUAGES=fr,es
+```
+
+No new column is required in `public.articles`.

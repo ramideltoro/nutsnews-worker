@@ -8,7 +8,7 @@ const includeLocalAiSecretBinding = process.env.ENABLE_LOCAL_AI_SECRET_BINDING =
 const localAiApiKeySecretName = process.env.LOCAL_AI_API_KEY_SECRET_NAME ?? 'LOCAL_AI_API_KEY';
 
 const optionalShardVars = Object.fromEntries(
-	['AI_PROVIDER', 'LOCAL_AI_URL', 'LOCAL_AI_MODEL', 'AI_PROVIDER_FALLBACK_TO_OPENAI', 'AI_REVIEW_CONCURRENCY']
+	['AI_PROVIDER', 'LOCAL_AI_URL', 'LOCAL_AI_MODEL', 'AI_PROVIDER_FALLBACK_TO_OPENAI', 'AI_REVIEW_CONCURRENCY', 'ENABLED_SUMMARY_LANGUAGES', 'SUMMARY_TRANSLATION_LIMIT']
 		.filter((key) => process.env[key])
 		.map((key) => [key, process.env[key]]),
 );

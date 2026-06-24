@@ -13,6 +13,7 @@ with required_tables(table_name) as (
     ('articles'),
     ('rss_feeds'),
     ('article_ai_reviews'),
+    ('article_summaries'),
     ('ai_usage_runs'),
     ('worker_runs'),
     ('feed_health')
@@ -64,6 +65,8 @@ union all
 select 'rss_feeds', count(*)::bigint from public.rss_feeds
 union all
 select 'article_ai_reviews', count(*)::bigint from public.article_ai_reviews
+union all
+select 'article_summaries', count(*)::bigint from public.article_summaries
 union all
 select 'ai_usage_runs', count(*)::bigint from public.ai_usage_runs
 union all
@@ -185,6 +188,7 @@ where schemaname = 'public'
     'articles',
     'rss_feeds',
     'article_ai_reviews',
+    'article_summaries',
     'ai_usage_runs',
     'worker_runs',
     'feed_health'

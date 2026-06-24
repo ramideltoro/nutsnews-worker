@@ -15,6 +15,7 @@ NutsNews stores operational and product data in Supabase Postgres:
 | Published articles | `public.articles` |
 | RSS feed list | `public.rss_feeds` |
 | AI review history | `public.article_ai_reviews` |
+| Localized summaries | `public.article_summaries` |
 | AI usage runs | `public.ai_usage_runs` |
 | Worker run history | `public.worker_runs` |
 | Feed health history | `public.feed_health` |
@@ -255,6 +256,7 @@ At minimum, confirm:
 * `public.articles` exists.
 * `public.rss_feeds` exists.
 * `public.article_ai_reviews` exists.
+* `public.article_summaries` exists.
 * `public.ai_usage_runs` exists.
 * `public.worker_runs` exists.
 * `public.feed_health` exists.
