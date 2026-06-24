@@ -104,7 +104,7 @@ NutsNews currently includes:
 
 * Mobile-first public article feed with automatic scroll loading
 * RSS-based content discovery
-* AI-assisted article filtering and summaries
+* AI assisted article filtering and summaries
 * Home-server local AI provider support with qwen/Ollama, Cloudflare Tunnel, and optional OpenAI fallback
 * Thumbnail quality controls
 * Supabase article, feed, review, AI usage, Worker run, and feed health tables

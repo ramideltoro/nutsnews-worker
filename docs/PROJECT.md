@@ -154,7 +154,7 @@ NutsNews currently includes:
 
 * A public mobile-first website
 * RSS-based content discovery
-* AI-assisted article filtering
+* AI assisted article filtering
 * AI-generated short summaries
 * Supabase article storage
 * Cloudflare Worker automation
