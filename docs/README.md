@@ -17,6 +17,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [Responsive Admin Dashboards](ADMIN_RESPONSIVE_DASHBOARDS.md) | Mobile responsiveness layer for protected admin dashboards, tables, cards, headings, and touch controls |
 | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
 | [Home Server Dashboard](HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
+| [Grafana Backup Monitoring](GRAFANA_BACKUP_MONITORING.md) | Grafana Cloud Explore, PromQL queries, dashboard panels, and alerts for home-server backup success, freshness, count, and next run |
 | [Oracle Local AI Alternative](ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Deployment Checklist](DEPLOYMENT_CHECKLIST.md) | Repeatable web, Worker shard, controller, Cloudflare cache purge, and post-deploy verification checklist |
 | [Dependency Updates](DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, Dependabot, and validation routine |
@@ -43,6 +44,7 @@ Use the docs like this:
 * Use `ADMIN_RESPONSIVE_DASHBOARDS.md` when changing mobile behavior for protected admin pages.
 * Use `HOME_SERVER_LOCAL_AI.md` when setting up, operating, debugging, or rolling back the current home-server local AI provider.
 * Use `HOME_SERVER_DASHBOARD.md` when setting up or troubleshooting the protected home-server instance stats dashboard.
+* Use `GRAFANA_BACKUP_MONITORING.md` when building or troubleshooting Grafana Cloud Prometheus panels for home-server backup success, freshness, available count, next run time, and alerts.
 * Use `ORACLE_LOCAL_AI.md` only as the older Oracle Free Tier alternative design if Oracle capacity becomes available later.
 * Use `DEPLOYMENT_CHECKLIST.md` when releasing web, Worker, controller, database, or cache changes.
 * Use `DEPENDENCY_UPDATES.md` when reviewing npm audit output, applying safe dependency updates, or validating Dependabot PRs.

@@ -22,7 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
-| Observability | Better Stack logs and uptime, Sentry errors, admin health dashboards |
+| Observability | Better Stack logs and uptime, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Documented Supabase restore runbook with validation SQL |
@@ -45,6 +45,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Deployment Checklist](docs/DEPLOYMENT_CHECKLIST.md) | Repeatable release checklist |
 | [Home Server Local AI](docs/HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
 | [Home Server Dashboard](docs/HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
+| [Grafana Backup Monitoring](docs/GRAFANA_BACKUP_MONITORING.md) | Grafana Cloud Explore, PromQL queries, dashboard panels, and alerts for home-server backup success, freshness, count, and next run |
 | [Oracle Local AI Alternative](docs/ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
@@ -85,6 +86,7 @@ nutsnews/
 | AI usage dashboard | `/admin/ai-usage` |
 | Local AI dashboard | `/admin/local-ai` |
 | Home server dashboard | `/admin/home-server` |
+| Grafana backup monitoring | [docs/GRAFANA_BACKUP_MONITORING.md](docs/GRAFANA_BACKUP_MONITORING.md) |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
@@ -112,6 +114,7 @@ NutsNews currently includes:
 * Optimized article image delivery with responsive Next Image thumbnails, AVIF/WebP support, and safe raw-image fallback
 * Cloudflare CDN caching for public reader routes
 * Better Stack uptime monitoring and centralized logs
+* Grafana Cloud Prometheus backup monitoring for the home server
 * Sentry error monitoring
 * Google-protected admin portal
 * Responsive admin dashboard shell for mobile-friendly protected dashboard pages

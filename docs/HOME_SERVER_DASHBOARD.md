@@ -17,6 +17,14 @@ Header: x-nutsnews-ai-key: <HOME_SERVER_STATS_API_KEY>
 
 The dashboard is designed for owner/admin use only. The browser never receives the API key. The Next.js admin page fetches stats server-side using server-only environment variables.
 
+Related monitoring:
+
+```text
+docs/GRAFANA_BACKUP_MONITORING.md
+```
+
+Use Grafana Cloud for backup time-series metrics such as last backup success, last successful backup time, backup age, available backup count, and next scheduled backup time. Use `/admin/home-server` for live instance/service health.
+
 ---
 
 ## What the Dashboard Shows
@@ -526,4 +534,5 @@ Possible future dashboard additions:
 * Last local AI review latency from Supabase.
 * Historical charts stored in Supabase.
 * Alerts when `ollama`, `cloudflared`, or `nutsnews-local-ai` goes inactive.
+* Grafana Cloud backup freshness alerts.
 * Better Stack heartbeat from the home server.

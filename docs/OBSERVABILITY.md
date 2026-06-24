@@ -18,6 +18,7 @@ NutsNews uses multiple observability layers:
 | Feed Health Dashboard | RSS source quality visibility |
 | Better Stack Uptime | External availability monitoring |
 | Better Stack Logs | Centralized structured logs |
+| Grafana Cloud | Prometheus metrics, Explore queries, backup dashboard panels, and backup alerts |
 | Sentry | Application error monitoring |
 | Cloudflare | CDN and Worker visibility |
 | Vercel | Deployment and frontend runtime visibility |
@@ -87,6 +88,37 @@ event:api.log_test.completed
 
 ---
 
+## Grafana Cloud
+
+Grafana Cloud is used for Prometheus metrics that are better represented as time series than logs.
+
+Current home-server backup monitoring uses this Prometheus data source:
+
+```text
+grafanacloud-kindcantaloupe2036-prom
+```
+
+Confirmed backup metric query:
+
+```promql
+home_server_backup_last_success{instance="chingadera", job="integrations/unix"}
+```
+
+Confirmed value meaning:
+
+```text
+1 = last backup succeeded
+0 = last backup failed
+```
+
+Detailed Grafana Explore queries, dashboard setup, and alert ideas live in:
+
+```text
+docs/GRAFANA_BACKUP_MONITORING.md
+```
+
+---
+
 ## Sentry
 
 Sentry tracks frontend, runtime, and Worker errors.
@@ -145,6 +177,16 @@ Answers:
 * Which feeds are disabled?
 * Which feeds should be enabled or disabled?
 
+### Grafana Cloud: `Home Server Backups`
+
+Answers:
+
+* Did the last backup succeed?
+* When was the last successful backup?
+* How old is the newest successful backup?
+* How many backups are available now?
+* When is the next backup expected, if exported by the backup script?
+
 ---
 
 ## Health Check Commands
@@ -183,6 +225,22 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
 
 ```bash
 curl "https://www.nutsnews.com/api/log-test"
+```
+
+### Grafana backup metric discovery
+
+Run this in Grafana Cloud Explore, not in the terminal:
+
+```promql
+{__name__=~"home_server_backup_.*", instance="chingadera", job="integrations/unix"}
+```
+
+### Grafana last backup success
+
+Run this in Grafana Cloud Explore:
+
+```promql
+home_server_backup_last_success{instance="chingadera", job="integrations/unix"}
 ```
 
 ---
