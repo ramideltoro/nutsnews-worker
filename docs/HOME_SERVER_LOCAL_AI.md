@@ -167,11 +167,11 @@ OLLAMA_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5:3b
 REQUEST_TIMEOUT_MS=120000
 MAX_ARTICLE_CHARS=3000
-ACCEPTED_SUMMARY_MIN_CHARS=240
-ACCEPTED_SUMMARY_MAX_CHARS=300
+ACCEPTED_SUMMARY_MIN_CHARS=260
+ACCEPTED_SUMMARY_MAX_CHARS=340
 OLLAMA_KEEP_ALIVE=30m
 OLLAMA_NUM_CTX=2048
-OLLAMA_NUM_PREDICT=260
+OLLAMA_NUM_PREDICT=320
 OLLAMA_TEMPERATURE=0
 ```
 
@@ -190,17 +190,29 @@ curl -s http://127.0.0.1:8788/health | python3 -m json.tool
 
 ### AI Summary Length
 
-Accepted Qwen/Ollama article reviews now return site summaries in the 240-300 character range. The local AI prompt asks Qwen for a 240-300 character summary, and the Node service normalizes accepted responses before sending them back to the Worker. Rejected articles still return an empty summary.
+Accepted Qwen/Ollama article reviews now return site summaries in the 260-340 character range. The local AI prompt explicitly rejects the old 150-160 character pattern, and the Node service normalizes accepted responses before sending them back to the Worker. Rejected articles still return an empty summary.
+
+The `/review` response also includes these debugging fields so it is obvious which code is running on the home server:
+
+```json
+{
+  "summary_length": 286,
+  "accepted_summary_min_chars": 260,
+  "accepted_summary_max_chars": 340
+}
+```
+
+If `summary_length` is missing, or the min/max values still show `240` and `300`, the home server is still running an older copy of `local-ai-service/server.mjs` or an older `.env`.
 
 The default limits are configurable from the local AI service environment:
 
 ```bash
-ACCEPTED_SUMMARY_MIN_CHARS=240
-ACCEPTED_SUMMARY_MAX_CHARS=300
-OLLAMA_NUM_PREDICT=260
+ACCEPTED_SUMMARY_MIN_CHARS=260
+ACCEPTED_SUMMARY_MAX_CHARS=340
+OLLAMA_NUM_PREDICT=320
 ```
 
-`OLLAMA_NUM_PREDICT` is set higher than before so the JSON response has enough room for the longer summary, category, score, and reason.
+`OLLAMA_NUM_PREDICT` is set higher than before so the JSON response has enough room for the longer summary, category, score, reason, and summary length metadata.
 
 ---
 
@@ -680,7 +692,7 @@ sudo journalctl -u nutsnews-local-ai -n 120 --no-pager
 Safe tuning options:
 
 * Keep `MAX_ARTICLE_CHARS=3000`.
-* Keep `OLLAMA_NUM_PREDICT=260` so Qwen has room for the 240-300 character summary plus JSON fields.
+* Keep `OLLAMA_NUM_PREDICT=320` so Qwen has room for the 260-340 character summary plus JSON fields.
 * Keep `AI_REVIEW_CONCURRENCY=1` until stable.
 * Consider `qwen2.5:1.5b` only after comparing quality.
 

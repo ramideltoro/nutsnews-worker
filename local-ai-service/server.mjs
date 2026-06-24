@@ -13,11 +13,11 @@ const OLLAMA_URL = (process.env.OLLAMA_URL ?? "http://127.0.0.1:11434").replace(
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:3b";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "120000");
 const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "3000");
-const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "240");
-const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "300");
+const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "260");
+const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "340");
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? "2048");
-const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "260");
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "320");
 const OLLAMA_TEMPERATURE = Number(process.env.OLLAMA_TEMPERATURE ?? "0");
 const SERVICE_STARTED_AT = new Date().toISOString();
 
@@ -102,12 +102,12 @@ function normalizeAcceptedSummary(value, { title, source, excerpt }) {
   const cleanTitle = normalizePlainText(title);
   const cleanSource = normalizePlainText(source, "the original source");
   const cleanExcerpt = normalizePlainText(excerpt);
-  const excerptContext = cleanExcerpt.length > 0 ? trimToCharacterLimit(cleanExcerpt, 180) : "";
+  const excerptContext = cleanExcerpt.length > 0 ? trimToCharacterLimit(cleanExcerpt, 220) : "";
 
   const candidates = [
     cleanedSummary,
-    cleanTitle ? `The story centers on ${cleanTitle}.` : "",
-    excerptContext ? `It adds context from the article: ${excerptContext}` : "",
+    cleanTitle ? `The story centers on ${cleanTitle}, while keeping the focus on the positive outcome readers can take from it.` : "",
+    excerptContext ? `The article adds useful context: ${excerptContext}` : "",
     `It gives NutsNews readers a calm, positive snapshot from ${cleanSource}, with enough detail to decide whether to open the full story.`,
   ].filter(Boolean);
 
@@ -201,7 +201,7 @@ function extractJsonObject(text) {
 }
 
 function buildPrompt({ title, source, excerpt, url }) {
-  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "240-300 characters for accepted stories, written as 2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 240 and 300 characters, including spaces. Keep it original, calm, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
+  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, nature-focused, space-focused, creativity-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "260-340 characters for accepted stories, written as 2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 260 and 340 characters, including spaces. Do not return a 150-160 character summary. Do not return one tiny sentence. Write 2 warm, calm, complete sentences with enough detail for a NutsNews card. Keep it original, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
 }
 
 async function callOllama({ model, prompt, signal }) {
@@ -225,7 +225,7 @@ async function callOllama({ model, prompt, signal }) {
         {
           role: "system",
           content:
-            "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 240-300 characters.",
+            "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 260-340 characters. Never return 150-160 character summaries for accepted stories.",
         },
         {
           role: "user",
@@ -522,6 +522,8 @@ async function handleReview(req, res) {
     const promptTokens = Number(ollamaResponse?.prompt_eval_count ?? 0) || 0;
     const completionTokens = Number(ollamaResponse?.eval_count ?? 0) || 0;
 
+    const normalizedSummary = decision === "accept" ? normalizeAcceptedSummary(parsed.summary, { title, source, excerpt }) : "";
+
     jsonResponse(res, 200, {
       request_id: requestId,
       provider: "local",
@@ -531,7 +533,10 @@ async function handleReview(req, res) {
       decision,
       category: normalizeString(parsed.category, decision === "accept" ? "Uplifting" : "Rejected") || "Uplifting",
       positivity_score: positivityScore,
-      summary: decision === "accept" ? normalizeAcceptedSummary(parsed.summary, { title, source, excerpt }) : "",
+      summary: normalizedSummary,
+      summary_length: normalizedSummary.length,
+      accepted_summary_min_chars: ACCEPTED_SUMMARY_MIN_CHARS,
+      accepted_summary_max_chars: ACCEPTED_SUMMARY_MAX_CHARS,
       reason: normalizeString(parsed.reason, "Reviewed by local NutsNews AI model."),
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,

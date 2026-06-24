@@ -2226,7 +2226,7 @@ Return JSON exactly like this:
   "decision": "accept" or "reject",
   "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting | Nature | Space | Creativity",
   "positivity_score": number from 1 to 10,
-  "summary": "A cheerful, calm 2-3 sentence summary. Do not add facts. Do not copy the article.",
+  "summary": "A cheerful, calm 2-3 sentence summary between 260 and 340 characters. Do not return a 150-160 character summary. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }`,
 					},
