@@ -13,9 +13,11 @@ const OLLAMA_URL = (process.env.OLLAMA_URL ?? "http://127.0.0.1:11434").replace(
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:3b";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "120000");
 const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "3000");
+const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "240");
+const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "300");
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? "2048");
-const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "180");
+const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "260");
 const OLLAMA_TEMPERATURE = Number(process.env.OLLAMA_TEMPERATURE ?? "0");
 const SERVICE_STARTED_AT = new Date().toISOString();
 
@@ -51,6 +53,99 @@ function readRequestBody(req, maxBytes = 1024 * 1024) {
 
 function normalizeString(value, fallback = "") {
   return typeof value === "string" ? value.trim() : fallback;
+}
+
+function normalizePlainText(value, fallback = "") {
+  return normalizeString(value, fallback)
+    .replace(/[`*_~>#]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+}
+
+function trimToCharacterLimit(value, maxChars) {
+  const text = normalizePlainText(value);
+
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  const slice = text.slice(0, maxChars + 1);
+  const sentenceBreak = Math.max(
+    slice.lastIndexOf(". "),
+    slice.lastIndexOf("! "),
+    slice.lastIndexOf("? "),
+  );
+
+  if (sentenceBreak >= ACCEPTED_SUMMARY_MIN_CHARS) {
+    return slice.slice(0, sentenceBreak + 1).trim();
+  }
+
+  const wordBreak = slice.lastIndexOf(" ");
+  const trimmed = slice
+    .slice(0, wordBreak >= ACCEPTED_SUMMARY_MIN_CHARS ? wordBreak : maxChars)
+    .replace(/[\s,;:.-]+$/, "")
+    .trim();
+
+  if (!trimmed) {
+    return text.slice(0, maxChars).trim();
+  }
+
+  const punctuated = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+  return punctuated.length <= maxChars ? punctuated : trimmed.slice(0, maxChars).trim();
+}
+
+function normalizeAcceptedSummary(value, { title, source, excerpt }) {
+  const minChars = Math.max(1, Math.min(ACCEPTED_SUMMARY_MIN_CHARS, ACCEPTED_SUMMARY_MAX_CHARS));
+  const maxChars = Math.max(minChars, ACCEPTED_SUMMARY_MAX_CHARS);
+  const cleanedSummary = normalizePlainText(value);
+  const cleanTitle = normalizePlainText(title);
+  const cleanSource = normalizePlainText(source, "the original source");
+  const cleanExcerpt = normalizePlainText(excerpt);
+  const excerptContext = cleanExcerpt.length > 0 ? trimToCharacterLimit(cleanExcerpt, 180) : "";
+
+  const candidates = [
+    cleanedSummary,
+    cleanTitle ? `The story centers on ${cleanTitle}.` : "",
+    excerptContext ? `It adds context from the article: ${excerptContext}` : "",
+    `It gives NutsNews readers a calm, positive snapshot from ${cleanSource}, with enough detail to decide whether to open the full story.`,
+  ].filter(Boolean);
+
+  let summary = "";
+
+  for (const candidate of candidates) {
+    const next = normalizePlainText(`${summary} ${candidate}`);
+
+    if (!summary || next.length <= maxChars || summary.length < minChars) {
+      summary = next;
+    }
+
+    if (summary.length >= minChars) {
+      break;
+    }
+  }
+
+  if (!summary) {
+    summary = `This uplifting story from ${cleanSource} gives NutsNews readers a calm, positive moment and a quick reason to open the original article.`;
+  }
+
+  if (summary.length > maxChars) {
+    summary = trimToCharacterLimit(summary, maxChars);
+  }
+
+  while (summary.length < minChars) {
+    const next = normalizePlainText(`${summary} It stays focused on the hopeful part of the story without adding extra claims.`);
+    if (next.length > maxChars) {
+      break;
+    }
+    summary = next;
+  }
+
+  if (summary.length > maxChars) {
+    summary = trimToCharacterLimit(summary, maxChars);
+  }
+
+  return summary;
 }
 
 function normalizeHeaderValue(value) {
@@ -106,7 +201,7 @@ function extractJsonObject(text) {
 }
 
 function buildPrompt({ title, source, excerpt, url }) {
-  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "one or two warm, concise sentences for accepted stories; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
+  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "240-300 characters for accepted stories, written as 2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 240 and 300 characters, including spaces. Keep it original, calm, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
 }
 
 async function callOllama({ model, prompt, signal }) {
@@ -130,7 +225,7 @@ async function callOllama({ model, prompt, signal }) {
         {
           role: "system",
           content:
-            "You are a careful JSON-only classifier and summarizer for an uplifting news app.",
+            "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 240-300 characters.",
         },
         {
           role: "user",
@@ -343,6 +438,8 @@ async function handleStats(req, res) {
         defaultModel: OLLAMA_MODEL,
         requestTimeoutMs: REQUEST_TIMEOUT_MS,
         maxArticleChars: MAX_ARTICLE_CHARS,
+        acceptedSummaryMinChars: ACCEPTED_SUMMARY_MIN_CHARS,
+        acceptedSummaryMaxChars: ACCEPTED_SUMMARY_MAX_CHARS,
         keepAlive: OLLAMA_KEEP_ALIVE,
         numCtx: OLLAMA_NUM_CTX,
         numPredict: OLLAMA_NUM_PREDICT,
@@ -434,7 +531,7 @@ async function handleReview(req, res) {
       decision,
       category: normalizeString(parsed.category, decision === "accept" ? "Uplifting" : "Rejected") || "Uplifting",
       positivity_score: positivityScore,
-      summary: decision === "accept" ? normalizeString(parsed.summary) : "",
+      summary: decision === "accept" ? normalizeAcceptedSummary(parsed.summary, { title, source, excerpt }) : "",
       reason: normalizeString(parsed.reason, "Reviewed by local NutsNews AI model."),
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,

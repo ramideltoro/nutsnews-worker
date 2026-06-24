@@ -167,9 +167,11 @@ OLLAMA_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=qwen2.5:3b
 REQUEST_TIMEOUT_MS=120000
 MAX_ARTICLE_CHARS=3000
+ACCEPTED_SUMMARY_MIN_CHARS=240
+ACCEPTED_SUMMARY_MAX_CHARS=300
 OLLAMA_KEEP_ALIVE=30m
 OLLAMA_NUM_CTX=2048
-OLLAMA_NUM_PREDICT=180
+OLLAMA_NUM_PREDICT=260
 OLLAMA_TEMPERATURE=0
 ```
 
@@ -183,6 +185,22 @@ sudo systemctl restart nutsnews-local-ai
 sudo journalctl -u nutsnews-local-ai -n 100 --no-pager
 curl -s http://127.0.0.1:8788/health | python3 -m json.tool
 ```
+
+---
+
+### AI Summary Length
+
+Accepted Qwen/Ollama article reviews now return site summaries in the 240-300 character range. The local AI prompt asks Qwen for a 240-300 character summary, and the Node service normalizes accepted responses before sending them back to the Worker. Rejected articles still return an empty summary.
+
+The default limits are configurable from the local AI service environment:
+
+```bash
+ACCEPTED_SUMMARY_MIN_CHARS=240
+ACCEPTED_SUMMARY_MAX_CHARS=300
+OLLAMA_NUM_PREDICT=260
+```
+
+`OLLAMA_NUM_PREDICT` is set higher than before so the JSON response has enough room for the longer summary, category, score, and reason.
 
 ---
 
@@ -662,7 +680,7 @@ sudo journalctl -u nutsnews-local-ai -n 120 --no-pager
 Safe tuning options:
 
 * Keep `MAX_ARTICLE_CHARS=3000`.
-* Keep `OLLAMA_NUM_PREDICT=180`.
+* Keep `OLLAMA_NUM_PREDICT=260` so Qwen has room for the 240-300 character summary plus JSON fields.
 * Keep `AI_REVIEW_CONCURRENCY=1` until stable.
 * Consider `qwen2.5:1.5b` only after comparing quality.
 
