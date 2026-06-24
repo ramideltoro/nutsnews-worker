@@ -437,6 +437,72 @@ home_server_backup_last_success_timestamp_seconds{instance="chingadera", job="in
 
 Prometheus timestamps should usually be Unix seconds, not milliseconds.
 
+
+---
+
+## NutsNews Database Backup Metrics
+
+NutsNews also exports Supabase database backup metrics through the same Grafana Alloy textfile collector path used by the home-server image backup.
+
+Metrics file on the home server:
+
+```text
+/var/lib/node_exporter/textfile_collector/nutsnews_db_backup.prom
+```
+
+Alloy reads the directory:
+
+```text
+/var/lib/node_exporter/textfile_collector
+```
+
+The database backup metrics use the prefix:
+
+```text
+nutsnews_db_backup_
+```
+
+Discovery query:
+
+```promql
+{__name__=~"nutsnews_db_backup_.*"}
+```
+
+Useful panel queries:
+
+| Panel | Query | Visualization |
+| --- | --- | --- |
+| NutsNews DB Backup Success | `nutsnews_db_backup_last_success` | Stat |
+| NutsNews DB Backup Age | `time() - nutsnews_db_backup_last_run_timestamp_seconds` | Stat or Gauge |
+| NutsNews DB Backup Duration | `nutsnews_db_backup_last_duration_seconds` | Stat |
+| NutsNews DB Backup Size | `nutsnews_db_backup_last_size_bytes` | Stat |
+| NutsNews DB Backup Files | `nutsnews_db_backup_last_file_count` | Stat |
+| NutsNews DB Backups in OneDrive | `nutsnews_db_backup_cloud_available_count` | Stat |
+| NutsNews DB Backup Timer Enabled | `nutsnews_db_backup_timer_enabled` | Stat |
+| NutsNews DB Backup Timer Active | `nutsnews_db_backup_timer_active` | Stat |
+| NutsNews DB Backup Next Run | `nutsnews_db_backup_next_run_timestamp_seconds` | Stat |
+
+Recommended success mapping:
+
+```text
+1 = Success
+0 = Failed
+```
+
+Recommended stale-backup alert:
+
+```promql
+time() - nutsnews_db_backup_last_run_timestamp_seconds > 93600
+```
+
+Recommended failed-backup alert:
+
+```promql
+nutsnews_db_backup_last_success == 0
+```
+
+The database backup schedule is daily at 3:15 AM with up to 10 minutes of randomized delay, so a 26-hour freshness threshold gives the timer a reasonable grace window.
+
 ---
 
 ## Relationship to NutsNews Admin Dashboards

@@ -13,8 +13,8 @@ const OLLAMA_URL = (process.env.OLLAMA_URL ?? "http://127.0.0.1:11434").replace(
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen2.5:3b";
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "120000");
 const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "3000");
-const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "260");
-const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "340");
+const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "200");
+const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "250");
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? "2048");
 const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "320");
@@ -201,7 +201,7 @@ function extractJsonObject(text) {
 }
 
 function buildPrompt({ title, source, excerpt, url }) {
-  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, nature-focused, space-focused, creativity-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "260-340 characters for accepted stories, written as 2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 260 and 340 characters, including spaces. Do not return a 150-160 character summary. Do not return one tiny sentence. Write 2 warm, calm, complete sentences with enough detail for a NutsNews card. Keep it original, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
+  return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, nature-focused, space-focused, creativity-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "200-250 characters for accepted stories, written as 1-2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 200 and 250 characters, including spaces. Write 1-2 warm, calm, complete sentences with enough detail for a NutsNews card. Keep it original, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
 }
 
 async function callOllama({ model, prompt, signal }) {
@@ -225,7 +225,7 @@ async function callOllama({ model, prompt, signal }) {
         {
           role: "system",
           content:
-            "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 260-340 characters. Never return 150-160 character summaries for accepted stories.",
+            "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 200-250 characters for accepted stories.",
         },
         {
           role: "user",

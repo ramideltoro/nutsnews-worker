@@ -34,12 +34,15 @@ Use these locations:
 | Backup type | Location |
 | --- | --- |
 | Supabase managed backups | Supabase project dashboard for the production project |
+| Automated home-server backups | Encrypted OneDrive remote `homebackup:nutsnews-db-backups` |
 | Manual local exports | `backups/supabase/<yyyy-mm-dd-hhmm>/` |
 | Off-machine copy | External drive, private cloud storage, or another secure location |
 | Schema source of truth | `supabase/migrations/` in this repo |
 | Restore validation SQL | `supabase/restore_validation.sql` in this repo |
 
 The repo ignores local backup files through `.gitignore`.
+
+Automated production database backup folders are named like `nutsnews-db-2026-06-24_16-32-16` and contain `nutsnews-db-public-tables.sql.gz`, `SHA256SUMS`, and metadata files. See [`NUTSNEWS_DB_BACKUPS.md`](NUTSNEWS_DB_BACKUPS.md) for the live backup schedule, retention policy, helper commands, and Grafana metrics.
 
 Recommended local backup layout:
 

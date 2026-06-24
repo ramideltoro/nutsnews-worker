@@ -25,7 +25,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Observability | Better Stack logs and uptime, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
-| Recovery | Documented Supabase restore runbook with validation SQL |
+| Recovery | Automated Supabase backups to encrypted OneDrive plus documented restore runbook with validation SQL |
 | Cost model | Built around free-tier cloud services, local AI support, and optional OpenAI fallback |
 
 ---
@@ -46,6 +46,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Home Server Local AI](docs/HOME_SERVER_LOCAL_AI.md) | Current production home-server local AI setup with Cloudflare Tunnel, Ollama/qwen, Worker Secrets Store, monitoring, troubleshooting, and rollback |
 | [Home Server Dashboard](docs/HOME_SERVER_DASHBOARD.md) | Protected `/admin/home-server` dashboard, `/stats` endpoint, instance metrics, Vercel env vars, deployment, and troubleshooting |
 | [Grafana Backup Monitoring](docs/GRAFANA_BACKUP_MONITORING.md) | Grafana Cloud Explore, PromQL queries, dashboard panels, and alerts for home-server backup success, freshness, count, and next run |
+| [NutsNews Supabase Backup Automation](docs/NUTSNEWS_DB_BACKUPS.md) | Home-server Supabase backups to encrypted OneDrive, daily schedule, retention, on-demand commands, metrics, and restore notes |
 | [Oracle Local AI Alternative](docs/ORACLE_LOCAL_AI.md) | Earlier Oracle Free Tier local AI design and fallback option if Oracle capacity becomes available later |
 | [Dependency Updates](docs/DEPENDENCY_UPDATES.md) | Repeatable npm audit, safe patch/minor update, and validation routine |
 | [Controller and Shards](docs/CONTROLLER_AND_SHARDS.md) | Manual controller triggers, shard tests, Wrangler tail, and expected response fields |
@@ -87,6 +88,7 @@ nutsnews/
 | Local AI dashboard | `/admin/local-ai` |
 | Home server dashboard | `/admin/home-server` |
 | Grafana backup monitoring | [docs/GRAFANA_BACKUP_MONITORING.md](docs/GRAFANA_BACKUP_MONITORING.md) |
+| NutsNews DB backups | [docs/NUTSNEWS_DB_BACKUPS.md](docs/NUTSNEWS_DB_BACKUPS.md) |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
 | Feed management dashboard | `/admin/feeds` |
@@ -115,6 +117,7 @@ NutsNews currently includes:
 * Cloudflare CDN caching for public reader routes
 * Better Stack uptime monitoring and centralized logs
 * Grafana Cloud Prometheus backup monitoring for the home server
+* Automated NutsNews Supabase backups to encrypted OneDrive from the home server
 * Sentry error monitoring
 * Google-protected admin portal
 * Responsive admin dashboard shell for mobile-friendly protected dashboard pages
@@ -134,6 +137,7 @@ NutsNews currently includes:
 * Worker article recovery improvements for no-thumbnail retries and image hydration
 * Truncated failed-feed error previews for cleaner Worker and controller responses
 * Supabase restore runbook, restore validation SQL, and restore verification helper script
+* NutsNews Supabase backup automation docs for encrypted OneDrive backups, daily schedule, retention, on-demand helper commands, and Grafana metrics
 * MIT license
 
 ---

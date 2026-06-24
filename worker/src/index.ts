@@ -368,6 +368,7 @@ const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 48;
 const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 10;
 const NO_THUMBNAIL_RETRY_AFTER_HOURS = 6;
 const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
+const AI_SUMMARY_MAX_CHARS = 250;
 const TRUNCATED_TEXT_SUFFIX = '... [truncated]';
 
 const OPENAI_MODEL = 'gpt-4o-mini';
@@ -2156,6 +2157,36 @@ async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]):
 	return reviewedUrls;
 }
 
+
+function normalizeTextWhitespace(value: string) {
+	return value.replace(/[`*_~>#]/g, '').replace(/\s+/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim();
+}
+
+function trimAiSummary(value: string, maxChars = AI_SUMMARY_MAX_CHARS) {
+	const text = normalizeTextWhitespace(value);
+
+	if (text.length <= maxChars) {
+		return text;
+	}
+
+	const slice = text.slice(0, maxChars + 1);
+	const sentenceBreak = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('! '), slice.lastIndexOf('? '));
+
+	if (sentenceBreak >= 120) {
+		return slice.slice(0, sentenceBreak + 1).trim();
+	}
+
+	const wordBreak = slice.lastIndexOf(' ');
+	const trimmed = slice.slice(0, wordBreak > 0 ? wordBreak : maxChars).replace(/[\s,;:.-]+$/, '').trim();
+
+	if (!trimmed) {
+		return text.slice(0, maxChars).trim();
+	}
+
+	const punctuated = /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+	return punctuated.length <= maxChars ? punctuated : trimmed.slice(0, maxChars).trim();
+}
+
 function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecision {
 	const decision = value.decision === 'accept' ? 'accept' : 'reject';
 
@@ -2163,7 +2194,7 @@ function normalizeAiDecision(value: Partial<AiArticleDecision>): AiArticleDecisi
 		decision,
 		category: value.category || 'Uplifting',
 		positivity_score: typeof value.positivity_score === 'number' ? value.positivity_score : 0,
-		summary: value.summary || '',
+		summary: decision === 'accept' ? trimAiSummary(value.summary || '') : '',
 		reason: value.reason || 'No reason provided by AI provider.',
 	};
 }
@@ -2226,7 +2257,7 @@ Return JSON exactly like this:
   "decision": "accept" or "reject",
   "category": "Community | Wellness | Science | Culture | Animals | Travel | Lifestyle | Achievement | Uplifting | Nature | Space | Creativity",
   "positivity_score": number from 1 to 10,
-  "summary": "A cheerful, calm 2-3 sentence summary between 260 and 340 characters. Do not return a 150-160 character summary. Do not add facts. Do not copy the article.",
+  "summary": "A cheerful, calm 1-2 sentence summary between 200 and 250 characters. Do not add facts. Do not copy the article.",
   "reason": "Short reason for the decision"
 }`,
 					},
