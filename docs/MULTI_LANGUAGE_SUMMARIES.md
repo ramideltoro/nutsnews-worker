@@ -153,3 +153,28 @@ Japanese is supported as an additional summary language using the same `public.a
 - Worker setting: `ENABLED_SUMMARY_LANGUAGES=fr,ja`
 
 Existing articles must be backfilled once. New accepted articles are translated by the Workers after the updated Worker code is deployed. Source links remain unchanged and continue to point to the original publisher.
+
+## Diagnosing missing translated cards
+
+If a few articles remain in English while the surrounding home-page articles are translated, do not assume the front end is broken. The frontend intentionally falls back to the English `articles` row whenever a matching row is missing from `public.article_summaries`.
+
+The first thing to check is whether a Worker run accepted more articles than `SUMMARY_TRANSLATION_LIMIT`. In the current Worker design, `SUMMARY_TRANSLATION_LIMIT` is an article count limit. Articles beyond that limit are still published, but they are skipped for translated summary generation.
+
+Run:
+
+```bash
+LANGUAGE_CODES=fr,ja AUDIT_LIMIT=80 WINDOW_MINUTES=45 \
+node scripts/diagnose_missing_article_translations.mjs
+```
+
+Then search Better Stack for:
+
+```text
+service:nutsnews-worker event:worker.translation.skipped_by_limit
+service:nutsnews-worker event:worker.translation.summary_completed
+service:nutsnews-worker articleUrl:"PASTE_ARTICLE_URL_HERE"
+```
+
+If the root cause is the limit, increase the Worker `SUMMARY_TRANSLATION_LIMIT` variable to match the largest `maxAiReviews` value you allow, then run `scripts/backfill_article_summaries.mjs` for the missing rows.
+
+If the root cause is provider failure, use the per-article Worker logs. Translation failures are logged with `articleUrl` and `languageCode` for local AI request failures, local invalid payloads, OpenAI fallback, OpenAI request failures, OpenAI invalid JSON, and Supabase article summary save failures.

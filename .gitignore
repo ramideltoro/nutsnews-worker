@@ -35,3 +35,5 @@ supabase/.temp/
 
 worker/.dev.vars
 .ai/
+.vercel
+.env*

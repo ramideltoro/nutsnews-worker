@@ -361,6 +361,10 @@ type RefreshResult = {
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
 	articleSummaryTranslationCount: number;
+	articleSummaryAttemptedTaskCount: number;
+	articleSummaryFailedTaskCount: number;
+	articleSummarySkippedByLimitArticleCount: number;
+	articleSummarySkippedByLimitLanguageTaskCount: number;
 	articleSummarySaveOk: boolean;
 	publicFeedSnapshotRefreshOk: boolean;
 	feedHealthSaveOk: boolean;
@@ -3000,24 +3004,73 @@ async function translateArticleSummary(
 	return translateArticleSummaryWithOpenAi(env, config, article, languageCode);
 }
 
+type ArticleSummaryTranslationBuildResult = {
+	summaries: ArticleSummaryInsert[];
+	attemptedTaskCount: number;
+	failedTaskCount: number;
+	skippedByLimitArticleCount: number;
+	skippedByLimitLanguageTaskCount: number;
+};
+
 async function buildArticleSummaryTranslations(
 	env: Env,
 	config: RuntimeConfig,
 	acceptedArticles: ArticleInsert[],
-): Promise<ArticleSummaryInsert[]> {
+): Promise<ArticleSummaryTranslationBuildResult> {
+	const emptyResult: ArticleSummaryTranslationBuildResult = {
+		summaries: [],
+		attemptedTaskCount: 0,
+		failedTaskCount: 0,
+		skippedByLimitArticleCount: 0,
+		skippedByLimitLanguageTaskCount: 0,
+	};
+
 	if (acceptedArticles.length === 0 || config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
-		return [];
+		return emptyResult;
 	}
 
-	const translationTasks = acceptedArticles
-		.slice(0, config.summaryTranslationLimit)
-		.flatMap((article) => config.enabledSummaryLanguages.map((languageCode) => ({ article, languageCode })));
+	const articlesSelectedForTranslation = acceptedArticles.slice(0, config.summaryTranslationLimit);
+	const articlesSkippedByLimit = acceptedArticles.slice(config.summaryTranslationLimit);
+	const skippedByLimitArticleCount = articlesSkippedByLimit.length;
+	const skippedByLimitLanguageTaskCount = skippedByLimitArticleCount * config.enabledSummaryLanguages.length;
+
+	if (skippedByLimitArticleCount > 0) {
+		await logWarn(
+			env,
+			'worker.translation.skipped_by_limit',
+			'Accepted articles were saved without translation because SUMMARY_TRANSLATION_LIMIT was lower than the accepted article count',
+			{
+				acceptedArticleCount: acceptedArticles.length,
+				summaryTranslationLimit: config.summaryTranslationLimit,
+				enabledSummaryLanguages: config.enabledSummaryLanguages,
+				skippedByLimitArticleCount,
+				skippedByLimitLanguageTaskCount,
+				skippedArticleSamples: articlesSkippedByLimit.slice(0, 10).map((article) => ({
+					source: article.source,
+					title: article.title,
+					articleUrl: article.original_url,
+					publishedOnSiteAt: article.published_on_site_at,
+				})),
+			},
+		);
+	}
+
+	const translationTasks = articlesSelectedForTranslation.flatMap((article) =>
+		config.enabledSummaryLanguages.map((languageCode) => ({ article, languageCode })),
+	);
 
 	const translations = await mapWithConcurrency(translationTasks, 2, ({ article, languageCode }) =>
 		translateArticleSummary(env, config, article, languageCode),
 	);
+	const summaries = translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
 
-	return translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+	return {
+		summaries,
+		attemptedTaskCount: translationTasks.length,
+		failedTaskCount: translationTasks.length - summaries.length,
+		skippedByLimitArticleCount,
+		skippedByLimitLanguageTaskCount,
+	};
 }
 
 async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summaries: ArticleSummaryInsert[]): Promise<boolean> {
@@ -3846,7 +3899,16 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
-	const articleSummaryRows = articleSaveOk ? await buildArticleSummaryTranslations(env, config, acceptedArticleRows) : [];
+	const articleSummaryBuildResult = articleSaveOk
+		? await buildArticleSummaryTranslations(env, config, acceptedArticleRows)
+		: {
+			summaries: [],
+			attemptedTaskCount: 0,
+			failedTaskCount: 0,
+			skippedByLimitArticleCount: 0,
+			skippedByLimitLanguageTaskCount: 0,
+		};
+	const articleSummaryRows = articleSummaryBuildResult.summaries;
 	const articleSummarySaveOk = articleSaveOk ? await saveArticleSummariesBatch(env, config, articleSummaryRows) : false;
 	const publicFeedSnapshotRefreshOk = articleSaveOk ? await refreshPublicFeedSnapshot(env, config) : false;
 
@@ -3856,6 +3918,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		summaryTranslationLimit: config.summaryTranslationLimit,
 		acceptedArticleCount: acceptedArticleRows.length,
 		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
+		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
+		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
+		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
 	});
 
@@ -3987,6 +4053,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		reviewSaveOk,
 		articleSaveOk,
 		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
+		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
+		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
+		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
 		publicFeedSnapshotRefreshOk,
 		feedHealthSaveOk,
