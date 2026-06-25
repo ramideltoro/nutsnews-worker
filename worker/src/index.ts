@@ -202,7 +202,7 @@ type ArticleSummaryInsert = {
 	source_language_code: 'en';
 	title: string;
 	summary: string;
-	generated_by: 'openai';
+	generated_by: 'openai' | 'local';
 	model: string;
 	updated_at: string;
 };
@@ -407,6 +407,10 @@ const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja';
 const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 12;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
+const SUMMARY_TRANSLATION_RETRY_ATTEMPTS = 2;
+const SUMMARY_TRANSLATION_RETRY_DELAY_MS = 750;
+const AI_REVIEW_RETRY_ATTEMPTS = 2;
+const AI_REVIEW_RETRY_DELAY_MS = 750;
 
 const POSITIVE_KEYWORDS = [
 	'good news',
@@ -681,6 +685,22 @@ function getOptionalNumber(value: string | undefined, fallback: number) {
 	}
 
 	return parsed;
+}
+
+function sleep(ms: number) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function delayBeforeRetry(attempt: number) {
+	if (attempt < SUMMARY_TRANSLATION_RETRY_ATTEMPTS) {
+		await sleep(SUMMARY_TRANSLATION_RETRY_DELAY_MS * attempt);
+	}
+}
+
+async function delayBeforeAiReviewRetry(attempt: number) {
+	if (attempt < AI_REVIEW_RETRY_ATTEMPTS) {
+		await sleep(AI_REVIEW_RETRY_DELAY_MS * attempt);
+	}
 }
 
 function emptyOpenAiUsage(): OpenAiUsage {
@@ -2220,9 +2240,12 @@ async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]):
 	return reviewedUrls;
 }
 
-
 function normalizeTextWhitespace(value: string) {
-	return value.replace(/[`*_~>#]/g, '').replace(/\s+/g, ' ').replace(/\s+([,.;:!?])/g, '$1').trim();
+	return value
+		.replace(/[`*_~>#]/g, '')
+		.replace(/\s+/g, ' ')
+		.replace(/\s+([,.;:!?])/g, '$1')
+		.trim();
 }
 
 function trimAiSummary(value: string, maxChars = AI_SUMMARY_MAX_CHARS) {
@@ -2240,7 +2263,10 @@ function trimAiSummary(value: string, maxChars = AI_SUMMARY_MAX_CHARS) {
 	}
 
 	const wordBreak = slice.lastIndexOf(' ');
-	const trimmed = slice.slice(0, wordBreak > 0 ? wordBreak : maxChars).replace(/[\s,;:.-]+$/, '').trim();
+	const trimmed = slice
+		.slice(0, wordBreak > 0 ? wordBreak : maxChars)
+		.replace(/[\s,;:.-]+$/, '')
+		.trim();
 
 	if (!trimmed) {
 		return text.slice(0, maxChars).trim();
@@ -2480,135 +2506,130 @@ async function classifyAndSummarizeArticleWithLocalAi(
 	config: RuntimeConfig,
 	article: RssArticle,
 ): Promise<AiClassificationResult> {
-	const startedAt = Date.now();
-	let response: Response;
+	let lastFailureReason = 'Local AI review failed.';
+	let lastDurationMs = 0;
 
-	try {
-		response = await fetch(getLocalAiReviewUrl(config), {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'x-nutsnews-ai-key': config.localAiApiKey,
-			},
-			body: JSON.stringify({
-				model: config.localAiModel,
-				source: article.source,
-				title: article.title,
-				excerpt: article.excerpt,
-				url: article.url,
-			}),
-		});
-	} catch (error) {
-		await logError(env, 'worker.local_ai.request_exception', 'Local AI request threw an exception', error, {
-			source: article.source,
-			title: article.title,
-			articleUrl: article.url,
-			localAiUrl: config.localAiUrl,
-			durationMs: Date.now() - startedAt,
-		});
+	for (let attempt = 1; attempt <= AI_REVIEW_RETRY_ATTEMPTS; attempt += 1) {
+		const startedAt = Date.now();
+		let response: Response;
 
-		if (config.aiProviderFallbackToOpenAi) {
-			await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI request exception', {
+		try {
+			response = await fetch(getLocalAiReviewUrl(config), {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-nutsnews-ai-key': config.localAiApiKey,
+				},
+				body: JSON.stringify({
+					model: config.localAiModel,
+					source: article.source,
+					title: article.title,
+					excerpt: article.excerpt,
+					url: article.url,
+				}),
+			});
+		} catch (error) {
+			lastDurationMs = Date.now() - startedAt;
+			lastFailureReason = `Local AI request exception: ${getErrorMessage(error)}`;
+
+			await logError(env, 'worker.local_ai.request_exception', 'Local AI request threw an exception', error, {
 				source: article.source,
 				title: article.title,
 				articleUrl: article.url,
+				localAiUrl: config.localAiUrl,
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				durationMs: lastDurationMs,
 			});
 
-			return classifyAndSummarizeArticle(env, config, article);
+			await delayBeforeAiReviewRetry(attempt);
+			continue;
 		}
 
-		return buildRejectedAiClassificationResult(
-			config,
-			`Local AI request exception: ${getErrorMessage(error)}`,
-			emptyOpenAiUsage(),
-			'local',
-			config.localAiModel,
-			Date.now() - startedAt,
-		);
-	}
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+			lastDurationMs = Date.now() - startedAt;
+			lastFailureReason = `Local AI request failed: ${response.status}`;
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.local_ai.request_failed', 'Local AI request failed', {
-			status: response.status,
-			source: article.source,
-			title: article.title,
-			articleUrl: article.url,
-			errorText,
-			durationMs: Date.now() - startedAt,
-		});
-
-		if (config.aiProviderFallbackToOpenAi) {
-			await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI request failure', {
+			await logWarn(env, 'worker.local_ai.request_failed', 'Local AI request failed', {
 				status: response.status,
 				source: article.source,
 				title: article.title,
 				articleUrl: article.url,
+				errorText,
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				durationMs: lastDurationMs,
 			});
 
-			return classifyAndSummarizeArticle(env, config, article);
+			await delayBeforeAiReviewRetry(attempt);
+			continue;
 		}
 
-		return buildRejectedAiClassificationResult(
-			config,
-			`Local AI request failed: ${response.status}`,
-			emptyOpenAiUsage(),
-			'local',
-			config.localAiModel,
-			Date.now() - startedAt,
-		);
-	}
+		const jsonResult = await readResponseJsonSafely<LocalAiReviewResponse>(response);
 
-	const jsonResult = await readResponseJsonSafely<LocalAiReviewResponse>(response);
+		if (!jsonResult.ok) {
+			lastDurationMs = Date.now() - startedAt;
+			lastFailureReason = 'Local AI response JSON parse failed';
 
-	if (!jsonResult.ok) {
-		await logError(env, 'worker.local_ai.response_json_failed', 'Failed to parse local AI response JSON', jsonResult.error, {
+			await logError(env, 'worker.local_ai.response_json_failed', 'Failed to parse local AI response JSON', jsonResult.error, {
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				durationMs: lastDurationMs,
+			});
+
+			await delayBeforeAiReviewRetry(attempt);
+			continue;
+		}
+
+		const data = jsonResult.value;
+		const aiDecision = normalizeAiDecision(data);
+		const usage = {
+			promptTokens: typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0,
+			completionTokens: typeof data.completion_tokens === 'number' ? data.completion_tokens : 0,
+			totalTokens:
+				typeof data.total_tokens === 'number'
+					? data.total_tokens
+					: (typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0) +
+						(typeof data.completion_tokens === 'number' ? data.completion_tokens : 0),
+		};
+		const durationMs = typeof data.duration_ms === 'number' ? data.duration_ms : Date.now() - startedAt;
+		const aiModel = data.ai_model || data.model || config.localAiModel;
+
+		await logInfo(env, 'worker.local_ai.article_reviewed', 'Local AI reviewed article', {
 			source: article.source,
 			title: article.title,
 			articleUrl: article.url,
-			durationMs: Date.now() - startedAt,
+			decision: aiDecision.decision,
+			category: aiDecision.category,
+			positivityScore: aiDecision.positivity_score,
+			localAiModel: aiModel,
+			attempt,
+			promptTokens: usage.promptTokens,
+			completionTokens: usage.completionTokens,
+			totalTokens: usage.totalTokens,
+			durationMs,
 		});
 
-		return buildRejectedAiClassificationResult(
-			config,
-			'Local AI response JSON parse failed',
-			emptyOpenAiUsage(),
-			'local',
-			config.localAiModel,
-			Date.now() - startedAt,
-		);
+		return buildAiClassificationResult(aiDecision, usage, config, 'local', aiModel, durationMs);
 	}
 
-	const data = jsonResult.value;
-	const aiDecision = normalizeAiDecision(data);
-	const usage = {
-		promptTokens: typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0,
-		completionTokens: typeof data.completion_tokens === 'number' ? data.completion_tokens : 0,
-		totalTokens:
-			typeof data.total_tokens === 'number'
-				? data.total_tokens
-				: (typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0) +
-					(typeof data.completion_tokens === 'number' ? data.completion_tokens : 0),
-	};
-	const durationMs = typeof data.duration_ms === 'number' ? data.duration_ms : Date.now() - startedAt;
-	const aiModel = data.ai_model || data.model || config.localAiModel;
+	if (config.aiProviderFallbackToOpenAi) {
+		await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI review retries failed', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+			lastFailureReason,
+		});
 
-	await logInfo(env, 'worker.local_ai.article_reviewed', 'Local AI reviewed article', {
-		source: article.source,
-		title: article.title,
-		articleUrl: article.url,
-		decision: aiDecision.decision,
-		category: aiDecision.category,
-		positivityScore: aiDecision.positivity_score,
-		localAiModel: aiModel,
-		promptTokens: usage.promptTokens,
-		completionTokens: usage.completionTokens,
-		totalTokens: usage.totalTokens,
-		durationMs,
-	});
+		return classifyAndSummarizeArticle(env, config, article);
+	}
 
-	return buildAiClassificationResult(aiDecision, usage, config, 'local', aiModel, durationMs);
+	return buildRejectedAiClassificationResult(config, lastFailureReason, emptyOpenAiUsage(), 'local', config.localAiModel, lastDurationMs);
 }
 
 async function classifyAndSummarizeArticleWithConfiguredProvider(
@@ -2631,9 +2652,158 @@ function normalizeLocalizedSummaryDecision(
 ): LocalizedSummaryDecision {
 	return {
 		language_code: languageCode,
-		title: normalizeTextWhitespace(value.title || fallbackTitle).slice(0, 220).trim() || fallbackTitle,
+		title:
+			normalizeTextWhitespace(value.title || fallbackTitle)
+				.slice(0, 220)
+				.trim() || fallbackTitle,
 		summary: trimAiSummary(value.summary || fallbackSummary),
 	};
+}
+
+type LocalAiTranslationResponse = Partial<LocalizedSummaryDecision> & {
+	model?: string;
+	ai_model?: string;
+	provider?: string;
+	prompt_tokens?: number;
+	completion_tokens?: number;
+	total_tokens?: number;
+	duration_ms?: number;
+};
+
+function hasLocalAiTranslationConfig(config: RuntimeConfig) {
+	return Boolean(config.localAiUrl && config.localAiApiKey);
+}
+
+function getLocalAiTranslateUrl(config: RuntimeConfig) {
+	return `${config.localAiUrl}/translate`;
+}
+
+async function translateArticleSummaryWithLocalAi(
+	env: Env,
+	config: RuntimeConfig,
+	article: ArticleInsert,
+	languageCode: SummaryLanguageCode,
+): Promise<ArticleSummaryInsert | null> {
+	if (!hasLocalAiTranslationConfig(config)) {
+		return null;
+	}
+
+	const languageName = getSummaryLanguageName(languageCode);
+	const startedAt = Date.now();
+
+	for (let attempt = 1; attempt <= SUMMARY_TRANSLATION_RETRY_ATTEMPTS; attempt += 1) {
+		let response: Response;
+
+		try {
+			response = await fetch(getLocalAiTranslateUrl(config), {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'x-nutsnews-ai-key': config.localAiApiKey,
+				},
+				body: JSON.stringify({
+					model: config.localAiModel,
+					language_code: languageCode,
+					language_name: languageName,
+					source: article.source,
+					title: article.title,
+					summary: article.ai_summary,
+					category: article.category,
+					url: article.original_url,
+				}),
+			});
+		} catch (error) {
+			await logWarn(env, 'worker.translation.local.request_exception', 'Local summary translation request threw an exception', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				localAiUrl: config.localAiUrl,
+				errorMessage: getErrorMessage(error),
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+
+			await logWarn(env, 'worker.translation.local.request_failed', 'Local summary translation request failed', {
+				status: response.status,
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		const jsonResult = await readResponseJsonSafely<LocalAiTranslationResponse>(response);
+
+		if (!jsonResult.ok) {
+			await logWarn(env, 'worker.translation.local.response_json_failed', 'Failed to parse local translation response JSON', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				errorMessage: getErrorMessage(jsonResult.error),
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		const data = jsonResult.value;
+		const rawTitle = typeof data.title === 'string' ? data.title : '';
+		const rawSummary = typeof data.summary === 'string' ? data.summary : '';
+
+		if (!normalizeTextWhitespace(rawTitle) || !normalizeTextWhitespace(rawSummary)) {
+			await logWarn(env, 'worker.translation.local.invalid_payload', 'Local summary translation response missed title or summary', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		const parsedSummary = normalizeLocalizedSummaryDecision(data, languageCode, article.title, article.ai_summary);
+		const model = data.ai_model || data.model || config.localAiModel;
+
+		await logInfo(env, 'worker.translation.local.article_summary_translated', 'Translated article summary with local AI', {
+			articleUrl: article.original_url,
+			languageCode,
+			model,
+			attempt,
+			promptTokens: typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0,
+			completionTokens: typeof data.completion_tokens === 'number' ? data.completion_tokens : 0,
+			totalTokens: typeof data.total_tokens === 'number' ? data.total_tokens : 0,
+			durationMs: Date.now() - startedAt,
+		});
+
+		return {
+			original_url: article.original_url,
+			language_code: parsedSummary.language_code,
+			source_language_code: 'en',
+			title: parsedSummary.title,
+			summary: parsedSummary.summary,
+			generated_by: 'local',
+			model,
+			updated_at: new Date().toISOString(),
+		};
+	}
+
+	return null;
 }
 
 async function translateArticleSummaryWithOpenAi(
@@ -2652,29 +2822,31 @@ async function translateArticleSummaryWithOpenAi(
 
 	const languageName = getSummaryLanguageName(languageCode);
 	const startedAt = Date.now();
-	let response: Response;
 
-	try {
-		response = await fetch('https://api.openai.com/v1/chat/completions', {
-			method: 'POST',
-			headers: {
-				Authorization: `Bearer ${config.openAiApiKey}`,
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				model: OPENAI_MODEL,
-				response_format: {
-					type: 'json_object',
+	for (let attempt = 1; attempt <= SUMMARY_TRANSLATION_RETRY_ATTEMPTS; attempt += 1) {
+		let response: Response;
+
+		try {
+			response = await fetch('https://api.openai.com/v1/chat/completions', {
+				method: 'POST',
+				headers: {
+					Authorization: `Bearer ${config.openAiApiKey}`,
+					'Content-Type': 'application/json',
 				},
-				messages: [
-					{
-						role: 'system',
-						content:
-							'You translate NutsNews article cards. Preserve the meaning and warm positive tone. Do not add facts. Do not translate URLs or source names. Return only valid JSON.',
+				body: JSON.stringify({
+					model: OPENAI_MODEL,
+					response_format: {
+						type: 'json_object',
 					},
-					{
-						role: 'user',
-						content: `Translate this NutsNews article card into ${languageName}.
+					messages: [
+						{
+							role: 'system',
+							content:
+								'You translate NutsNews article cards. Preserve the meaning and warm positive tone. Do not add facts. Do not translate URLs or source names. Return only valid JSON.',
+						},
+						{
+							role: 'user',
+							content: `Translate this NutsNews article card into ${languageName}.
 
 Source: ${article.source}
 English title: ${article.title}
@@ -2687,93 +2859,145 @@ Return JSON exactly like this:
   "title": "Natural ${languageName} title, no added facts",
   "summary": "Natural ${languageName} summary between 200 and 250 characters, no added facts"
 }`,
-					},
-				],
-			}),
-		});
-	} catch (error) {
-		await logError(env, 'worker.translation.request_exception', 'OpenAI summary translation threw an exception', error, {
-			articleUrl: article.original_url,
-			languageCode,
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
-	}
+						},
+					],
+				}),
+			});
+		} catch (error) {
+			await logError(env, 'worker.translation.openai.request_exception', 'OpenAI summary translation threw an exception', error, {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				durationMs: Date.now() - startedAt,
+			});
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-		await logWarn(env, 'worker.translation.request_failed', 'OpenAI summary translation request failed', {
-			status: response.status,
-			articleUrl: article.original_url,
-			languageCode,
-			errorText,
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
-	}
+			await delayBeforeRetry(attempt);
+			continue;
+		}
 
-	const jsonResult = await readResponseJsonSafely<{
-		choices?: Array<{
-			message?: {
-				content?: string;
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+			await logWarn(env, 'worker.translation.openai.request_failed', 'OpenAI summary translation request failed', {
+				status: response.status,
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		const jsonResult = await readResponseJsonSafely<{
+			choices?: Array<{
+				message?: {
+					content?: string;
+				};
+			}>;
+		}>(response);
+
+		if (!jsonResult.ok) {
+			await logError(
+				env,
+				'worker.translation.openai.response_json_failed',
+				'Failed to parse OpenAI translation response JSON',
+				jsonResult.error,
+				{
+					articleUrl: article.original_url,
+					languageCode,
+					attempt,
+					maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+					durationMs: Date.now() - startedAt,
+				},
+			);
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		const content = jsonResult.value.choices?.[0]?.message?.content;
+
+		if (!content) {
+			await logWarn(env, 'worker.translation.openai.empty_response', 'OpenAI summary translation returned empty content', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		try {
+			const parsedRawSummary = JSON.parse(content) as Partial<LocalizedSummaryDecision>;
+
+			if (!normalizeTextWhitespace(parsedRawSummary.title || '') || !normalizeTextWhitespace(parsedRawSummary.summary || '')) {
+				throw new Error('OpenAI translation response missed title or summary.');
+			}
+
+			const parsedSummary = normalizeLocalizedSummaryDecision(parsedRawSummary, languageCode, article.title, article.ai_summary);
+
+			await logInfo(env, 'worker.translation.openai.article_summary_translated', 'Translated article summary with OpenAI', {
+				articleUrl: article.original_url,
+				languageCode,
+				model: OPENAI_MODEL,
+				attempt,
+				durationMs: Date.now() - startedAt,
+			});
+
+			return {
+				original_url: article.original_url,
+				language_code: parsedSummary.language_code,
+				source_language_code: 'en',
+				title: parsedSummary.title,
+				summary: parsedSummary.summary,
+				generated_by: 'openai',
+				model: OPENAI_MODEL,
+				updated_at: new Date().toISOString(),
 			};
-		}>;
-	}>(response);
+		} catch (error) {
+			await logError(env, 'worker.translation.openai.invalid_json', 'OpenAI summary translation returned invalid JSON', error, {
+				articleUrl: article.original_url,
+				languageCode,
+				rawContent: content,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				durationMs: Date.now() - startedAt,
+			});
 
-	if (!jsonResult.ok) {
-		await logError(env, 'worker.translation.response_json_failed', 'Failed to parse OpenAI translation response JSON', jsonResult.error, {
-			articleUrl: article.original_url,
-			languageCode,
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
+			await delayBeforeRetry(attempt);
+		}
 	}
 
-	const content = jsonResult.value.choices?.[0]?.message?.content;
+	return null;
+}
 
-	if (!content) {
-		await logWarn(env, 'worker.translation.empty_response', 'OpenAI summary translation returned empty content', {
-			articleUrl: article.original_url,
-			languageCode,
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
+async function translateArticleSummary(
+	env: Env,
+	config: RuntimeConfig,
+	article: ArticleInsert,
+	languageCode: SummaryLanguageCode,
+): Promise<ArticleSummaryInsert | null> {
+	const localTranslation = await translateArticleSummaryWithLocalAi(env, config, article, languageCode);
+
+	if (localTranslation) {
+		return localTranslation;
 	}
 
-	try {
-		const parsedSummary = normalizeLocalizedSummaryDecision(
-			JSON.parse(content) as Partial<LocalizedSummaryDecision>,
-			languageCode,
-			article.title,
-			article.ai_summary,
-		);
-
-		await logInfo(env, 'worker.translation.article_summary_translated', 'Translated article summary', {
+	if (hasLocalAiTranslationConfig(config)) {
+		await logWarn(env, 'worker.translation.fallback_to_openai', 'Falling back to OpenAI after local summary translation failed', {
 			articleUrl: article.original_url,
 			languageCode,
-			model: OPENAI_MODEL,
-			durationMs: Date.now() - startedAt,
 		});
-
-		return {
-			original_url: article.original_url,
-			language_code: parsedSummary.language_code,
-			source_language_code: 'en',
-			title: parsedSummary.title,
-			summary: parsedSummary.summary,
-			generated_by: 'openai',
-			model: OPENAI_MODEL,
-			updated_at: new Date().toISOString(),
-		};
-	} catch (error) {
-		await logError(env, 'worker.translation.invalid_json', 'OpenAI summary translation returned invalid JSON', error, {
-			articleUrl: article.original_url,
-			languageCode,
-			rawContent: content,
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
 	}
+
+	return translateArticleSummaryWithOpenAi(env, config, article, languageCode);
 }
 
 async function buildArticleSummaryTranslations(
@@ -2790,7 +3014,7 @@ async function buildArticleSummaryTranslations(
 		.flatMap((article) => config.enabledSummaryLanguages.map((languageCode) => ({ article, languageCode })));
 
 	const translations = await mapWithConcurrency(translationTasks, 2, ({ article, languageCode }) =>
-		translateArticleSummaryWithOpenAi(env, config, article, languageCode),
+		translateArticleSummary(env, config, article, languageCode),
 	);
 
 	return translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
@@ -2817,10 +3041,16 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 			body: JSON.stringify(summaries),
 		});
 	} catch (error) {
-		await logError(env, 'worker.supabase.article_summary_batch_save_exception', 'Supabase article summary batch save threw an exception', error, {
-			summaryCount: summaries.length,
-			durationMs: Date.now() - startedAt,
-		});
+		await logError(
+			env,
+			'worker.supabase.article_summary_batch_save_exception',
+			'Supabase article summary batch save threw an exception',
+			error,
+			{
+				summaryCount: summaries.length,
+				durationMs: Date.now() - startedAt,
+			},
+		);
 		return false;
 	}
 

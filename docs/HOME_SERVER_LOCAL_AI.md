@@ -169,6 +169,7 @@ REQUEST_TIMEOUT_MS=120000
 MAX_ARTICLE_CHARS=3000
 ACCEPTED_SUMMARY_MIN_CHARS=260
 ACCEPTED_SUMMARY_MAX_CHARS=340
+TRANSLATION_SUMMARY_MAX_CHARS=250
 OLLAMA_KEEP_ALIVE=30m
 OLLAMA_NUM_CTX=2048
 OLLAMA_NUM_PREDICT=320
@@ -184,6 +185,33 @@ sudo systemctl status nutsnews-local-ai --no-pager
 sudo systemctl restart nutsnews-local-ai
 sudo journalctl -u nutsnews-local-ai -n 100 --no-pager
 curl -s http://127.0.0.1:8788/health | python3 -m json.tool
+```
+
+The service now exposes two Worker-facing AI endpoints:
+
+```text
+POST /review
+POST /translate
+```
+
+`POST /translate` is used for article card translations. The Worker calls it before OpenAI, retries once if it fails, and then falls back to OpenAI so missing home-server translations do not block new articles.
+
+Local translation test from the home server:
+
+```bash
+AI_KEY="$(sudo grep '^LOCAL_AI_API_KEY=' /opt/nutsnews/local-ai-service/.env | cut -d= -f2-)"
+
+curl -s -X POST http://127.0.0.1:8788/translate \
+  -H "content-type: application/json" \
+  -H "x-nutsnews-ai-key: ${AI_KEY}" \
+  -d '{
+    "model":"qwen2.5:3b",
+    "language_code":"fr",
+    "source":"NutsNews Test",
+    "title":"Community garden brings neighbors together",
+    "summary":"A neighborhood garden is helping families spend time outside, learn about plants, and share peaceful moments together.",
+    "category":"Community"
+  }' | python3 -m json.tool
 ```
 
 ---
@@ -782,4 +810,48 @@ real LOCAL_AI_API_KEY values
 machine-local .ai/ folders
 Cloudflare account tokens
 private SSH keys
+```
+
+## 2026-06 local-first review and translation fallback update
+
+NutsNews can now run the full AI path through the home server first:
+
+- Article review: Worker calls `POST /review` on the home server.
+- If review fails, the Worker retries local review once.
+- If local review still fails and fallback is enabled, the Worker calls OpenAI.
+- Translation: Worker calls `POST /translate` on the home server, retries once if needed, then falls back to OpenAI.
+
+Deploy with:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews2/worker
+
+export ENABLE_LOCAL_AI_SECRET_BINDING=true
+export AI_PROVIDER="local"
+export LOCAL_AI_URL="https://ai.nutsnews.com"
+export LOCAL_AI_MODEL="qwen2.5:3b"
+export AI_PROVIDER_FALLBACK_TO_OPENAI=true
+export AI_REVIEW_CONCURRENCY=1
+export ENABLED_SUMMARY_LANGUAGES="fr,ja"
+export SUMMARY_TRANSLATION_LIMIT=12
+
+npm ci
+npx tsc --noEmit
+npm run generate:wrangler
+npm run deploy:all
+```
+
+Expected successful local-first logs:
+
+```text
+worker.local_ai.article_reviewed
+worker.translation.local.article_summary_translated
+worker.translation.local.article_summary_translated
+```
+
+Expected fallback logs only when the home server fails:
+
+```text
+worker.local_ai.fallback_to_openai
+worker.openai.article_reviewed
 ```

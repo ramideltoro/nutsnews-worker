@@ -609,3 +609,28 @@ curl "https://nutsnews-controller.nutsnews.workers.dev/?shard=0"
 curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
 cd worker && npx wrangler tail --config generated-wrangler/wrangler.shard0.jsonc
 ```
+
+## Local-first AI operations
+
+For lowest OpenAI usage, deploy Worker shards with article review and translation both local-first:
+
+```bash
+export ENABLE_LOCAL_AI_SECRET_BINDING=true
+export AI_PROVIDER="local"
+export LOCAL_AI_URL="https://ai.nutsnews.com"
+export LOCAL_AI_MODEL="qwen2.5:3b"
+export AI_PROVIDER_FALLBACK_TO_OPENAI=true
+export AI_REVIEW_CONCURRENCY=1
+export ENABLED_SUMMARY_LANGUAGES="fr,ja"
+export SUMMARY_TRANSLATION_LIMIT=12
+```
+
+Then regenerate and deploy Workers:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews2/worker
+npm run generate:wrangler
+npm run deploy:all
+```
+
+A normal local-first run should have local review logs and zero OpenAI calls unless fallback is needed.

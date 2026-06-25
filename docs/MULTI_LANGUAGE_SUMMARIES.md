@@ -34,7 +34,7 @@ Important columns:
 | `source_language_code` | Original summary language, currently `en` |
 | `title` | Localized card title |
 | `summary` | Localized card summary |
-| `generated_by` | Translation provider, currently `openai` |
+| `generated_by` | Translation provider: `local` when the home server generated it, otherwise `openai` after fallback |
 | `model` | Translation model |
 
 `unique(original_url, language_code)` makes each article/language pair upsertable.
@@ -44,16 +44,32 @@ Important columns:
 When an article is accepted and saved, the Worker:
 
 1. Saves the English/default article row in `public.articles`.
-2. Generates French title + summary using OpenAI when `ENABLED_SUMMARY_LANGUAGES` includes `fr`.
-3. Upserts the result into `public.article_summaries`.
-4. Keeps `original_url` unchanged.
+2. Builds one translation task for each enabled language.
+3. Calls the home-server local AI service first through `POST {LOCAL_AI_URL}/translate`.
+4. Retries the home-server translation once when the request throws, returns a non-OK status, returns invalid JSON, or misses the translated title/summary.
+5. Falls back to OpenAI if the home-server translation still fails.
+6. Retries the OpenAI translation once before giving up.
+7. Upserts successful results into `public.article_summaries`.
+8. Keeps `original_url` unchanged.
+
+This makes new card translations prefer the home server while preserving OpenAI as a safety net.
 
 Default Worker config:
 
 ```text
-ENABLED_SUMMARY_LANGUAGES=fr
+ENABLED_SUMMARY_LANGUAGES=fr,ja
 SUMMARY_TRANSLATION_LIMIT=12
 ```
+
+Home-server translation config uses the same local AI variables as local review:
+
+```text
+LOCAL_AI_URL=https://ai.nutsnews.com
+LOCAL_AI_MODEL=qwen2.5:3b
+LOCAL_AI_API_KEY=<secret binding>
+```
+
+`AI_PROVIDER` can still be `openai`; translations will use the home server first whenever `LOCAL_AI_URL` and `LOCAL_AI_API_KEY` are available.
 
 To disable translations temporarily:
 

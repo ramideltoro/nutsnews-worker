@@ -15,6 +15,7 @@ const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? "120000");
 const MAX_ARTICLE_CHARS = Number(process.env.MAX_ARTICLE_CHARS ?? "3000");
 const ACCEPTED_SUMMARY_MIN_CHARS = Number(process.env.ACCEPTED_SUMMARY_MIN_CHARS ?? "200");
 const ACCEPTED_SUMMARY_MAX_CHARS = Number(process.env.ACCEPTED_SUMMARY_MAX_CHARS ?? "250");
+const TRANSLATION_SUMMARY_MAX_CHARS = Number(process.env.TRANSLATION_SUMMARY_MAX_CHARS ?? "250");
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE ?? "30m";
 const OLLAMA_NUM_CTX = Number(process.env.OLLAMA_NUM_CTX ?? "2048");
 const OLLAMA_NUM_PREDICT = Number(process.env.OLLAMA_NUM_PREDICT ?? "320");
@@ -204,7 +205,59 @@ function buildPrompt({ title, source, excerpt, url }) {
   return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, nature-focused, space-focused, creativity-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "200-250 characters for accepted stories, written as 1-2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 200 and 250 characters, including spaces. Write 1-2 warm, calm, complete sentences with enough detail for a NutsNews card. Keep it original, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
 }
 
-async function callOllama({ model, prompt, signal }) {
+function getLanguageName(languageCode) {
+  if (languageCode === "fr") {
+    return "French";
+  }
+
+  if (languageCode === "ja") {
+    return "Japanese";
+  }
+
+  return "the requested language";
+}
+
+function normalizeLanguageCode(value) {
+  const languageCode = normalizeString(value).toLowerCase();
+
+  if (languageCode === "fr" || languageCode === "ja") {
+    return languageCode;
+  }
+
+  return "";
+}
+
+function normalizeLocalizedSummary(value, { fallbackTitle, fallbackSummary }) {
+  const title = normalizePlainText(value?.title, fallbackTitle).slice(0, 220).trim() || fallbackTitle;
+  const summary = trimToCharacterLimit(normalizePlainText(value?.summary, fallbackSummary), TRANSLATION_SUMMARY_MAX_CHARS);
+
+  return {
+    title,
+    summary: summary || fallbackSummary,
+  };
+}
+
+function buildTranslationPrompt({ languageCode, source, title, summary, category }) {
+  const languageName = getLanguageName(languageCode);
+
+  return `You are the NutsNews local translation engine.
+
+Translate the NutsNews article card into ${languageName}. Preserve the meaning, warmth, and calm positive tone. Do not add facts. Do not translate URLs or source names. Keep the translated title natural and concise. Keep the translated summary natural for a general reader and under ${TRANSLATION_SUMMARY_MAX_CHARS} characters.
+
+Return strict JSON only using exactly these keys:
+{
+  "language_code": "${languageCode}",
+  "title": "Natural ${languageName} title, no added facts",
+  "summary": "Natural ${languageName} summary, no added facts"
+}
+
+Source: ${source}
+English title: ${title}
+English summary: ${summary}
+Category: ${category}`;
+}
+
+async function callOllama({ model, prompt, signal, systemContent }) {
   const response = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: "POST",
     headers: {
@@ -225,6 +278,7 @@ async function callOllama({ model, prompt, signal }) {
         {
           role: "system",
           content:
+            systemContent ||
             "You are a careful JSON-only classifier and summarizer for an uplifting news app. Accepted summaries must be 200-250 characters for accepted stories.",
         },
         {
@@ -440,6 +494,7 @@ async function handleStats(req, res) {
         maxArticleChars: MAX_ARTICLE_CHARS,
         acceptedSummaryMinChars: ACCEPTED_SUMMARY_MIN_CHARS,
         acceptedSummaryMaxChars: ACCEPTED_SUMMARY_MAX_CHARS,
+        translationSummaryMaxChars: TRANSLATION_SUMMARY_MAX_CHARS,
         keepAlive: OLLAMA_KEEP_ALIVE,
         numCtx: OLLAMA_NUM_CTX,
         numPredict: OLLAMA_NUM_PREDICT,
@@ -555,6 +610,101 @@ async function handleReview(req, res) {
   }
 }
 
+async function handleTranslate(req, res) {
+  if (!LOCAL_AI_API_KEY) {
+    jsonResponse(res, 500, {
+      error: "LOCAL_AI_API_KEY is not configured on the local AI service.",
+    });
+    return;
+  }
+
+  if (!isAuthorized(req)) {
+    jsonResponse(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const rawBody = await readRequestBody(req);
+    const payload = JSON.parse(rawBody || "{}");
+
+    const model = normalizeString(payload.model, OLLAMA_MODEL) || OLLAMA_MODEL;
+    const languageCode = normalizeLanguageCode(payload.language_code ?? payload.languageCode);
+    const title = normalizePlainText(payload.title);
+    const source = normalizePlainText(payload.source, "Unknown source");
+    const summary = normalizePlainText(payload.summary).slice(0, MAX_ARTICLE_CHARS);
+    const category = normalizePlainText(payload.category, "Uplifting");
+
+    if (!languageCode) {
+      jsonResponse(res, 400, {
+        error: "language_code must be one of: fr, ja.",
+      });
+      return;
+    }
+
+    if (!title || !summary) {
+      jsonResponse(res, 400, {
+        error: "Both title and summary are required.",
+      });
+      return;
+    }
+
+    const prompt = buildTranslationPrompt({ languageCode, source, title, summary, category });
+    const ollamaResponse = await callOllama({
+      model,
+      prompt,
+      signal: controller.signal,
+      systemContent:
+        "You are a careful JSON-only translator for an uplifting news app. Preserve meaning and tone. Do not add facts.",
+    });
+
+    const content = normalizeString(ollamaResponse?.message?.content);
+    const parsed = extractJsonObject(content);
+
+    if (!normalizePlainText(parsed?.title) || !normalizePlainText(parsed?.summary)) {
+      throw new Error("Ollama translation response did not include both title and summary.");
+    }
+
+    const normalized = normalizeLocalizedSummary(parsed, {
+      fallbackTitle: title,
+      fallbackSummary: summary,
+    });
+    const durationMs = Date.now() - startedAt;
+    const promptTokens = Number(ollamaResponse?.prompt_eval_count ?? 0) || 0;
+    const completionTokens = Number(ollamaResponse?.eval_count ?? 0) || 0;
+
+    jsonResponse(res, 200, {
+      request_id: requestId,
+      provider: "local",
+      ai_provider: "local",
+      model,
+      ai_model: model,
+      language_code: languageCode,
+      title: normalized.title,
+      summary: normalized.summary,
+      summary_length: normalized.summary.length,
+      translation_summary_max_chars: TRANSLATION_SUMMARY_MAX_CHARS,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+      duration_ms: durationMs,
+    });
+  } catch (error) {
+    const durationMs = Date.now() - startedAt;
+    jsonResponse(res, 500, {
+      request_id: requestId,
+      error: error instanceof Error ? error.message : "Unknown translation error",
+      duration_ms: durationMs,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
@@ -573,9 +723,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/translate") {
+    await handleTranslate(req, res);
+    return;
+  }
+
   jsonResponse(res, 404, {
     error: "Not found",
-    routes: ["GET /health", "GET /stats", "POST /review"],
+    routes: ["GET /health", "GET /stats", "POST /review", "POST /translate"],
   });
 });
 
