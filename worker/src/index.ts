@@ -104,7 +104,7 @@ type AiArticleDecision = {
 	reason: string;
 };
 
-type SummaryLanguageCode = 'fr';
+type SummaryLanguageCode = 'fr' | 'ja';
 
 type LocalizedSummaryDecision = {
 	language_code: SummaryLanguageCode;
@@ -404,7 +404,7 @@ const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
 const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
-const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr';
+const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja';
 const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 12;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
 
@@ -780,7 +780,11 @@ function getAiProvider(value: string | undefined): AiProvider {
 }
 
 function isSummaryLanguageCode(value: string): value is SummaryLanguageCode {
-	return value === 'fr';
+	return value === 'fr' || value === 'ja';
+}
+
+function getSummaryLanguageName(languageCode: SummaryLanguageCode) {
+	return languageCode === 'fr' ? 'French' : 'Japanese';
 }
 
 function getEnabledSummaryLanguages(value: string | undefined): SummaryLanguageCode[] {
@@ -2646,7 +2650,7 @@ async function translateArticleSummaryWithOpenAi(
 		return null;
 	}
 
-	const languageName = languageCode === 'fr' ? 'French' : languageCode;
+	const languageName = getSummaryLanguageName(languageCode);
 	const startedAt = Date.now();
 	let response: Response;
 

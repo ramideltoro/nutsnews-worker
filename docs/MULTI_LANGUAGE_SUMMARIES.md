@@ -123,3 +123,17 @@ ENABLED_SUMMARY_LANGUAGES=fr,es
 ```
 
 No new column is required in `public.articles`.
+
+
+## Japanese support (`ja`)
+
+Japanese is supported as an additional summary language using the same `public.article_summaries` table.
+
+- UI language code: `ja`
+- Language label: `日本語`
+- Flag badge: 🇯🇵
+- Article API: `/api/articles?lang=ja`
+- Backfill script: `scripts/backfill_japanese_summaries.mjs`
+- Worker setting: `ENABLED_SUMMARY_LANGUAGES=fr,ja`
+
+Existing articles must be backfilled once. New accepted articles are translated by the Workers after the updated Worker code is deployed. Source links remain unchanged and continue to point to the original publisher.
