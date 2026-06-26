@@ -18,22 +18,24 @@
  *   LANGUAGE_CODES=fr,ja
  *   BACKFILL_LIMIT=25              # max translation rows saved in this run
  *   CANDIDATE_LIMIT=250            # recent articles to scan for missing rows
- *   BACKFILL_SOURCE=public_feed_snapshot   # public_feed_snapshot or articles
+ *   BACKFILL_SOURCE=articles       # articles or public_feed_snapshot
+ *   PUBLISH_READY=1                # publish translation_pending rows after all language rows exist
  *   DRY_RUN=1
  */
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)?.replace(/\/+$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_API_KEY = safeHeaderValue(process.env.OPENAI_API_KEY);
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
 const LOCAL_AI_URL = process.env.LOCAL_AI_URL?.replace(/\/+$/, '');
-const LOCAL_AI_API_KEY = process.env.LOCAL_AI_API_KEY;
+const LOCAL_AI_API_KEY = safeHeaderValue(process.env.LOCAL_AI_API_KEY);
 const LOCAL_AI_MODEL = process.env.LOCAL_AI_MODEL ?? 'qwen2.5:3b';
 const LANGUAGE_CODES = parseLanguages(process.env.LANGUAGE_CODES ?? process.env.LANGUAGE_CODE ?? 'fr,ja');
 const BACKFILL_LIMIT = clampNumber(process.env.BACKFILL_LIMIT, 25, 1, 200);
 const CANDIDATE_LIMIT = clampNumber(process.env.CANDIDATE_LIMIT, 250, 1, 5000);
-const BACKFILL_SOURCE = normalizeBackfillSource(process.env.BACKFILL_SOURCE ?? 'public_feed_snapshot');
+const BACKFILL_SOURCE = normalizeBackfillSource(process.env.BACKFILL_SOURCE ?? 'articles');
 const DRY_RUN = isTruthy(process.env.DRY_RUN);
+const PUBLISH_READY = isTruthy(process.env.PUBLISH_READY ?? '1');
 const FORCE = isTruthy(process.env.FORCE);
 const SUMMARY_LOOKUP_LIMIT = clampNumber(process.env.SUMMARY_LOOKUP_LIMIT, 20000, 1, 50000);
 const TRANSLATED_SUMMARY_MAX_CHARS = 250;
@@ -63,6 +65,23 @@ const supabaseHeaders = {
   Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
   'Content-Type': 'application/json',
 };
+
+
+function safeHeaderValue(value) {
+  const trimmed = String(value ?? '').trim();
+
+  if (!trimmed || /[\r\n\0]/.test(trimmed)) {
+    return '';
+  }
+
+  return trimmed;
+}
+
+function encodePostgrestInFilter(values) {
+  return `in.(${values
+    .map((value) => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+    .join(',')})`;
+}
 
 function parseLanguages(value) {
   return Array.from(
@@ -170,7 +189,7 @@ async function supabaseFetch(path, options = {}) {
 async function loadCandidateArticles() {
   if (BACKFILL_SOURCE === 'articles') {
     return supabaseFetch(
-      `/rest/v1/articles?select=id,source,title,original_url,ai_summary,category,published_on_site_at&status=eq.published&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc&limit=${CANDIDATE_LIMIT}`,
+      `/rest/v1/articles?select=id,source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc&limit=${CANDIDATE_LIMIT}`,
     );
   }
 
@@ -361,6 +380,59 @@ async function upsertSummaries(summaries) {
   });
 }
 
+async function loadSummaryRowsForArticles(articles) {
+  const urls = Array.from(new Set((articles ?? []).map((article) => article.original_url).filter(Boolean)));
+
+  if (urls.length === 0) {
+    return [];
+  }
+
+  return supabaseFetch(
+    `/rest/v1/article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(encodePostgrestInFilter(urls))}&language_code=in.(${LANGUAGE_CODES.join(',')})&limit=${Math.max(SUMMARY_LOOKUP_LIMIT, urls.length * LANGUAGE_CODES.length)}`,
+  );
+}
+
+async function publishFullyTranslatedArticles(articles) {
+  if (!PUBLISH_READY || !articles?.length) {
+    return 0;
+  }
+
+  const summaries = await loadSummaryRowsForArticles(articles);
+  const languagesByUrl = new Map();
+
+  for (const summary of summaries ?? []) {
+    const current = languagesByUrl.get(summary.original_url) ?? new Set();
+    current.add(summary.language_code);
+    languagesByUrl.set(summary.original_url, current);
+  }
+
+  const readyUrls = Array.from(
+    new Set(
+      articles
+        .filter((article) => {
+          const languages = languagesByUrl.get(article.original_url) ?? new Set();
+          return LANGUAGE_CODES.every((languageCode) => languages.has(languageCode));
+        })
+        .map((article) => article.original_url)
+        .filter(Boolean),
+    ),
+  );
+
+  if (readyUrls.length === 0) {
+    return 0;
+  }
+
+  await supabaseFetch(`/rest/v1/articles?original_url=${encodeURIComponent(encodePostgrestInFilter(readyUrls))}`, {
+    method: 'PATCH',
+    headers: {
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ status: 'published' }),
+  });
+
+  return readyUrls.length;
+}
+
 const articles = await loadCandidateArticles();
 const existingSummaries = await loadExistingSummaries();
 const tasks = buildTranslationTasks(articles, existingSummaries);
@@ -372,6 +444,7 @@ console.log(`Candidate articles scanned: ${articles?.length ?? 0}`);
 console.log(`Languages: ${LANGUAGE_CODES.join(', ')}`);
 console.log(`Missing translation rows selected: ${tasks.length}`);
 console.log(`Provider preference: ${LOCAL_AI_URL ? 'local AI first' : 'OpenAI only'}`);
+console.log(`Publish ready articles: ${PUBLISH_READY ? 'yes' : 'no'}`);
 
 if (tasks.length === 0) {
   console.log('Nothing to backfill.');
@@ -395,4 +468,6 @@ for (const task of tasks) {
 }
 
 await upsertSummaries(summaries);
+const publishedCount = await publishFullyTranslatedArticles(articles);
 console.log(`Saved ${summaries.length} translation row(s).`);
+console.log(`Published/confirmed ${publishedCount} fully translated article(s).`);

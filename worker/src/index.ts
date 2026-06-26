@@ -180,6 +180,17 @@ type ArticleReviewInsert = {
 	reviewed_at: string;
 };
 
+type ArticleStatus = 'published' | 'translation_pending';
+
+type ArticleSummarySourceArticle = {
+	source: string;
+	title: string;
+	original_url: string;
+	ai_summary: string;
+	category: string;
+	published_on_site_at?: string | null;
+};
+
 type ArticleInsert = {
 	source: string;
 	title: string;
@@ -193,7 +204,7 @@ type ArticleInsert = {
 	positivity_score: number;
 	ai_provider: ReviewProvider;
 	ai_model: string;
-	status: 'published';
+	status: ArticleStatus;
 };
 
 type ArticleSummaryInsert = {
@@ -366,6 +377,10 @@ type RefreshResult = {
 	articleSummarySkippedByLimitArticleCount: number;
 	articleSummarySkippedByLimitLanguageTaskCount: number;
 	articleSummarySaveOk: boolean;
+	articleSummaryRecoveryCandidateCount: number;
+	articleSummaryRecoveryAttemptedTaskCount: number;
+	articleSummaryPublishCount: number;
+	articleSummaryPublishOk: boolean;
 	publicFeedSnapshotRefreshOk: boolean;
 	feedHealthSaveOk: boolean;
 	aiUsageSaveOk: boolean;
@@ -409,8 +424,9 @@ const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
 const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja';
-const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 12;
+const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 6;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
+const SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT = 80;
 const SUMMARY_TRANSLATION_RETRY_ATTEMPTS = 2;
 const SUMMARY_TRANSLATION_RETRY_DELAY_MS = 750;
 const AI_REVIEW_RETRY_ATTEMPTS = 2;
@@ -722,6 +738,16 @@ function estimateOpenAiCost(usage: OpenAiUsage, config: RuntimeConfig) {
 	return inputCost + outputCost;
 }
 
+function getSafeHeaderValue(value: string) {
+	const trimmed = value.trim();
+
+	if (!trimmed || /[\r\n\0]/.test(trimmed)) {
+		return null;
+	}
+
+	return trimmed;
+}
+
 function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
 	if (!value || typeof value !== 'object') {
 		return emptyOpenAiUsage();
@@ -960,6 +986,10 @@ function clampArticlePageImageLookupLimit(value: number | undefined, fallback: n
 	}
 
 	return Math.max(0, Math.min(value, HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN));
+}
+
+function shouldHoldAcceptedArticlesForTranslations(config: RuntimeConfig) {
+	return config.enabledSummaryLanguages.length > 0 && config.summaryTranslationLimit > 0;
 }
 
 function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number, requestedLookupLimit: number) {
@@ -2318,13 +2348,25 @@ function buildRejectedAiClassificationResult(
 
 async function classifyAndSummarizeArticle(env: Env, config: RuntimeConfig, article: RssArticle): Promise<AiClassificationResult> {
 	const startedAt = Date.now();
+	const openAiApiKey = getSafeHeaderValue(config.openAiApiKey);
+
+	if (!openAiApiKey) {
+		await logWarn(env, 'worker.openai.invalid_api_key_header', 'Skipped OpenAI review because OPENAI_API_KEY is missing or contains invalid header characters', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+		});
+
+		return buildRejectedAiClassificationResult(config, 'OPENAI_API_KEY is missing or contains invalid header characters.', emptyOpenAiUsage(), 'openai', OPENAI_MODEL, 0);
+	}
+
 	let response: Response;
 
 	try {
 		response = await fetch('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
 			headers: {
-				Authorization: `Bearer ${config.openAiApiKey}`,
+				Authorization: `Bearer ${openAiApiKey}`,
 				'Content-Type': 'application/json',
 			},
 			body: JSON.stringify({
@@ -2510,6 +2552,22 @@ async function classifyAndSummarizeArticleWithLocalAi(
 	config: RuntimeConfig,
 	article: RssArticle,
 ): Promise<AiClassificationResult> {
+	const localAiApiKey = getSafeHeaderValue(config.localAiApiKey);
+
+	if (!localAiApiKey) {
+		await logWarn(env, 'worker.local_ai.invalid_api_key_header', 'Local AI review key is blank or contains invalid header characters', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+		});
+
+		if (config.aiProviderFallbackToOpenAi) {
+			return classifyAndSummarizeArticle(env, config, article);
+		}
+
+		return buildRejectedAiClassificationResult(config, 'LOCAL_AI_API_KEY is blank or contains invalid header characters.', emptyOpenAiUsage(), 'local', config.localAiModel, 0);
+	}
+
 	let lastFailureReason = 'Local AI review failed.';
 	let lastDurationMs = 0;
 
@@ -2522,7 +2580,7 @@ async function classifyAndSummarizeArticleWithLocalAi(
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					'x-nutsnews-ai-key': config.localAiApiKey,
+					'x-nutsnews-ai-key': localAiApiKey,
 				},
 				body: JSON.stringify({
 					model: config.localAiModel,
@@ -2685,10 +2743,20 @@ function getLocalAiTranslateUrl(config: RuntimeConfig) {
 async function translateArticleSummaryWithLocalAi(
 	env: Env,
 	config: RuntimeConfig,
-	article: ArticleInsert,
+	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
 ): Promise<ArticleSummaryInsert | null> {
 	if (!hasLocalAiTranslationConfig(config)) {
+		return null;
+	}
+
+	const localAiApiKey = getSafeHeaderValue(config.localAiApiKey);
+
+	if (!localAiApiKey) {
+		await logWarn(env, 'worker.translation.local.invalid_api_key_header', 'Skipped local summary translation because LOCAL_AI_API_KEY is blank or contains invalid header characters', {
+			articleUrl: article.original_url,
+			languageCode,
+		});
 		return null;
 	}
 
@@ -2703,7 +2771,7 @@ async function translateArticleSummaryWithLocalAi(
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					'x-nutsnews-ai-key': config.localAiApiKey,
+					'x-nutsnews-ai-key': localAiApiKey,
 				},
 				body: JSON.stringify({
 					model: config.localAiModel,
@@ -2813,11 +2881,13 @@ async function translateArticleSummaryWithLocalAi(
 async function translateArticleSummaryWithOpenAi(
 	env: Env,
 	config: RuntimeConfig,
-	article: ArticleInsert,
+	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
 ): Promise<ArticleSummaryInsert | null> {
-	if (!config.openAiApiKey) {
-		await logWarn(env, 'worker.translation.skipped_missing_openai_key', 'Skipped summary translation because OPENAI_API_KEY is missing', {
+	const openAiApiKey = getSafeHeaderValue(config.openAiApiKey);
+
+	if (!openAiApiKey) {
+		await logWarn(env, 'worker.translation.skipped_missing_openai_key', 'Skipped summary translation because OPENAI_API_KEY is missing or contains invalid header characters', {
 			articleUrl: article.original_url,
 			languageCode,
 		});
@@ -2985,7 +3055,7 @@ Return JSON exactly like this:
 async function translateArticleSummary(
 	env: Env,
 	config: RuntimeConfig,
-	article: ArticleInsert,
+	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
 ): Promise<ArticleSummaryInsert | null> {
 	const localTranslation = await translateArticleSummaryWithLocalAi(env, config, article, languageCode);
@@ -3004,12 +3074,191 @@ async function translateArticleSummary(
 	return translateArticleSummaryWithOpenAi(env, config, article, languageCode);
 }
 
+function encodePostgrestInFilter(values: string[]) {
+	return `in.(${values
+		.map((value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`)
+		.join(',')})`;
+}
+
+function getSummaryTaskKey(article: ArticleSummarySourceArticle, languageCode: SummaryLanguageCode) {
+	return `${languageCode}::${article.original_url}`;
+}
+
+async function loadExistingSummaryLanguageCodes(
+	env: Env,
+	config: RuntimeConfig,
+	originalUrls: string[],
+): Promise<Map<string, Set<SummaryLanguageCode>>> {
+	const languageCodesByUrl = new Map<string, Set<SummaryLanguageCode>>();
+	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
+
+	if (uniqueOriginalUrls.length === 0 || config.enabledSummaryLanguages.length === 0) {
+		return languageCodesByUrl;
+	}
+
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(
+				encodePostgrestInFilter(uniqueOriginalUrls),
+			)}&language_code=in.(${config.enabledSummaryLanguages.join(',')})&limit=500`,
+			{
+				method: 'GET',
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				},
+			},
+		);
+	} catch (error) {
+		await logError(env, 'worker.supabase.article_summary_lookup_exception', 'Article summary lookup threw an exception', error, {
+			candidateUrlCount: uniqueOriginalUrls.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return languageCodesByUrl;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.supabase.article_summary_lookup_failed', 'Failed to load article summary rows', {
+			status: response.status,
+			errorText,
+			candidateUrlCount: uniqueOriginalUrls.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return languageCodesByUrl;
+	}
+
+	const jsonResult = await readResponseJsonSafely<Array<{ original_url: string; language_code: string }>>(response);
+
+	if (!jsonResult.ok) {
+		await logError(env, 'worker.supabase.article_summary_lookup_parse_failed', 'Failed to parse article summary lookup response', jsonResult.error, {
+			candidateUrlCount: uniqueOriginalUrls.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return languageCodesByUrl;
+	}
+
+	for (const row of jsonResult.value) {
+		if (!isSummaryLanguageCode(row.language_code)) {
+			continue;
+		}
+
+		const current = languageCodesByUrl.get(row.original_url) ?? new Set<SummaryLanguageCode>();
+		current.add(row.language_code);
+		languageCodesByUrl.set(row.original_url, current);
+	}
+
+	return languageCodesByUrl;
+}
+
+async function loadSummaryTranslationRecoveryArticles(
+	env: Env,
+	config: RuntimeConfig,
+	articleLimit: number,
+	excludedOriginalUrls: Set<string>,
+): Promise<ArticleSummarySourceArticle[]> {
+	if (articleLimit <= 0 || config.enabledSummaryLanguages.length === 0) {
+		return [];
+	}
+
+	const startedAt = Date.now();
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/articles?select=source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc.nullslast,created_at.desc&limit=${SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT}`,
+			{
+				method: 'GET',
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				},
+			},
+		);
+	} catch (error) {
+		await logError(env, 'worker.translation.recovery_article_lookup_exception', 'Translation recovery article lookup threw an exception', error, {
+			articleLimit,
+			durationMs: Date.now() - startedAt,
+		});
+		return [];
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.translation.recovery_article_lookup_failed', 'Failed to load translation recovery articles', {
+			status: response.status,
+			errorText,
+			articleLimit,
+			durationMs: Date.now() - startedAt,
+		});
+		return [];
+	}
+
+	const jsonResult = await readResponseJsonSafely<Array<ArticleSummarySourceArticle & { status?: string | null }>>(response);
+
+	if (!jsonResult.ok) {
+		await logError(env, 'worker.translation.recovery_article_lookup_parse_failed', 'Failed to parse translation recovery article lookup response', jsonResult.error, {
+			articleLimit,
+			durationMs: Date.now() - startedAt,
+		});
+		return [];
+	}
+
+	const candidateRows = jsonResult.value.filter(
+		(article) => article.original_url && article.title && article.ai_summary && !excludedOriginalUrls.has(article.original_url),
+	);
+	const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
+		env,
+		config,
+		candidateRows.map((article) => article.original_url),
+	);
+	const recoveryArticles: ArticleSummarySourceArticle[] = [];
+
+	for (const article of candidateRows) {
+		const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
+		const hasMissingLanguage = config.enabledSummaryLanguages.some((languageCode) => !existingLanguageCodes.has(languageCode));
+
+		if (!hasMissingLanguage) {
+			continue;
+		}
+
+		recoveryArticles.push({
+			source: article.source,
+			title: article.title,
+			original_url: article.original_url,
+			ai_summary: article.ai_summary,
+			category: article.category || 'Uplifting',
+			published_on_site_at: article.published_on_site_at ?? null,
+		});
+
+		if (recoveryArticles.length >= articleLimit) {
+			break;
+		}
+	}
+
+	if (recoveryArticles.length > 0) {
+		await logInfo(env, 'worker.translation.recovery_candidates_loaded', 'Loaded articles that need translation recovery', {
+			candidateRowCount: candidateRows.length,
+			recoveryCandidateCount: recoveryArticles.length,
+			articleLimit,
+			durationMs: Date.now() - startedAt,
+		});
+	}
+
+	return recoveryArticles;
+}
+
 type ArticleSummaryTranslationBuildResult = {
 	summaries: ArticleSummaryInsert[];
 	attemptedTaskCount: number;
 	failedTaskCount: number;
 	skippedByLimitArticleCount: number;
 	skippedByLimitLanguageTaskCount: number;
+	recoveryCandidateCount: number;
+	recoveryAttemptedTaskCount: number;
 };
 
 async function buildArticleSummaryTranslations(
@@ -3023,9 +3272,11 @@ async function buildArticleSummaryTranslations(
 		failedTaskCount: 0,
 		skippedByLimitArticleCount: 0,
 		skippedByLimitLanguageTaskCount: 0,
+		recoveryCandidateCount: 0,
+		recoveryAttemptedTaskCount: 0,
 	};
 
-	if (acceptedArticles.length === 0 || config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
+	if (config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
 		return emptyResult;
 	}
 
@@ -3038,7 +3289,7 @@ async function buildArticleSummaryTranslations(
 		await logWarn(
 			env,
 			'worker.translation.skipped_by_limit',
-			'Accepted articles were saved without translation because SUMMARY_TRANSLATION_LIMIT was lower than the accepted article count',
+			'Accepted articles were held as translation_pending because SUMMARY_TRANSLATION_LIMIT was lower than the accepted article count',
 			{
 				acceptedArticleCount: acceptedArticles.length,
 				summaryTranslationLimit: config.summaryTranslationLimit,
@@ -3055,14 +3306,65 @@ async function buildArticleSummaryTranslations(
 		);
 	}
 
-	const translationTasks = articlesSelectedForTranslation.flatMap((article) =>
-		config.enabledSummaryLanguages.map((languageCode) => ({ article, languageCode })),
+	const taskKeys = new Set<string>();
+	const translationTasks: Array<{ article: ArticleSummarySourceArticle; languageCode: SummaryLanguageCode; taskSource: 'new_article' | 'recovery' }> = [];
+	const addTask = (article: ArticleSummarySourceArticle, languageCode: SummaryLanguageCode, taskSource: 'new_article' | 'recovery') => {
+		const key = getSummaryTaskKey(article, languageCode);
+
+		if (taskKeys.has(key)) {
+			return;
+		}
+
+		taskKeys.add(key);
+		translationTasks.push({ article, languageCode, taskSource });
+	};
+
+	for (const article of articlesSelectedForTranslation) {
+		for (const languageCode of config.enabledSummaryLanguages) {
+			addTask(article, languageCode, 'new_article');
+		}
+	}
+
+	const recoveryArticleBudget = Math.max(0, config.summaryTranslationLimit - articlesSelectedForTranslation.length);
+	const recoveryArticles = await loadSummaryTranslationRecoveryArticles(
+		env,
+		config,
+		recoveryArticleBudget,
+		new Set(acceptedArticles.map((article) => article.original_url)),
 	);
+
+	if (recoveryArticles.length > 0) {
+		const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
+			env,
+			config,
+			recoveryArticles.map((article) => article.original_url),
+		);
+
+		for (const article of recoveryArticles) {
+			const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
+
+			for (const languageCode of config.enabledSummaryLanguages) {
+				if (!existingLanguageCodes.has(languageCode)) {
+					addTask(article, languageCode, 'recovery');
+				}
+			}
+		}
+	}
+
+	if (translationTasks.length === 0) {
+		return {
+			...emptyResult,
+			skippedByLimitArticleCount,
+			skippedByLimitLanguageTaskCount,
+			recoveryCandidateCount: recoveryArticles.length,
+		};
+	}
 
 	const translations = await mapWithConcurrency(translationTasks, 2, ({ article, languageCode }) =>
 		translateArticleSummary(env, config, article, languageCode),
 	);
 	const summaries = translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+	const recoveryAttemptedTaskCount = translationTasks.filter((task) => task.taskSource === 'recovery').length;
 
 	return {
 		summaries,
@@ -3070,6 +3372,8 @@ async function buildArticleSummaryTranslations(
 		failedTaskCount: translationTasks.length - summaries.length,
 		skippedByLimitArticleCount,
 		skippedByLimitLanguageTaskCount,
+		recoveryCandidateCount: recoveryArticles.length,
+		recoveryAttemptedTaskCount,
 	};
 }
 
@@ -3400,6 +3704,74 @@ async function saveAcceptedArticlesBatch(env: Env, config: RuntimeConfig, articl
 	return true;
 }
 
+function getFullyTranslatedOriginalUrls(
+	originalUrls: string[],
+	languageCodesByUrl: Map<string, Set<SummaryLanguageCode>>,
+	requiredLanguages: SummaryLanguageCode[],
+) {
+	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
+
+	if (requiredLanguages.length === 0) {
+		return uniqueOriginalUrls;
+	}
+
+	return uniqueOriginalUrls.filter((originalUrl) => {
+		const languageCodes = languageCodesByUrl.get(originalUrl) ?? new Set<SummaryLanguageCode>();
+		return requiredLanguages.every((languageCode) => languageCodes.has(languageCode));
+	});
+}
+
+async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrls: string[]): Promise<boolean> {
+	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
+	const startedAt = Date.now();
+
+	if (uniqueOriginalUrls.length === 0) {
+		return true;
+	}
+
+	let response: Response;
+
+	try {
+		response = await fetch(
+			`${config.supabaseUrl}/rest/v1/articles?original_url=${encodeURIComponent(encodePostgrestInFilter(uniqueOriginalUrls))}`,
+			{
+				method: 'PATCH',
+				headers: {
+					apikey: config.supabaseServiceRoleKey,
+					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+					'Content-Type': 'application/json',
+					Prefer: 'return=minimal',
+				},
+				body: JSON.stringify({ status: 'published' }),
+			},
+		);
+	} catch (error) {
+		await logError(env, 'worker.supabase.article_publish_batch_exception', 'Publishing translated articles threw an exception', error, {
+			articleCount: uniqueOriginalUrls.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return false;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.supabase.article_publish_batch_failed', 'Failed to publish translated articles', {
+			status: response.status,
+			errorText,
+			articleCount: uniqueOriginalUrls.length,
+			durationMs: Date.now() - startedAt,
+		});
+		return false;
+	}
+
+	await logInfo(env, 'worker.supabase.article_publish_batch_saved', 'Published translated articles', {
+		articleCount: uniqueOriginalUrls.length,
+		durationMs: Date.now() - startedAt,
+	});
+
+	return true;
+}
+
 async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<boolean> {
 	const startedAt = Date.now();
 	let response: Response;
@@ -3718,12 +4090,13 @@ async function reviewArticleWithConfiguredProvider(env: Env, config: RuntimeConf
 	}
 }
 
-function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]) {
+function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[], config: RuntimeConfig) {
 	const reviewRows: ArticleReviewInsert[] = [];
 	const acceptedArticleRows: ArticleInsert[] = [];
 
 	let acceptedCount = 0;
 	let rejectedCount = 0;
+	const acceptedArticleInitialStatus: ArticleStatus = shouldHoldAcceptedArticlesForTranslations(config) ? 'translation_pending' : 'published';
 
 	for (const reviewedArticle of reviewedArticles) {
 		const { article, aiDecision } = reviewedArticle;
@@ -3783,7 +4156,7 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 			positivity_score: normalizedScore || 7,
 			ai_provider: aiProvider,
 			ai_model: aiModel,
-			status: 'published',
+			status: acceptedArticleInitialStatus,
 		});
 	}
 
@@ -3895,7 +4268,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const reviewedArticles = [...noThumbnailRejectedResults, ...locallyRejectedResults, ...aiReviewedArticles];
 
-	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } = buildRowsFromReviewedArticles(reviewedArticles);
+	const { reviewRows, acceptedArticleRows, acceptedCount, rejectedCount } = buildRowsFromReviewedArticles(reviewedArticles, config);
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
@@ -3907,9 +4280,37 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			failedTaskCount: 0,
 			skippedByLimitArticleCount: 0,
 			skippedByLimitLanguageTaskCount: 0,
+			recoveryCandidateCount: 0,
+			recoveryAttemptedTaskCount: 0,
 		};
 	const articleSummaryRows = articleSummaryBuildResult.summaries;
 	const articleSummarySaveOk = articleSaveOk ? await saveArticleSummariesBatch(env, config, articleSummaryRows) : false;
+	const articleUrlsWithNewOrRecoveredTranslations = Array.from(
+		new Set([
+			...acceptedArticleRows.map((article) => article.original_url),
+			...articleSummaryRows.map((summary) => summary.original_url),
+		]),
+	);
+	const summaryLanguageCodesByUrlAfterSave = articleSummarySaveOk
+		? await loadExistingSummaryLanguageCodes(env, config, articleUrlsWithNewOrRecoveredTranslations)
+		: new Map<string, Set<SummaryLanguageCode>>();
+	const fullyTranslatedArticleUrls = getFullyTranslatedOriginalUrls(
+		articleUrlsWithNewOrRecoveredTranslations,
+		summaryLanguageCodesByUrlAfterSave,
+		config.enabledSummaryLanguages,
+	);
+	const articleSummaryPublishOk = articleSaveOk
+		? await publishArticlesBatch(
+			env,
+			config,
+			shouldHoldAcceptedArticlesForTranslations(config)
+				? fullyTranslatedArticleUrls
+				: acceptedArticleRows.map((article) => article.original_url),
+		)
+		: false;
+	const articleSummaryPublishCount = shouldHoldAcceptedArticlesForTranslations(config)
+		? fullyTranslatedArticleUrls.length
+		: acceptedArticleRows.length;
 	const publicFeedSnapshotRefreshOk = articleSaveOk ? await refreshPublicFeedSnapshot(env, config) : false;
 
 	await logInfo(env, 'worker.translation.summary_completed', 'Article summary translation step completed', {
@@ -3923,6 +4324,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
 		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
+		articleSummaryRecoveryCandidateCount: articleSummaryBuildResult.recoveryCandidateCount,
+		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
+		articleSummaryPublishCount,
+		articleSummaryPublishOk,
 	});
 
 	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
@@ -4058,6 +4463,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
 		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
+		articleSummaryRecoveryCandidateCount: articleSummaryBuildResult.recoveryCandidateCount,
+		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
+		articleSummaryPublishCount,
+		articleSummaryPublishOk,
 		publicFeedSnapshotRefreshOk,
 		feedHealthSaveOk,
 		aiUsageSaveOk,
