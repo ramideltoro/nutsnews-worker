@@ -1,80 +1,67 @@
 name: Worker and Controller CI
 
 on:
-  push:
-    branches: [main]
+  pull_request:
     paths:
       - "worker/**"
       - "controller/**"
       - ".github/workflows/worker-controller-ci.yml"
-  pull_request:
-    branches: [main]
+  push:
+    branches:
+      - main
     paths:
       - "worker/**"
       - "controller/**"
       - ".github/workflows/worker-controller-ci.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   worker:
     name: Worker TypeScript check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     defaults:
       run:
         working-directory: worker
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
-      - name: Use Node.js
-        uses: actions/setup-node@v5
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: worker/package-lock.json
+
       - name: Install dependencies
         run: npm ci
+
       - name: Generate Wrangler configs
         env:
           NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID }}
         run: npm run generate:wrangler
+
       - name: TypeScript check
-        run: |
-          if [ -f tsconfig.json ]; then
-            npx tsc --noEmit
-          elif [ -d scripts ]; then
-            find scripts -name "*.mjs" -print0 | xargs -0 -n1 node --check
-          else
-            echo "No tsconfig.json or scripts directory found; skipping TypeScript check."
-          fi
+        run: npx tsc --noEmit
 
   controller:
-    name: Controller TypeScript check
+    name: Controller syntax check
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: controller
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
-      - name: Use Node.js
-        uses: actions/setup-node@v5
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: controller/package-lock.json
-      - name: Install dependencies
-        run: npm ci
-      - name: TypeScript check
+
+      - name: Check controller JavaScript files
         run: |
-          if [ -f tsconfig.json ]; then
-            npx tsc --noEmit
-          elif [ -d scripts ]; then
-            find scripts -name "*.mjs" -print0 | xargs -0 -n1 node --check
+          if [ -d controller ]; then
+            find controller -type f \( -name "*.js" -o -name "*.mjs" \) -print0 | xargs -0 -r -n1 node --check
           else
-            echo "No tsconfig.json or scripts directory found; skipping TypeScript check."
+            echo "No controller directory found; skipping controller syntax check."
           fi
