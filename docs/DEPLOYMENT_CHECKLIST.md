@@ -241,6 +241,30 @@ articles
 nextPage or nextCursor
 ```
 
+### PageSpeed check after major UI changes
+
+Run this after public UI changes that may affect mobile performance, image loading, JavaScript weight, layout shift, or SEO:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews3/web
+npm run audit:pagespeed:mobile
+```
+
+For larger releases, run both mobile and desktop:
+
+```bash
+cd /Users/ramideltoro/WebstormProjects/nutsnews3/web
+npm run audit:pagespeed
+```
+
+Reports are saved under:
+
+```text
+web/reports/pagespeed/
+```
+
+See `docs/PAGESPEED_INSIGHTS.md` for thresholds, GitHub Actions usage, and API key setup.
+
 ---
 
 ## 3. Worker Shard Deployment Checklist

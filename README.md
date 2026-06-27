@@ -22,7 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
-| Observability | Better Stack logs and uptime, UptimeRobot public uptime checks, Lighthouse CI web quality checks, axe Playwright accessibility CI, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
+| Observability | Better Stack logs and uptime, UptimeRobot public uptime checks, Lighthouse CI web quality checks, PageSpeed Insights production audits, axe Playwright accessibility CI, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Automated Supabase backups to encrypted OneDrive plus documented restore runbook with validation SQL |
@@ -56,6 +56,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
 | [UptimeRobot Onboarding](docs/UPTIMEROBOT_ONBOARDING.md) | Step-by-step public uptime, keyword, API, privacy/contact page, alert contact, and safe health-check monitor setup |
 | [Lighthouse CI Onboarding](docs/LIGHTHOUSE_CI_ONBOARDING.md) | Step-by-step GitHub Actions setup for Google Lighthouse CI checks from the `web/` app, including thresholds, secrets, validation, and safe audited URLs |
+| [PageSpeed Insights](docs/PAGESPEED_INSIGHTS.md) | Production mobile/desktop PageSpeed audits after major UI changes, including npm scripts, reports, thresholds, and manual GitHub workflow |
 | [axe Playwright Accessibility CI](docs/AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md) | Step-by-step GitHub Actions setup for automated axe accessibility checks from Playwright, including safe public-page routes, serious/critical thresholds, reports, and WAVE manual review guidance |
 | [RSS Source Quality](docs/RSS_SOURCE_QUALITY.md) | Quality score formula, Supabase ranking query, admin dashboard behavior, and feed promotion/disable rules |
 | [Supabase Restore Procedure](docs/SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
@@ -92,6 +93,7 @@ nutsnews/
 | Home server dashboard | `/admin/home-server` |
 | Grafana backup monitoring | [docs/GRAFANA_BACKUP_MONITORING.md](docs/GRAFANA_BACKUP_MONITORING.md) |
 | UptimeRobot onboarding | [docs/UPTIMEROBOT_ONBOARDING.md](docs/UPTIMEROBOT_ONBOARDING.md) |
+| PageSpeed Insights | [docs/PAGESPEED_INSIGHTS.md](docs/PAGESPEED_INSIGHTS.md) |
 | axe accessibility CI | [docs/AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md](docs/AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md) |
 | NutsNews DB backups | [docs/NUTSNEWS_DB_BACKUPS.md](docs/NUTSNEWS_DB_BACKUPS.md) |
 | Worker health dashboard | `/admin/shards` |
@@ -120,7 +122,7 @@ NutsNews currently includes:
 * Supabase public feed snapshot for faster homepage/API reads
 * Optimized article image delivery with responsive Next Image thumbnails, AVIF/WebP support, and safe raw-image fallback
 * Cloudflare CDN caching for public reader routes
-* Lighthouse CI quality checks and axe Playwright accessibility regression checks in GitHub Actions
+* Lighthouse CI quality checks, PageSpeed Insights production audits, and axe Playwright accessibility regression checks
 * Better Stack uptime monitoring and centralized logs
 * UptimeRobot public website, homepage keyword, article API, privacy page, and contact page monitoring documentation
 * Grafana Cloud Prometheus backup monitoring for the home server
