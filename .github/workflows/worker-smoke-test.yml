@@ -1,0 +1,41 @@
+name: Worker Smoke Test
+
+on:
+  schedule:
+    - cron: "7 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Public web base URL
+        required: false
+        default: https://www.nutsnews.com
+      worker_url:
+        description: Optional Worker/controller URL to test
+        required: false
+        default: ""
+      shard_url:
+        description: Optional shard URL to test
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Production smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NUTSNEWS_BASE_URL: ${{ github.event.inputs.base_url || 'https://www.nutsnews.com' }}
+      NUTSNEWS_WORKER_URL: ${{ github.event.inputs.worker_url || secrets.NUTSNEWS_WORKER_URL }}
+      NUTSNEWS_SHARD_URL: ${{ github.event.inputs.shard_url || secrets.NUTSNEWS_SHARD_URL }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Run smoke test
+        run: node scripts/worker_smoke_test.mjs

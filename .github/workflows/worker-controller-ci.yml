@@ -1,0 +1,64 @@
+name: Worker and Controller CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "controller/**"
+      - ".github/workflows/worker-controller-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "controller/**"
+      - ".github/workflows/worker-controller-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    name: Worker TypeScript check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Generate Wrangler configs
+        run: npm run generate:wrangler
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+  controller:
+    name: Controller TypeScript check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: controller
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: controller/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: TypeScript check
+        run: npx tsc --noEmit
