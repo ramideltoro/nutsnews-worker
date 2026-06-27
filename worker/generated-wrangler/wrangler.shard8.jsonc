@@ -24,37 +24,37 @@
   "secrets_store_secrets": [
     {
       "binding": "SUPABASE_URL",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "SUPABASE_URL"
     },
     {
       "binding": "SUPABASE_SERVICE_ROLE_KEY",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "SUPABASE_SERVICE_ROLE_KEY"
     },
     {
       "binding": "OPENAI_API_KEY",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "OPENAI_API_KEY"
     },
     {
       "binding": "BETTER_STACK_SOURCE_TOKEN",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "BETTER_STACK_SOURCE_TOKEN"
     },
     {
       "binding": "BETTER_STACK_INGESTING_HOST",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "BETTER_STACK_INGESTING_HOST"
     },
     {
       "binding": "UPSTASH_REDIS_REST_URL",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "UPSTASH_REDIS_REST_URL"
     },
     {
       "binding": "UPSTASH_REDIS_REST_TOKEN",
-      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
+      "store_id": "test-store-id",
       "secret_name": "UPSTASH_REDIS_REST_TOKEN"
     }
   ],
