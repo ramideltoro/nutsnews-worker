@@ -32,6 +32,8 @@ type Env = {
 	ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT?: string;
 	ENABLED_SUMMARY_LANGUAGES?: string;
 	SUMMARY_TRANSLATION_LIMIT?: string;
+	NUTSNEWS_KV?: KVNamespace;
+	KV_RECENT_PROCESSED_URL_LIMIT?: string;
 };
 
 type RuntimeConfig = {
@@ -395,6 +397,10 @@ type RefreshResult = {
 	openAiRejectedCount: number;
 	costProtectionLimitReached: boolean;
 	spikeWarningTriggered: boolean;
+	kvEnabled: boolean;
+	kvProcessedUrlHitCount: number;
+	kvProcessedUrlSaveOk: boolean;
+	kvRunStateSaveOk: boolean;
 	durationMs: number;
 };
 
@@ -431,6 +437,11 @@ const SUMMARY_TRANSLATION_RETRY_ATTEMPTS = 2;
 const SUMMARY_TRANSLATION_RETRY_DELAY_MS = 750;
 const AI_REVIEW_RETRY_ATTEMPTS = 2;
 const AI_REVIEW_RETRY_DELAY_MS = 750;
+const KV_RECENT_PROCESSED_URL_KEY_VERSION = 1;
+const DEFAULT_KV_RECENT_PROCESSED_URL_LIMIT = 2000;
+const HARD_MAX_KV_RECENT_PROCESSED_URL_LIMIT = 5000;
+const KV_RECENT_PROCESSED_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
+const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
 
 const POSITIVE_KEYWORDS = [
 	'good news',
@@ -680,6 +691,213 @@ const NO_THUMBNAIL_REJECT_DECISION: AiArticleDecision = {
 	summary: '',
 	reason: 'Skipped before AI because the RSS item and article page did not include a usable image thumbnail.',
 };
+
+type RecentProcessedUrlCache = {
+	version: typeof KV_RECENT_PROCESSED_URL_KEY_VERSION;
+	shardIndex: number;
+	updatedAt: string;
+	hashes: string[];
+};
+
+type KvProcessedUrlLookupResult = {
+	urls: Set<string>;
+	hitCount: number;
+	cacheAvailable: boolean;
+};
+
+type KvRunState = {
+	version: 1;
+	updatedAt: string;
+	runStartedAt: string;
+	runCompletedAt: string;
+	runSource: RefreshOptions['runSource'];
+	requestId: string | null;
+	result: RefreshResult;
+};
+
+function isKvEnabled(env: Env) {
+	return Boolean(env.NUTSNEWS_KV);
+}
+
+function getKvRecentProcessedUrlLimit(env: Env) {
+	return Math.min(
+		Math.max(Math.floor(getOptionalNumber(env.KV_RECENT_PROCESSED_URL_LIMIT, DEFAULT_KV_RECENT_PROCESSED_URL_LIMIT)), 100),
+		HARD_MAX_KV_RECENT_PROCESSED_URL_LIMIT,
+	);
+}
+
+function getShardProcessedUrlCacheKey(shardIndex: number) {
+	return `dedupe:shard:${shardIndex}:recent-processed-urls:v${KV_RECENT_PROCESSED_URL_KEY_VERSION}`;
+}
+
+function getShardRunStateKey(shardIndex: number) {
+	return `state:shard:${shardIndex}:latest-run:v1`;
+}
+
+function getLastSuccessfulRunStateKey() {
+	return 'state:last-successful-run:v1';
+}
+
+async function sha256Hex(value: string) {
+	const bytes = new TextEncoder().encode(value);
+	const digest = await crypto.subtle.digest('SHA-256', bytes);
+	return Array.from(new Uint8Array(digest))
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+}
+
+async function hashUrlForKv(url: string) {
+	return sha256Hex(url.trim().toLowerCase());
+}
+
+async function readJsonFromKv<T>(env: Env, key: string): Promise<T | null> {
+	if (!env.NUTSNEWS_KV) {
+		return null;
+	}
+
+	try {
+		return await env.NUTSNEWS_KV.get<T>(key, 'json');
+	} catch (error) {
+		await logWarn(env, 'worker.kv.read_failed', 'Cloudflare KV read failed', {
+			key,
+			errorMessage: getErrorMessage(error),
+		});
+
+		return null;
+	}
+}
+
+async function writeJsonToKv(env: Env, key: string, value: unknown, expirationTtl: number): Promise<boolean> {
+	if (!env.NUTSNEWS_KV) {
+		return false;
+	}
+
+	try {
+		await env.NUTSNEWS_KV.put(key, JSON.stringify(value), { expirationTtl });
+		return true;
+	} catch (error) {
+		await logWarn(env, 'worker.kv.write_failed', 'Cloudflare KV write failed', {
+			key,
+			errorMessage: getErrorMessage(error),
+		});
+
+		return false;
+	}
+}
+
+async function getProcessedUrlsFromKv(env: Env, shardIndex: number, urls: string[]): Promise<KvProcessedUrlLookupResult> {
+	if (!env.NUTSNEWS_KV || urls.length === 0) {
+		return {
+			urls: new Set(),
+			hitCount: 0,
+			cacheAvailable: Boolean(env.NUTSNEWS_KV),
+		};
+	}
+
+	const cache = await readJsonFromKv<RecentProcessedUrlCache>(env, getShardProcessedUrlCacheKey(shardIndex));
+
+	if (!cache || cache.version !== KV_RECENT_PROCESSED_URL_KEY_VERSION || !Array.isArray(cache.hashes)) {
+		return {
+			urls: new Set(),
+			hitCount: 0,
+			cacheAvailable: true,
+		};
+	}
+
+	const knownHashes = new Set(cache.hashes);
+	const urlsByHash = await Promise.all(urls.map(async (url) => [url, await hashUrlForKv(url)] as const));
+	const processedUrls = new Set(urlsByHash.filter(([, hash]) => knownHashes.has(hash)).map(([url]) => url));
+
+	return {
+		urls: processedUrls,
+		hitCount: processedUrls.size,
+		cacheAvailable: true,
+	};
+}
+
+async function rememberProcessedUrlsInKv(env: Env, shardIndex: number, urls: string[]): Promise<boolean> {
+	if (!env.NUTSNEWS_KV || urls.length === 0) {
+		return false;
+	}
+
+	const key = getShardProcessedUrlCacheKey(shardIndex);
+	const existingCache = await readJsonFromKv<RecentProcessedUrlCache>(env, key);
+	const existingHashes =
+		existingCache?.version === KV_RECENT_PROCESSED_URL_KEY_VERSION && Array.isArray(existingCache.hashes)
+			? existingCache.hashes
+			: [];
+	const nextHashes = new Set(existingHashes);
+	const hashedUrls = await Promise.all(urls.map(hashUrlForKv));
+
+	for (const hash of hashedUrls) {
+		nextHashes.add(hash);
+	}
+
+	const maxHashes = getKvRecentProcessedUrlLimit(env);
+	const compactHashes = Array.from(nextHashes).slice(-maxHashes);
+	const nextCache: RecentProcessedUrlCache = {
+		version: KV_RECENT_PROCESSED_URL_KEY_VERSION,
+		shardIndex,
+		updatedAt: new Date().toISOString(),
+		hashes: compactHashes,
+	};
+
+	return writeJsonToKv(env, key, nextCache, KV_RECENT_PROCESSED_URL_TTL_SECONDS);
+}
+
+async function saveRunStateToKv(
+	env: Env,
+	result: RefreshResult,
+	metadata: {
+		runStartedAt: number;
+		runCompletedAt: Date;
+		runSource: RefreshOptions['runSource'];
+		requestId: string | null;
+	},
+): Promise<boolean> {
+	if (!env.NUTSNEWS_KV) {
+		return false;
+	}
+
+	const state: KvRunState = {
+		version: 1,
+		updatedAt: new Date().toISOString(),
+		runStartedAt: new Date(metadata.runStartedAt).toISOString(),
+		runCompletedAt: metadata.runCompletedAt.toISOString(),
+		runSource: metadata.runSource,
+		requestId: metadata.requestId,
+		result,
+	};
+
+	const shardStateOk = await writeJsonToKv(env, getShardRunStateKey(result.shardIndex), state, KV_RUN_STATE_TTL_SECONDS);
+	const lastSuccessfulRunOk = await writeJsonToKv(env, getLastSuccessfulRunStateKey(), state, KV_RUN_STATE_TTL_SECONDS);
+
+	return shardStateOk && lastSuccessfulRunOk;
+}
+
+async function readKvStatus(env: Env) {
+	const shardIndex = getShardIndex(env);
+	const [latestShardRun, lastSuccessfulRun, recentProcessedUrlCache] = await Promise.all([
+		readJsonFromKv<KvRunState>(env, getShardRunStateKey(shardIndex)),
+		readJsonFromKv<KvRunState>(env, getLastSuccessfulRunStateKey()),
+		readJsonFromKv<RecentProcessedUrlCache>(env, getShardProcessedUrlCacheKey(shardIndex)),
+	]);
+
+	return {
+		kvEnabled: isKvEnabled(env),
+		shardIndex,
+		latestShardRun,
+		lastSuccessfulRun,
+		recentProcessedUrlCache: recentProcessedUrlCache
+			? {
+					version: recentProcessedUrlCache.version,
+					shardIndex: recentProcessedUrlCache.shardIndex,
+					updatedAt: recentProcessedUrlCache.updatedAt,
+					hashCount: recentProcessedUrlCache.hashes.length,
+				}
+			: null,
+	};
+}
 
 async function resolveValue(value: MaybeSecretBinding) {
 	if (!value) {
@@ -4211,7 +4429,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		maxCandidatesPerRun: MAX_CANDIDATES_PER_RUN,
 	});
 
-	const reviewedUrls = await getReviewedUrls(env, config, candidateUrls);
+	const kvProcessedUrlLookup = await getProcessedUrlsFromKv(env, shardIndex, candidateUrls);
+	const candidateUrlsNeedingSupabaseLookup = candidateUrls.filter((url) => !kvProcessedUrlLookup.urls.has(url));
+	const supabaseReviewedUrls = await getReviewedUrls(env, config, candidateUrlsNeedingSupabaseLookup);
+	const reviewedUrls = new Set([...kvProcessedUrlLookup.urls, ...supabaseReviewedUrls]);
 
 	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter((article) => !reviewedUrls.has(article.url));
 
@@ -4244,6 +4465,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		aiReviewCount: articlesForAi.length,
 		aiProvider: config.aiProvider,
 		aiReviewConcurrency: config.aiReviewConcurrency,
+		kvEnabled: kvProcessedUrlLookup.cacheAvailable,
+		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
+		candidateUrlsNeedingSupabaseLookup: candidateUrlsNeedingSupabaseLookup.length,
 	});
 
 	const noThumbnailRejectedResults = buildRejectedArticles(
@@ -4335,6 +4559,13 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedHealthSaveOk = await saveFeedHealthBatch(env, config, feedHealthRows);
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
+	const kvProcessedUrlSaveOk = reviewSaveOk
+		? await rememberProcessedUrlsInKv(
+			env,
+			shardIndex,
+			reviewRows.map((row) => row.original_url),
+		)
+		: false;
 
 	const openAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'openai');
 	const localAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'local');
@@ -4480,6 +4711,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		openAiRejectedCount,
 		costProtectionLimitReached,
 		spikeWarningTriggered,
+		kvEnabled: isKvEnabled(env),
+		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
+		kvProcessedUrlSaveOk,
+		kvRunStateSaveOk: false,
 		durationMs,
 	};
 
@@ -4494,9 +4729,21 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		}),
 	);
 
-	const result: RefreshResult = {
+	const resultBeforeKvRunStateSave: RefreshResult = {
 		...resultWithoutWorkerRunSaveStatus,
 		workerRunSaveOk,
+	};
+
+	const kvRunStateSaveOk = await saveRunStateToKv(env, resultBeforeKvRunStateSave, {
+		runStartedAt: refreshStartedAt,
+		runCompletedAt,
+		runSource: options.runSource ?? 'unknown',
+		requestId: options.requestId ?? null,
+	});
+
+	const result: RefreshResult = {
+		...resultBeforeKvRunStateSave,
+		kvRunStateSaveOk,
 	};
 
 	await logInfo(env, 'worker.refresh.completed', 'NutsNews Worker refresh completed', result);
@@ -4550,6 +4797,10 @@ export default {
 			return new Response(null, {
 				status: 204,
 			});
+		}
+
+		if (url.pathname === '/kv-status') {
+			return Response.json(await readKvStatus(env));
 		}
 
 		if (url.pathname === '/log-test') {

@@ -6,9 +6,11 @@ const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '20');
 const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
 const includeLocalAiSecretBinding = process.env.ENABLE_LOCAL_AI_SECRET_BINDING === 'true';
 const localAiApiKeySecretName = process.env.LOCAL_AI_API_KEY_SECRET_NAME ?? 'LOCAL_AI_API_KEY';
+const kvNamespaceId = process.env.NUTSNEWS_KV_NAMESPACE_ID;
+const kvPreviewNamespaceId = process.env.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID ?? kvNamespaceId;
 
 const optionalShardVars = Object.fromEntries(
-	['AI_PROVIDER', 'LOCAL_AI_URL', 'LOCAL_AI_MODEL', 'AI_PROVIDER_FALLBACK_TO_OPENAI', 'AI_REVIEW_CONCURRENCY', 'ENABLED_SUMMARY_LANGUAGES', 'SUMMARY_TRANSLATION_LIMIT']
+	['AI_PROVIDER', 'LOCAL_AI_URL', 'LOCAL_AI_MODEL', 'AI_PROVIDER_FALLBACK_TO_OPENAI', 'AI_REVIEW_CONCURRENCY', 'ENABLED_SUMMARY_LANGUAGES', 'SUMMARY_TRANSLATION_LIMIT', 'KV_RECENT_PROCESSED_URL_LIMIT']
 		.filter((key) => process.env[key])
 		.map((key) => [key, process.env[key]]),
 );
@@ -67,6 +69,16 @@ for (let index = 0; index < shardCount; index += 1) {
 		],
 	};
 
+
+	if (kvNamespaceId) {
+		config.kv_namespaces = [
+			{
+				binding: 'NUTSNEWS_KV',
+				id: kvNamespaceId,
+				preview_id: kvPreviewNamespaceId,
+			},
+		];
+	}
 	if (includeLocalAiSecretBinding) {
 		config.secrets_store_secrets.push({
 			binding: 'LOCAL_AI_API_KEY',
@@ -79,7 +91,8 @@ for (let index = 0; index < shardCount; index += 1) {
 }
 
 const localAiSummary = process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '';
+const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
 
 console.log(
-	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}`,
+	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${kvSummary}`,
 );
