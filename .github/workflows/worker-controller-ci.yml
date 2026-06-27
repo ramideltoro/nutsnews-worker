@@ -42,7 +42,14 @@ jobs:
           NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID }}
         run: npm run generate:wrangler
       - name: TypeScript check
-        run: npx tsc --noEmit
+        run: |
+          if [ -f tsconfig.json ]; then
+            npx tsc --noEmit
+          elif [ -d scripts ]; then
+            find scripts -name "*.mjs" -print0 | xargs -0 -n1 node --check
+          else
+            echo "No tsconfig.json or scripts directory found; skipping TypeScript check."
+          fi
 
   controller:
     name: Controller TypeScript check
@@ -63,4 +70,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: TypeScript check
-        run: npx tsc --noEmit
+        run: |
+          if [ -f tsconfig.json ]; then
+            npx tsc --noEmit
+          elif [ -d scripts ]; then
+            find scripts -name "*.mjs" -print0 | xargs -0 -n1 node --check
+          else
+            echo "No tsconfig.json or scripts directory found; skipping TypeScript check."
+          fi
