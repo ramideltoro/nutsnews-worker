@@ -34,6 +34,14 @@ type Env = {
 	SUMMARY_TRANSLATION_LIMIT?: string;
 	NUTSNEWS_KV?: KVNamespace;
 	KV_RECENT_PROCESSED_URL_LIMIT?: string;
+	UPSTASH_REDIS_REST_URL?: MaybeSecretBinding;
+	UPSTASH_REDIS_REST_TOKEN?: MaybeSecretBinding;
+	UPSTASH_REDIS_ENABLED?: string;
+	UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS?: string;
+	UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS?: string;
+	UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX?: string;
+	UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS?: string;
+	UPSTASH_REDIS_COUNTER_TTL_SECONDS?: string;
 };
 
 type RuntimeConfig = {
@@ -401,6 +409,10 @@ type RefreshResult = {
 	kvProcessedUrlHitCount: number;
 	kvProcessedUrlSaveOk: boolean;
 	kvRunStateSaveOk: boolean;
+	redisEnabled: boolean;
+	redisAiReviewLockAcquiredCount: number;
+	redisAiReviewLockSkippedCount: number;
+	redisStatsSaveOk: boolean;
 	durationMs: number;
 };
 
@@ -442,6 +454,14 @@ const DEFAULT_KV_RECENT_PROCESSED_URL_LIMIT = 2000;
 const HARD_MAX_KV_RECENT_PROCESSED_URL_LIMIT = 5000;
 const KV_RECENT_PROCESSED_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
+const DEFAULT_UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS = 10 * 60;
+const DEFAULT_UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS = 30 * 60;
+const DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX = 20;
+const DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS = 60 * 60;
+const DEFAULT_UPSTASH_REDIS_COUNTER_TTL_SECONDS = 3 * 24 * 60 * 60;
+const HARD_MAX_UPSTASH_REDIS_LOCK_TTL_SECONDS = 60 * 60;
+const HARD_MAX_UPSTASH_REDIS_RATE_LIMIT_WINDOW_SECONDS = 24 * 60 * 60;
+
 
 const POSITIVE_KEYWORDS = [
 	'good news',
@@ -715,6 +735,40 @@ type KvRunState = {
 	result: RefreshResult;
 };
 
+type UpstashRedisConfig = {
+	restUrl: string;
+	restToken: string;
+};
+
+type UpstashRedisCommandArg = string | number;
+
+type UpstashRedisCommandResult<T = unknown> = {
+	result?: T;
+	error?: string;
+};
+
+type RedisLock = {
+	key: string;
+	value: string;
+	acquired: boolean;
+	enabled: boolean;
+};
+
+type RedisRateLimitResult = {
+	allowed: boolean;
+	count: number;
+	limit: number;
+	windowSeconds: number;
+	enabled: boolean;
+};
+
+type RedisAiReviewLockResult = {
+	articles: RssArticle[];
+	acquiredCount: number;
+	skippedCount: number;
+	enabled: boolean;
+};
+
 function isKvEnabled(env: Env) {
 	return Boolean(env.NUTSNEWS_KV);
 }
@@ -896,6 +950,423 @@ async function readKvStatus(env: Env) {
 					hashCount: recentProcessedUrlCache.hashes.length,
 				}
 			: null,
+	};
+}
+
+function isUpstashRedisExplicitlyDisabled(env: Env) {
+	return env.UPSTASH_REDIS_ENABLED ? ['0', 'false', 'no', 'off'].includes(env.UPSTASH_REDIS_ENABLED.toLowerCase()) : false;
+}
+
+function clampPositiveNumber(value: string | undefined, fallback: number, max: number) {
+	const parsed = Math.floor(getOptionalNumber(value, fallback));
+
+	return Math.max(1, Math.min(parsed, max));
+}
+
+function getUpstashRedisWorkerLockTtlSeconds(env: Env) {
+	return clampPositiveNumber(
+		env.UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS,
+		DEFAULT_UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS,
+		HARD_MAX_UPSTASH_REDIS_LOCK_TTL_SECONDS,
+	);
+}
+
+function getUpstashRedisAiReviewLockTtlSeconds(env: Env) {
+	return clampPositiveNumber(
+		env.UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS,
+		DEFAULT_UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS,
+		HARD_MAX_UPSTASH_REDIS_LOCK_TTL_SECONDS,
+	);
+}
+
+function getUpstashRedisManualRateLimitMax(env: Env) {
+	return clampPositiveNumber(env.UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX, DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX, 500);
+}
+
+function getUpstashRedisManualRateLimitWindowSeconds(env: Env) {
+	return clampPositiveNumber(
+		env.UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS,
+		DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS,
+		HARD_MAX_UPSTASH_REDIS_RATE_LIMIT_WINDOW_SECONDS,
+	);
+}
+
+function getUpstashRedisCounterTtlSeconds(env: Env) {
+	return clampPositiveNumber(env.UPSTASH_REDIS_COUNTER_TTL_SECONDS, DEFAULT_UPSTASH_REDIS_COUNTER_TTL_SECONDS, 14 * 24 * 60 * 60);
+}
+
+async function getUpstashRedisConfig(env: Env): Promise<UpstashRedisConfig | null> {
+	if (isUpstashRedisExplicitlyDisabled(env)) {
+		return null;
+	}
+
+	const restUrl = (await resolveValue(env.UPSTASH_REDIS_REST_URL)).trim().replace(/\/+$/, '');
+	const restToken = (await resolveValue(env.UPSTASH_REDIS_REST_TOKEN)).trim();
+
+	if (!restUrl || !restToken) {
+		return null;
+	}
+
+	return {
+		restUrl,
+		restToken,
+	};
+}
+
+async function isUpstashRedisEnabled(env: Env) {
+	return Boolean(await getUpstashRedisConfig(env));
+}
+
+async function runUpstashRedisCommand<T = unknown>(
+	env: Env,
+	command: UpstashRedisCommandArg[],
+	context: Record<string, unknown> = {},
+): Promise<UpstashRedisCommandResult<T> | null> {
+	const config = await getUpstashRedisConfig(env);
+
+	if (!config) {
+		return null;
+	}
+
+	const token = getSafeHeaderValue(config.restToken);
+
+	if (!token) {
+		await logWarn(env, 'worker.redis.invalid_token', 'Upstash Redis token is empty or invalid for an HTTP header', context);
+		return null;
+	}
+
+	try {
+		const response = await fetch(config.restUrl, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${token}`,
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify(command),
+		});
+		const body = (await response.json().catch(() => null)) as UpstashRedisCommandResult<T> | null;
+
+		if (!response.ok || !body || body.error) {
+			await logWarn(env, 'worker.redis.command_failed', 'Upstash Redis command failed', {
+				...context,
+				status: response.status,
+				command: command[0],
+				errorMessage: body?.error ?? 'Unable to parse Upstash Redis response.',
+			});
+
+			return null;
+		}
+
+		return body;
+	} catch (error) {
+		await logWarn(env, 'worker.redis.command_exception', 'Upstash Redis command threw an exception', {
+			...context,
+			command: command[0],
+			errorMessage: getErrorMessage(error),
+		});
+
+		return null;
+	}
+}
+
+async function runUpstashRedisPipeline(
+	env: Env,
+	commands: UpstashRedisCommandArg[][],
+	context: Record<string, unknown> = {},
+): Promise<UpstashRedisCommandResult[] | null> {
+	const config = await getUpstashRedisConfig(env);
+
+	if (!config || commands.length === 0) {
+		return null;
+	}
+
+	const token = getSafeHeaderValue(config.restToken);
+
+	if (!token) {
+		await logWarn(env, 'worker.redis.invalid_token', 'Upstash Redis token is empty or invalid for an HTTP header', context);
+		return null;
+	}
+
+	try {
+		const response = await fetch(`${config.restUrl}/pipeline`, {
+			method: 'POST',
+			headers: {
+				authorization: `Bearer ${token}`,
+				'content-type': 'application/json',
+			},
+			body: JSON.stringify(commands),
+		});
+		const body = (await response.json().catch(() => null)) as UpstashRedisCommandResult[] | null;
+
+		if (!response.ok || !Array.isArray(body) || body.some((item) => item.error)) {
+			await logWarn(env, 'worker.redis.pipeline_failed', 'Upstash Redis pipeline failed', {
+				...context,
+				status: response.status,
+				commandCount: commands.length,
+				errorMessage: body?.find((item) => item.error)?.error ?? 'Unable to parse Upstash Redis pipeline response.',
+			});
+
+			return null;
+		}
+
+		return body;
+	} catch (error) {
+		await logWarn(env, 'worker.redis.pipeline_exception', 'Upstash Redis pipeline threw an exception', {
+			...context,
+			commandCount: commands.length,
+			errorMessage: getErrorMessage(error),
+		});
+
+		return null;
+	}
+}
+
+function getRedisWorkerLockKey(shardIndex: number) {
+	return `nutsnews:worker-lock:shard:${shardIndex}:v1`;
+}
+
+function getRedisAiReviewLockKey(urlHash: string) {
+	return `nutsnews:ai-review-lock:url:${urlHash}:v1`;
+}
+
+function getRedisManualRateLimitKey(clientId: string) {
+	return `nutsnews:rate-limit:worker-manual:${clientId}:v1`;
+}
+
+function getRedisStatsDateKey(date = new Date()) {
+	return date.toISOString().slice(0, 10);
+}
+
+async function acquireRedisLock(env: Env, key: string, value: string, ttlSeconds: number): Promise<RedisLock> {
+	const enabled = await isUpstashRedisEnabled(env);
+
+	if (!enabled) {
+		return {
+			key,
+			value,
+			acquired: true,
+			enabled: false,
+		};
+	}
+
+	const response = await runUpstashRedisCommand<string>(env, ['SET', key, value, 'NX', 'EX', ttlSeconds], { key });
+
+	return {
+		key,
+		value,
+		acquired: response?.result === 'OK',
+		enabled: true,
+	};
+}
+
+async function releaseRedisLock(env: Env, lock: RedisLock): Promise<boolean> {
+	if (!lock.enabled || !lock.acquired) {
+		return true;
+	}
+
+	const response = await runUpstashRedisCommand<number>(
+		env,
+		[
+			'EVAL',
+			"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+			1,
+			lock.key,
+			lock.value,
+		],
+		{ key: lock.key },
+	);
+
+	return response !== null;
+}
+
+async function acquireRedisWorkerRunLock(env: Env, requestId: string): Promise<RedisLock> {
+	const shardIndex = getShardIndex(env);
+	const key = getRedisWorkerLockKey(shardIndex);
+	const value = `${requestId}:${Date.now()}`;
+
+	return acquireRedisLock(env, key, value, getUpstashRedisWorkerLockTtlSeconds(env));
+}
+
+async function claimArticlesForAiReviewWithRedis(
+	env: Env,
+	articles: RssArticle[],
+	requestId: string | null,
+): Promise<RedisAiReviewLockResult> {
+	const enabled = await isUpstashRedisEnabled(env);
+
+	if (!enabled || articles.length === 0) {
+		return {
+			articles,
+			acquiredCount: enabled ? 0 : articles.length,
+			skippedCount: 0,
+			enabled,
+		};
+	}
+
+	const ttlSeconds = getUpstashRedisAiReviewLockTtlSeconds(env);
+	const claimedArticles: RssArticle[] = [];
+	let skippedCount = 0;
+
+	for (const article of articles) {
+		const urlHash = await hashUrlForKv(article.url);
+		const lock = await acquireRedisLock(env, getRedisAiReviewLockKey(urlHash), requestId ?? crypto.randomUUID(), ttlSeconds);
+
+		if (lock.acquired) {
+			claimedArticles.push(article);
+		} else {
+			skippedCount += 1;
+		}
+	}
+
+	return {
+		articles: claimedArticles,
+		acquiredCount: claimedArticles.length,
+		skippedCount,
+		enabled: true,
+	};
+}
+
+function getManualRateLimitClientId(request: Request) {
+	const ip = request.headers.get('cf-connecting-ip') ?? request.headers.get('x-forwarded-for')?.split(',')[0] ?? 'unknown-ip';
+	const userAgent = request.headers.get('user-agent') ?? 'unknown-agent';
+
+	return `${ip}:${userAgent.slice(0, 80)}`;
+}
+
+async function checkManualRefreshRateLimit(env: Env, request: Request): Promise<RedisRateLimitResult> {
+	const enabled = await isUpstashRedisEnabled(env);
+	const limit = getUpstashRedisManualRateLimitMax(env);
+	const windowSeconds = getUpstashRedisManualRateLimitWindowSeconds(env);
+
+	if (!enabled) {
+		return {
+			allowed: true,
+			count: 0,
+			limit,
+			windowSeconds,
+			enabled: false,
+		};
+	}
+
+	const clientHash = await sha256Hex(getManualRateLimitClientId(request));
+	const key = getRedisManualRateLimitKey(clientHash);
+	const incrementResponse = await runUpstashRedisCommand<number>(env, ['INCR', key], { key });
+	const count = typeof incrementResponse?.result === 'number' ? incrementResponse.result : 0;
+
+	if (count === 1) {
+		await runUpstashRedisCommand(env, ['EXPIRE', key, windowSeconds], { key });
+	}
+
+	return {
+		allowed: count === 0 || count <= limit,
+		count,
+		limit,
+		windowSeconds,
+		enabled: true,
+	};
+}
+
+async function recordRedisWorkerStats(
+	env: Env,
+	result: Pick<RefreshResult, 'aiReviewedCount' | 'acceptedCount' | 'rejectedCount'>,
+	runSource: RefreshOptions['runSource'],
+): Promise<boolean> {
+	const enabled = await isUpstashRedisEnabled(env);
+
+	if (!enabled) {
+		return false;
+	}
+
+	const dateKey = getRedisStatsDateKey();
+	const ttlSeconds = getUpstashRedisCounterTtlSeconds(env);
+	const keysAndIncrements: Array<[string, number]> = [
+		[`nutsnews:stats:${dateKey}:worker-runs:${runSource ?? 'unknown'}:v1`, 1],
+		[`nutsnews:stats:${dateKey}:ai-reviewed:v1`, result.aiReviewedCount],
+		[`nutsnews:stats:${dateKey}:accepted:v1`, result.acceptedCount],
+		[`nutsnews:stats:${dateKey}:rejected:v1`, result.rejectedCount],
+	];
+	const commands = keysAndIncrements.flatMap(([key, increment]) => [
+		['INCRBY', key, increment] as UpstashRedisCommandArg[],
+		['EXPIRE', key, ttlSeconds] as UpstashRedisCommandArg[],
+	]);
+
+	const response = await runUpstashRedisPipeline(env, commands, {
+		event: 'record_worker_stats',
+		dateKey,
+		runSource,
+	});
+
+	return response !== null;
+}
+
+async function recordRedisWorkerFailure(env: Env, runSource: RefreshOptions['runSource']): Promise<boolean> {
+	const enabled = await isUpstashRedisEnabled(env);
+
+	if (!enabled) {
+		return false;
+	}
+
+	const dateKey = getRedisStatsDateKey();
+	const key = `nutsnews:stats:${dateKey}:worker-failures:${runSource ?? 'unknown'}:v1`;
+	const ttlSeconds = getUpstashRedisCounterTtlSeconds(env);
+	const response = await runUpstashRedisPipeline(
+		env,
+		[
+			['INCRBY', key, 1],
+			['EXPIRE', key, ttlSeconds],
+		],
+		{ event: 'record_worker_failure', dateKey, runSource },
+	);
+
+	return response !== null;
+}
+
+async function readRedisStatus(env: Env) {
+	const enabled = await isUpstashRedisEnabled(env);
+	const dateKey = getRedisStatsDateKey();
+	const shardIndex = getShardIndex(env);
+
+	if (!enabled) {
+		return {
+			redisEnabled: false,
+			message: 'Upstash Redis is not configured for this Worker.',
+			shardIndex,
+		};
+	}
+
+	const ping = await runUpstashRedisCommand<string>(env, ['PING'], { event: 'redis_status_ping' });
+	const counters = await runUpstashRedisPipeline(
+		env,
+		[
+			['GET', `nutsnews:stats:${dateKey}:worker-runs:manual:v1`],
+			['GET', `nutsnews:stats:${dateKey}:worker-runs:scheduled:v1`],
+			['GET', `nutsnews:stats:${dateKey}:ai-reviewed:v1`],
+			['GET', `nutsnews:stats:${dateKey}:accepted:v1`],
+			['GET', `nutsnews:stats:${dateKey}:rejected:v1`],
+		],
+		{ event: 'redis_status_counters', dateKey },
+	);
+
+	return {
+		redisEnabled: true,
+		ping: ping?.result ?? null,
+		shardIndex,
+		dateKey,
+		workerLockKey: getRedisWorkerLockKey(shardIndex),
+		counters: {
+			manualRunsToday: counters?.[0]?.result ?? null,
+			scheduledRunsToday: counters?.[1]?.result ?? null,
+			aiReviewedToday: counters?.[2]?.result ?? null,
+			acceptedToday: counters?.[3]?.result ?? null,
+			rejectedToday: counters?.[4]?.result ?? null,
+		},
+		settings: {
+			workerLockTtlSeconds: getUpstashRedisWorkerLockTtlSeconds(env),
+			aiReviewLockTtlSeconds: getUpstashRedisAiReviewLockTtlSeconds(env),
+			manualRateLimitMax: getUpstashRedisManualRateLimitMax(env),
+			manualRateLimitWindowSeconds: getUpstashRedisManualRateLimitWindowSeconds(env),
+			counterTtlSeconds: getUpstashRedisCounterTtlSeconds(env),
+		},
 	};
 }
 
@@ -4451,7 +4922,12 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const articlesEligibleForAi = localFilterResults.filter((result) => !result.shouldSkip).map((result) => result.article);
 
-	const articlesForAi = articlesEligibleForAi.slice(0, maxAiReviews);
+	const aiReviewLockResult = await claimArticlesForAiReviewWithRedis(
+		env,
+		articlesEligibleForAi.slice(0, maxAiReviews),
+		options.requestId ?? null,
+	);
+	const articlesForAi = aiReviewLockResult.articles;
 
 	await logInfo(env, 'worker.refresh.filtering_completed', 'Local filtering completed', {
 		shardIndex,
@@ -4465,6 +4941,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		aiReviewCount: articlesForAi.length,
 		aiProvider: config.aiProvider,
 		aiReviewConcurrency: config.aiReviewConcurrency,
+		redisEnabled: aiReviewLockResult.enabled,
+		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
+		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
 		kvEnabled: kvProcessedUrlLookup.cacheAvailable,
 		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
 		candidateUrlsNeedingSupabaseLookup: candidateUrlsNeedingSupabaseLookup.length,
@@ -4654,6 +5133,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	}
 
 	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
+	const redisEnabled = await isUpstashRedisEnabled(env);
 
 	const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
 		message: 'NutsNews refresh complete',
@@ -4715,6 +5195,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
 		kvProcessedUrlSaveOk,
 		kvRunStateSaveOk: false,
+		redisEnabled,
+		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
+		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
+		redisStatsSaveOk: false,
 		durationMs,
 	};
 
@@ -4741,9 +5225,16 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		requestId: options.requestId ?? null,
 	});
 
-	const result: RefreshResult = {
+	const resultBeforeRedisStatsSave: RefreshResult = {
 		...resultBeforeKvRunStateSave,
 		kvRunStateSaveOk,
+	};
+
+	const redisStatsSaveOk = await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown');
+
+	const result: RefreshResult = {
+		...resultBeforeRedisStatsSave,
+		redisStatsSaveOk,
 	};
 
 	await logInfo(env, 'worker.refresh.completed', 'NutsNews Worker refresh completed', result);
@@ -4803,6 +5294,10 @@ export default {
 			return Response.json(await readKvStatus(env));
 		}
 
+		if (url.pathname === '/redis-status') {
+			return Response.json(await readRedisStatus(env));
+		}
+
 		if (url.pathname === '/log-test') {
 			await logInfo(env, 'worker.log_test.completed', 'Worker Better Stack log test completed', {
 				requestId,
@@ -4836,6 +5331,48 @@ export default {
 
 		const maxAiReviews = parseManualLimit(url);
 		const imageLookupLimit = parseManualImageLookupLimit(url);
+		const rateLimit = await checkManualRefreshRateLimit(env, request);
+
+		if (!rateLimit.allowed) {
+			await logWarn(env, 'worker.redis.manual_rate_limit_blocked', 'Manual Worker refresh blocked by Upstash Redis rate limit', {
+				requestId,
+				shardIndex: getShardIndex(env),
+				count: rateLimit.count,
+				limit: rateLimit.limit,
+				windowSeconds: rateLimit.windowSeconds,
+			});
+
+			return Response.json(
+				{
+					message: 'Manual NutsNews refresh rate limit reached. Try again later.',
+					requestId,
+					redisEnabled: rateLimit.enabled,
+					count: rateLimit.count,
+					limit: rateLimit.limit,
+					windowSeconds: rateLimit.windowSeconds,
+				},
+				{ status: 429 },
+			);
+		}
+
+		const workerLock = await acquireRedisWorkerRunLock(env, requestId);
+
+		if (workerLock.enabled && !workerLock.acquired) {
+			await logWarn(env, 'worker.redis.manual_refresh_lock_skipped', 'Manual Worker refresh skipped because shard lock is active', {
+				requestId,
+				shardIndex: getShardIndex(env),
+				lockKey: workerLock.key,
+			});
+
+			return Response.json({
+				message: 'NutsNews refresh skipped because this shard is already running.',
+				requestId,
+				mode: 'manual',
+				skipped: true,
+				redisEnabled: true,
+				shardIndex: getShardIndex(env),
+			});
+		}
 
 		try {
 			const result = await refreshArticles(env, {
@@ -4859,6 +5396,7 @@ export default {
 				requestId,
 			});
 		} catch (error) {
+			await recordRedisWorkerFailure(env, 'manual');
 			await saveFailedWorkerRun(env, {
 				runStartedAt: requestStartedAt,
 				runSource: 'manual',
@@ -4890,6 +5428,8 @@ export default {
 					status: 500,
 				},
 			);
+		} finally {
+			await releaseRedisLock(env, workerLock);
 		}
 	},
 
@@ -4901,6 +5441,18 @@ export default {
 			requestId,
 			shardIndex: getShardIndex(env),
 		});
+
+		const workerLock = await acquireRedisWorkerRunLock(env, requestId);
+
+		if (workerLock.enabled && !workerLock.acquired) {
+			await logWarn(env, 'worker.redis.scheduled_refresh_lock_skipped', 'Scheduled Worker refresh skipped because shard lock is active', {
+				requestId,
+				shardIndex: getShardIndex(env),
+				lockKey: workerLock.key,
+			});
+
+			return;
+		}
 
 		try {
 			const result = await refreshArticles(env, {
@@ -4915,6 +5467,7 @@ export default {
 				result,
 			});
 		} catch (error) {
+			await recordRedisWorkerFailure(env, 'scheduled');
 			await saveFailedWorkerRun(env, {
 				runStartedAt: requestStartedAt,
 				runSource: 'scheduled',
@@ -4929,6 +5482,8 @@ export default {
 			});
 
 			throw error;
+		} finally {
+			await releaseRedisLock(env, workerLock);
 		}
 	},
 };

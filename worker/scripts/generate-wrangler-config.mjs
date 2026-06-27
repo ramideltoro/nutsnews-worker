@@ -8,9 +8,27 @@ const includeLocalAiSecretBinding = process.env.ENABLE_LOCAL_AI_SECRET_BINDING =
 const localAiApiKeySecretName = process.env.LOCAL_AI_API_KEY_SECRET_NAME ?? 'LOCAL_AI_API_KEY';
 const kvNamespaceId = process.env.NUTSNEWS_KV_NAMESPACE_ID;
 const kvPreviewNamespaceId = process.env.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID ?? kvNamespaceId;
+const includeUpstashRedisSecretBindings = process.env.ENABLE_UPSTASH_REDIS_SECRET_BINDING === 'true';
+const upstashRedisRestUrlSecretName = process.env.UPSTASH_REDIS_REST_URL_SECRET_NAME ?? 'UPSTASH_REDIS_REST_URL';
+const upstashRedisRestTokenSecretName = process.env.UPSTASH_REDIS_REST_TOKEN_SECRET_NAME ?? 'UPSTASH_REDIS_REST_TOKEN';
 
 const optionalShardVars = Object.fromEntries(
-	['AI_PROVIDER', 'LOCAL_AI_URL', 'LOCAL_AI_MODEL', 'AI_PROVIDER_FALLBACK_TO_OPENAI', 'AI_REVIEW_CONCURRENCY', 'ENABLED_SUMMARY_LANGUAGES', 'SUMMARY_TRANSLATION_LIMIT', 'KV_RECENT_PROCESSED_URL_LIMIT']
+	[
+		'AI_PROVIDER',
+		'LOCAL_AI_URL',
+		'LOCAL_AI_MODEL',
+		'AI_PROVIDER_FALLBACK_TO_OPENAI',
+		'AI_REVIEW_CONCURRENCY',
+		'ENABLED_SUMMARY_LANGUAGES',
+		'SUMMARY_TRANSLATION_LIMIT',
+		'KV_RECENT_PROCESSED_URL_LIMIT',
+		'UPSTASH_REDIS_ENABLED',
+		'UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS',
+		'UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS',
+		'UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX',
+		'UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS',
+		'UPSTASH_REDIS_COUNTER_TTL_SECONDS',
+	]
 		.filter((key) => process.env[key])
 		.map((key) => [key, process.env[key]]),
 );
@@ -87,12 +105,28 @@ for (let index = 0; index < shardCount; index += 1) {
 		});
 	}
 
+	if (includeUpstashRedisSecretBindings) {
+		config.secrets_store_secrets.push(
+			{
+				binding: 'UPSTASH_REDIS_REST_URL',
+				store_id: secretsStoreId,
+				secret_name: upstashRedisRestUrlSecretName,
+			},
+			{
+				binding: 'UPSTASH_REDIS_REST_TOKEN',
+				store_id: secretsStoreId,
+				secret_name: upstashRedisRestTokenSecretName,
+			},
+		);
+	}
+
 	fs.writeFileSync(path.join(generatedDir, `wrangler.shard${index}.jsonc`), JSON.stringify(config, null, 2) + '\n');
 }
 
 const localAiSummary = process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '';
 const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
+const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 
 console.log(
-	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${kvSummary}`,
+	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${kvSummary}${redisSummary}`,
 );
