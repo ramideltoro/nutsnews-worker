@@ -27,6 +27,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [Image Delivery](IMAGE_DELIVERY.md) | Next Image optimization, responsive article thumbnails, cache TTL, placeholders, and raw-image fallback behavior |
 | [Public Feed Snapshot](PUBLIC_FEED_SNAPSHOT.md) | Materialized homepage/API feed snapshot, Worker refresh flow, fallback behavior, and validation checks |
 | [Observability](OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, monitoring, and health checks |
+| [UptimeRobot Onboarding](UPTIMEROBOT_ONBOARDING.md) | Step-by-step external uptime monitors for NutsNews website, homepage keyword, article API, privacy/contact pages, alert contacts, and safe Worker/controller health-check rules |
 | [RSS Source Quality](RSS_SOURCE_QUALITY.md) | Feed quality score formula, ranking SQL, admin display, and promotion/disable rules |
 | [Supabase Restore Procedure](SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](TROUBLESHOOTING.md) | Common production problems and how to diagnose them from one place |
@@ -55,6 +56,7 @@ Use the docs like this:
 * Use `IMAGE_DELIVERY.md` when changing article thumbnails, Next Image settings, publisher image fallbacks, or perceived image loading behavior.
 * Use `PUBLIC_FEED_SNAPSHOT.md` when validating the optimized homepage/API data source or debugging snapshot fallback behavior.
 * Use `OBSERVABILITY.md` when debugging logs, dashboards, monitoring, or errors.
+* Use `UPTIMEROBOT_ONBOARDING.md` when creating external UptimeRobot monitors for the site, homepage content, article API, privacy/contact pages, alert contacts, or future safe Worker/controller health checks.
 * Use `RSS_SOURCE_QUALITY.md` when deciding which feeds to promote, keep, review, disable, or replace.
 * Use `SUPABASE_RESTORE.md` when recovering from a bad deploy, accidental delete, hacked data, broken migration, or database crash.
 * Use `TROUBLESHOOTING.md` when something is broken in production.

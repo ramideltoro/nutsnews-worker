@@ -22,7 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
-| Observability | Better Stack logs and uptime, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
+| Observability | Better Stack logs and uptime, UptimeRobot public uptime checks, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Automated Supabase backups to encrypted OneDrive plus documented restore runbook with validation SQL |
@@ -54,6 +54,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Image Delivery](docs/IMAGE_DELIVERY.md) | Next Image optimization, responsive article thumbnails, cache TTL, placeholders, and raw-image fallback behavior |
 | [Public Feed Snapshot](docs/PUBLIC_FEED_SNAPSHOT.md) | Materialized homepage/API feed snapshot, Worker refresh flow, fallback behavior, and validation checks |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
+| [UptimeRobot Onboarding](docs/UPTIMEROBOT_ONBOARDING.md) | Step-by-step public uptime, keyword, API, privacy/contact page, alert contact, and safe health-check monitor setup |
 | [RSS Source Quality](docs/RSS_SOURCE_QUALITY.md) | Quality score formula, Supabase ranking query, admin dashboard behavior, and feed promotion/disable rules |
 | [Supabase Restore Procedure](docs/SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](docs/TROUBLESHOOTING.md) | Diagnose common production problems from one document |
@@ -88,6 +89,7 @@ nutsnews/
 | Local AI dashboard | `/admin/local-ai` |
 | Home server dashboard | `/admin/home-server` |
 | Grafana backup monitoring | [docs/GRAFANA_BACKUP_MONITORING.md](docs/GRAFANA_BACKUP_MONITORING.md) |
+| UptimeRobot onboarding | [docs/UPTIMEROBOT_ONBOARDING.md](docs/UPTIMEROBOT_ONBOARDING.md) |
 | NutsNews DB backups | [docs/NUTSNEWS_DB_BACKUPS.md](docs/NUTSNEWS_DB_BACKUPS.md) |
 | Worker health dashboard | `/admin/shards` |
 | Feed health dashboard | `/admin/feed-health` |
@@ -116,6 +118,7 @@ NutsNews currently includes:
 * Optimized article image delivery with responsive Next Image thumbnails, AVIF/WebP support, and safe raw-image fallback
 * Cloudflare CDN caching for public reader routes
 * Better Stack uptime monitoring and centralized logs
+* UptimeRobot public website, homepage keyword, article API, privacy page, and contact page monitoring documentation
 * Grafana Cloud Prometheus backup monitoring for the home server
 * Automated NutsNews Supabase backups to encrypted OneDrive from the home server
 * Sentry error monitoring

@@ -17,6 +17,7 @@ NutsNews uses multiple observability layers:
 | Worker Shard Dashboard | Worker health and failed run visibility |
 | Feed Health Dashboard | RSS source quality visibility |
 | Better Stack Uptime | External availability monitoring |
+| UptimeRobot | Additional external availability, keyword, API, and public page monitoring |
 | Better Stack Logs | Centralized structured logs |
 | Grafana Cloud | Prometheus metrics, Explore queries, backup dashboard panels, and backup alerts |
 | Sentry | Application error monitoring |
@@ -66,6 +67,34 @@ Is the site reachable?
 ```
 
 ---
+
+## UptimeRobot
+
+UptimeRobot is an additional external monitoring layer for simple public uptime and content checks.
+
+Recommended first monitors:
+
+| Monitor name | Type | URL |
+| --- | --- | --- |
+| `NutsNews Website` | HTTP(s) | `https://www.nutsnews.com` |
+| `NutsNews Homepage Content` | Keyword | `https://www.nutsnews.com` |
+| `NutsNews Articles API` | HTTP(s) or API GET | `https://www.nutsnews.com/api/articles?limit=1` |
+| `NutsNews Privacy Page` | HTTP(s) | `https://www.nutsnews.com/privacy` |
+| `NutsNews Contact Page` | HTTP(s) | `https://www.nutsnews.com/contact` |
+
+The homepage keyword monitor should alert when this keyword is missing:
+
+```text
+NutsNews
+```
+
+Important safety rule: do not monitor refresh-triggering Worker or controller URLs such as `/?limit=1` or `/?shard=0`. Those URLs can run production ingestion work. Only add Worker/controller monitors after safe read-only `/health` routes exist.
+
+Detailed setup lives in:
+
+```text
+docs/UPTIMEROBOT_ONBOARDING.md
+```
 
 ## Better Stack Logs
 
@@ -201,6 +230,16 @@ curl -I "https://www.nutsnews.com/"
 
 ```bash
 curl -s "https://www.nutsnews.com/api/articles?page=0"
+```
+
+### UptimeRobot validation set
+
+```bash
+curl -I "https://www.nutsnews.com/"
+curl -s "https://www.nutsnews.com/" | grep -i "NutsNews"
+curl -s "https://www.nutsnews.com/api/articles?limit=1"
+curl -I "https://www.nutsnews.com/privacy"
+curl -I "https://www.nutsnews.com/contact"
 ```
 
 ### Cache
