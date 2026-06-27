@@ -22,7 +22,7 @@ The project is designed to be simple to use, inexpensive to operate, easy to mai
 | Admin | Google-protected admin dashboards for article review, source health, worker health, and internal operations |
 | CDN | Cloudflare caches public reader routes and article API responses |
 | Feed Snapshot | Supabase materialized public feed snapshot speeds homepage/API reads |
-| Observability | Better Stack logs and uptime, UptimeRobot public uptime checks, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
+| Observability | Better Stack logs and uptime, UptimeRobot public uptime checks, Lighthouse CI web quality checks, Sentry errors, Grafana Cloud Prometheus backup monitoring, admin health dashboards |
 | Dependency Maintenance | Repeatable npm audit, safe update, and build validation routine |
 | Source Quality | Supabase feed quality scoring ranks RSS sources by useful output |
 | Recovery | Automated Supabase backups to encrypted OneDrive plus documented restore runbook with validation SQL |
@@ -55,6 +55,7 @@ The full project documentation lives in [`docs/`](docs/).
 | [Public Feed Snapshot](docs/PUBLIC_FEED_SNAPSHOT.md) | Materialized homepage/API feed snapshot, Worker refresh flow, fallback behavior, and validation checks |
 | [Observability](docs/OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, and health checks |
 | [UptimeRobot Onboarding](docs/UPTIMEROBOT_ONBOARDING.md) | Step-by-step public uptime, keyword, API, privacy/contact page, alert contact, and safe health-check monitor setup |
+| [Lighthouse CI Onboarding](docs/LIGHTHOUSE_CI_ONBOARDING.md) | Step-by-step GitHub Actions setup for Google Lighthouse CI checks from the `web/` app, including thresholds, secrets, validation, and safe audited URLs |
 | [RSS Source Quality](docs/RSS_SOURCE_QUALITY.md) | Quality score formula, Supabase ranking query, admin dashboard behavior, and feed promotion/disable rules |
 | [Supabase Restore Procedure](docs/SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](docs/TROUBLESHOOTING.md) | Diagnose common production problems from one document |

@@ -18,6 +18,7 @@ NutsNews uses multiple observability layers:
 | Feed Health Dashboard | RSS source quality visibility |
 | Better Stack Uptime | External availability monitoring |
 | UptimeRobot | Additional external availability, keyword, API, and public page monitoring |
+| Lighthouse CI | GitHub Actions quality checks for public web performance, accessibility, SEO, best practices, and Core Web Vitals-style regressions |
 | Better Stack Logs | Centralized structured logs |
 | Grafana Cloud | Prometheus metrics, Explore queries, backup dashboard panels, and backup alerts |
 | Sentry | Application error monitoring |
@@ -94,6 +95,44 @@ Detailed setup lives in:
 
 ```text
 docs/UPTIMEROBOT_ONBOARDING.md
+```
+
+## Lighthouse CI
+
+Lighthouse CI is the automated web quality gate for NutsNews public pages.
+
+It runs in GitHub Actions and checks:
+
+* Performance
+* Accessibility
+* Best practices
+* SEO
+* Largest Contentful Paint
+* Cumulative Layout Shift
+* Total Blocking Time
+
+Repository-layout rule:
+
+```text
+GitHub Actions workflow: .github/workflows/lighthouse-ci.yml
+Lighthouse config: web/lighthouserc.js
+NPM install/build/start commands: run from web/
+```
+
+Recommended first audited URLs:
+
+```text
+http://localhost:3000/
+http://localhost:3000/privacy
+http://localhost:3000/contact
+```
+
+Do not audit Worker refresh URLs, controller trigger URLs, admin pages, OAuth routes, or any route that can perform ingestion, AI review, translation, refresh work, database writes, or authenticated work.
+
+Detailed setup lives in:
+
+```text
+docs/LIGHTHOUSE_CI_ONBOARDING.md
 ```
 
 ## Better Stack Logs
