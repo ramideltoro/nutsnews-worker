@@ -135,6 +135,46 @@ Detailed setup lives in:
 docs/LIGHTHOUSE_CI_ONBOARDING.md
 ```
 
+## axe Playwright Accessibility CI
+
+axe Playwright Accessibility CI answers:
+
+```text
+Did a public NutsNews page introduce a serious or critical automated accessibility regression?
+```
+
+It runs from GitHub Actions using Playwright and `@axe-core/playwright`.
+
+Checked pages:
+
+```text
+http://127.0.0.1:3100/
+http://127.0.0.1:3100/about
+http://127.0.0.1:3100/privacy
+http://127.0.0.1:3100/contact
+```
+
+Repository-layout rule:
+
+```text
+GitHub Actions workflow: .github/workflows/accessibility-ci.yml
+Playwright config: web/playwright.config.ts
+axe test file: web/tests/accessibility.spec.ts
+NPM install/build/test commands: run from web/
+```
+
+The first threshold fails on only serious and critical axe violations. This keeps CI practical while still catching the issues most likely to hurt launch quality, App Store review polish, and reader usability.
+
+Do not audit Worker refresh URLs, controller trigger URLs, admin pages, OAuth routes, or routes that can perform ingestion, AI review, translation, refresh work, database writes, or authenticated work.
+
+Detailed setup lives in:
+
+```text
+docs/AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md
+```
+
+Manual WAVE browser-extension checks should still be run before App Store review and major public launches.
+
 ## Better Stack Logs
 
 Better Stack Logs answer:

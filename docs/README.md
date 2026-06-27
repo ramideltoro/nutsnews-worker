@@ -29,6 +29,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [Observability](OBSERVABILITY.md) | Better Stack, Sentry, dashboards, structured logs, monitoring, and health checks |
 | [UptimeRobot Onboarding](UPTIMEROBOT_ONBOARDING.md) | Step-by-step external uptime monitors for NutsNews website, homepage keyword, article API, privacy/contact pages, alert contacts, and safe Worker/controller health-check rules |
 | [Lighthouse CI Onboarding](LIGHTHOUSE_CI_ONBOARDING.md) | Step-by-step GitHub Actions setup for Google Lighthouse CI checks from the `web/` app, including cleanup, config, workflow, secrets, local validation, thresholds, and safe URL rules |
+| [axe Playwright Accessibility CI](AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md) | Step-by-step GitHub Actions setup for automated axe accessibility checks from Playwright, including dependencies, workflow, local validation, serious/critical thresholds, reports, safe URL rules, and WAVE manual review guidance |
 | [RSS Source Quality](RSS_SOURCE_QUALITY.md) | Feed quality score formula, ranking SQL, admin display, and promotion/disable rules |
 | [Supabase Restore Procedure](SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](TROUBLESHOOTING.md) | Common production problems and how to diagnose them from one place |
@@ -59,6 +60,7 @@ Use the docs like this:
 * Use `OBSERVABILITY.md` when debugging logs, dashboards, monitoring, or errors.
 * Use `UPTIMEROBOT_ONBOARDING.md` when creating external UptimeRobot monitors for the site, homepage content, article API, privacy/contact pages, alert contacts, or future safe Worker/controller health checks.
 * Use `LIGHTHOUSE_CI_ONBOARDING.md` when adding or troubleshooting Google Lighthouse CI in GitHub Actions for the Next.js app inside `web/`.
+* Use `AXE_PLAYWRIGHT_ACCESSIBILITY_CI.md` when adding or troubleshooting automated Playwright/axe accessibility checks or preparing for WAVE manual review.
 * Use `RSS_SOURCE_QUALITY.md` when deciding which feeds to promote, keep, review, disable, or replace.
 * Use `SUPABASE_RESTORE.md` when recovering from a bad deploy, accidental delete, hacked data, broken migration, or database crash.
 * Use `TROUBLESHOOTING.md` when something is broken in production.
