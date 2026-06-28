@@ -1,0 +1,36 @@
+name: Worker Offline E2E Regression
+
+on:
+  pull_request:
+    paths:
+      - "worker/**"
+      - "scripts/worker_offline_e2e_regression.mjs"
+      - ".github/workflows/worker-offline-e2e.yml"
+  workflow_dispatch:
+
+jobs:
+  worker-offline-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Type-check Worker
+        working-directory: worker
+        run: npx tsc --noEmit
+
+      - name: Run fully offline Worker E2E regression
+        run: node scripts/worker_offline_e2e_regression.mjs

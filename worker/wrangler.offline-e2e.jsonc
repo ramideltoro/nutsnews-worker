@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nutsnews-worker-offline-e2e",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-24",
+  "observability": {
+    "enabled": false
+  },
+  "vars": {
+    "SUPABASE_URL": "http://127.0.0.1:8892",
+    "SUPABASE_SERVICE_ROLE_KEY": "offline-e2e-service-role-key",
+    "AI_PROVIDER": "local",
+    "LOCAL_AI_URL": "http://127.0.0.1:8890",
+    "LOCAL_AI_API_KEY": "offline-e2e-local-ai-key",
+    "LOCAL_AI_MODEL": "nutsnews-offline-e2e-mock-ai",
+    "AI_PROVIDER_FALLBACK_TO_OPENAI": "false",
+    "AI_REVIEW_CONCURRENCY": "1",
+    "FEED_SHARD_INDEX": "0",
+    "FEEDS_PER_SHARD": "1",
+    "ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT": "3",
+    "ENABLED_SUMMARY_LANGUAGES": "fr,ja",
+    "SUMMARY_TRANSLATION_LIMIT": "8",
+    "UPSTASH_REDIS_ENABLED": "false"
+  }
+}

@@ -7,7 +7,8 @@
 		"generate:wrangler": "node scripts/generate-wrangler-config.mjs",
 		"dev": "wrangler dev -c generated-wrangler/wrangler.shard0.jsonc",
 		"deploy:shard0": "wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
-		"deploy:all": "npm run generate:wrangler && for i in {0..24}; do echo \"Deploying shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
+		"deploy:all": "npm run generate:wrangler && for i in {0..24}; do echo \"Deploying shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done",
+		"test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs"
 	},
 	"dependencies": {
 		"@sentry/cloudflare": "^10.59.0"
@@ -16,6 +17,6 @@
 		"@cloudflare/workers-types": "^4.20260621.1",
 		"@types/node": "^20.19.43",
 		"typescript": "^5.9.3",
-		"wrangler": "^4.103.0"
+		"wrangler": "^4.105.0"
 	}
 }
