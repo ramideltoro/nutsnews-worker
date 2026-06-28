@@ -14,55 +14,34 @@
   "vars": {
     "FEED_SHARD_INDEX": "6",
     "FEEDS_PER_SHARD": "20",
-    "UPSTASH_REDIS_ENABLED": "true",
-    "UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS": "180",
-    "UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS": "1800",
-    "UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX": "20",
-    "UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS": "3600",
-    "UPSTASH_REDIS_COUNTER_TTL_SECONDS": "259200"
+    "ENABLED_SUMMARY_LANGUAGES": "fr,ja",
+    "SUMMARY_TRANSLATION_LIMIT": "6"
   },
   "secrets_store_secrets": [
     {
       "binding": "SUPABASE_URL",
-      "store_id": "test-store-id",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "SUPABASE_URL"
     },
     {
       "binding": "SUPABASE_SERVICE_ROLE_KEY",
-      "store_id": "test-store-id",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "SUPABASE_SERVICE_ROLE_KEY"
     },
     {
       "binding": "OPENAI_API_KEY",
-      "store_id": "test-store-id",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "OPENAI_API_KEY"
     },
     {
       "binding": "BETTER_STACK_SOURCE_TOKEN",
-      "store_id": "test-store-id",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "BETTER_STACK_SOURCE_TOKEN"
     },
     {
       "binding": "BETTER_STACK_INGESTING_HOST",
-      "store_id": "test-store-id",
+      "store_id": "0d4e0e193d414b9f8bcbca44c6af24f9",
       "secret_name": "BETTER_STACK_INGESTING_HOST"
-    },
-    {
-      "binding": "UPSTASH_REDIS_REST_URL",
-      "store_id": "test-store-id",
-      "secret_name": "UPSTASH_REDIS_REST_URL"
-    },
-    {
-      "binding": "UPSTASH_REDIS_REST_TOKEN",
-      "store_id": "test-store-id",
-      "secret_name": "UPSTASH_REDIS_REST_TOKEN"
-    }
-  ],
-  "kv_namespaces": [
-    {
-      "binding": "NUTSNEWS_KV",
-      "id": "6e981f0941eb46ac8202a0a64e8eeb26",
-      "preview_id": "6e981f0941eb46ac8202a0a64e8eeb26"
     }
   ]
 }

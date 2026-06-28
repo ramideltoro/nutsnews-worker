@@ -32,6 +32,7 @@ type Env = {
 	ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT?: string;
 	ENABLED_SUMMARY_LANGUAGES?: string;
 	SUMMARY_TRANSLATION_LIMIT?: string;
+	HOLD_ARTICLES_FOR_TRANSLATIONS?: string;
 	NUTSNEWS_KV?: KVNamespace;
 	KV_RECENT_PROCESSED_URL_LIMIT?: string;
 	UPSTASH_REDIS_REST_URL?: MaybeSecretBinding;
@@ -62,6 +63,7 @@ type RuntimeConfig = {
 	articlePageImageLookupLimit: number;
 	enabledSummaryLanguages: SummaryLanguageCode[];
 	summaryTranslationLimit: number;
+	holdArticlesForTranslations: boolean;
 };
 
 type WorkerRunSaveConfig = {
@@ -1190,14 +1192,17 @@ async function acquireRedisWorkerRunLock(env: Env, requestId: string): Promise<R
 async function claimArticlesForAiReviewWithRedis(
 	env: Env,
 	articles: RssArticle[],
+	maxClaimedArticles: number,
 	requestId: string | null,
 ): Promise<RedisAiReviewLockResult> {
 	const enabled = await isUpstashRedisEnabled(env);
 
 	if (!enabled || articles.length === 0) {
+		const selectedArticles = articles.slice(0, maxClaimedArticles);
+
 		return {
-			articles,
-			acquiredCount: enabled ? 0 : articles.length,
+			articles: selectedArticles,
+			acquiredCount: enabled ? 0 : selectedArticles.length,
 			skippedCount: 0,
 			enabled,
 		};
@@ -1208,6 +1213,10 @@ async function claimArticlesForAiReviewWithRedis(
 	let skippedCount = 0;
 
 	for (const article of articles) {
+		if (claimedArticles.length >= maxClaimedArticles) {
+			break;
+		}
+
 		const urlHash = await hashUrlForKv(article.url);
 		const lock = await acquireRedisLock(env, getRedisAiReviewLockKey(urlHash), requestId ?? crypto.randomUUID(), ttlSeconds);
 
@@ -1624,6 +1633,7 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		),
 		enabledSummaryLanguages: getEnabledSummaryLanguages(env.ENABLED_SUMMARY_LANGUAGES),
 		summaryTranslationLimit: getSummaryTranslationLimit(env.SUMMARY_TRANSLATION_LIMIT),
+		holdArticlesForTranslations: getBooleanConfig(env.HOLD_ARTICLES_FOR_TRANSLATIONS, false),
 	};
 }
 
@@ -1678,7 +1688,7 @@ function clampArticlePageImageLookupLimit(value: number | undefined, fallback: n
 }
 
 function shouldHoldAcceptedArticlesForTranslations(config: RuntimeConfig) {
-	return config.enabledSummaryLanguages.length > 0 && config.summaryTranslationLimit > 0;
+	return config.holdArticlesForTranslations && config.enabledSummaryLanguages.length > 0 && config.summaryTranslationLimit > 0;
 }
 
 function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number, requestedLookupLimit: number) {
@@ -4857,6 +4867,10 @@ function buildRowsFromReviewedArticles(reviewedArticles: ReviewedArticleResult[]
 	};
 }
 
+function getReviewRowsEligibleForKvProcessedCache(reviewRows: ArticleReviewInsert[]) {
+	return reviewRows.filter((row) => row.ai_provider !== 'no_thumbnail' && !isNoThumbnailReview(row));
+}
+
 async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<RefreshResult> {
 	const refreshStartedAt = Date.now();
 	const config = await getRuntimeConfig(env);
@@ -4924,7 +4938,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const aiReviewLockResult = await claimArticlesForAiReviewWithRedis(
 		env,
-		articlesEligibleForAi.slice(0, maxAiReviews),
+		articlesEligibleForAi,
+		maxAiReviews,
 		options.requestId ?? null,
 	);
 	const articlesForAi = aiReviewLockResult.articles;
@@ -5038,11 +5053,12 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedHealthSaveOk = await saveFeedHealthBatch(env, config, feedHealthRows);
 
 	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
+	const reviewRowsEligibleForKvProcessedCache = getReviewRowsEligibleForKvProcessedCache(reviewRows);
 	const kvProcessedUrlSaveOk = reviewSaveOk
 		? await rememberProcessedUrlsInKv(
 			env,
 			shardIndex,
-			reviewRows.map((row) => row.original_url),
+			reviewRowsEligibleForKvProcessedCache.map((row) => row.original_url),
 		)
 		: false;
 
