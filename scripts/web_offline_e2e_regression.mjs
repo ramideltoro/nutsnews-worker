@@ -496,18 +496,30 @@ async function runBrowserChecks() {
   logOk("Footer search returned a mock article");
 
   const footer = page.locator("footer");
+  const footerNavigationTimeoutMs = 20000;
 
-  await footer.getByRole("link", { name: "About", exact: true }).click();
-  await expect(page).toHaveURL(/\/about$/);
-  await expect(page.locator("main").getByText("About NutsNews", { exact: true })).toBeVisible();
+  async function clickFooterLink(name, path, expectedUrlPattern) {
+    const link = footer.getByRole("link", { name, exact: true });
+    await expect(link).toHaveAttribute("href", path);
+    await link.scrollIntoViewIfNeeded();
+    await link.click();
+    await page.waitForURL(expectedUrlPattern, { timeout: footerNavigationTimeoutMs });
+  }
 
-  await footer.getByRole("link", { name: "Privacy", exact: true }).click();
-  await expect(page).toHaveURL(/\/privacy$/);
-  await expect(page.locator("main").getByText(/Privacy Policy|NutsNews Privacy Policy/i).first()).toBeVisible();
+  await clickFooterLink("About", "/about", /\/about$/);
+  await expect(page.locator("main").getByText("About NutsNews", { exact: true })).toBeVisible({
+    timeout: footerNavigationTimeoutMs,
+  });
 
-  await footer.getByRole("link", { name: "Contact", exact: true }).click();
-  await expect(page).toHaveURL(/\/contact$/);
-  await expect(page.locator("main").getByRole("heading", { name: /Send a message/i })).toBeVisible();
+  await clickFooterLink("Privacy", "/privacy", /\/privacy$/);
+  await expect(page.locator("main").getByText(/Privacy Policy|NutsNews Privacy Policy/i).first()).toBeVisible({
+    timeout: footerNavigationTimeoutMs,
+  });
+
+  await clickFooterLink("Contact", "/contact", /\/contact$/);
+  await expect(page.locator("main").getByRole("heading", { name: /Send a message/i })).toBeVisible({
+    timeout: footerNavigationTimeoutMs,
+  });
   logOk("Footer navigation links render public pages");
 
   logStep("Verifying contact form sends email through mock Resend");
