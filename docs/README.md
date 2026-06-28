@@ -34,7 +34,7 @@ The root `README.md` is intentionally short. It acts as the project landing page
 | [RSS Source Quality](RSS_SOURCE_QUALITY.md) | Feed quality score formula, ranking SQL, admin display, and promotion/disable rules |
 | [Supabase Restore Procedure](SUPABASE_RESTORE.md) | Backup locations, restore order, SQL import commands, validation queries, and restore-test checklist |
 | [Troubleshooting Guide](TROUBLESHOOTING.md) | Common production problems and how to diagnose them from one place |
-| [Archived Root Update Notes](archive/) | Older one-off update notes moved out of the repository root |
+| [Archived Root Update Notes](archive/root-cleanup/) | Older one-off update notes moved out of the repository root |
 
 ---
 
