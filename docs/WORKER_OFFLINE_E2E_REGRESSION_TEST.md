@@ -92,3 +92,14 @@ worker/wrangler.offline-e2e.generated.jsonc
 ```
 
 That generated file is ignored by Git.
+
+
+## Fast CI exit behavior
+
+After the test prints `✅ NutsNews fully offline Worker E2E regression passed.`, the script stops Wrangler and the mock services, prints `Cleanup complete; exiting Worker E2E regression with code 0.`, then explicitly exits. This prevents lingering Wrangler/server handles from making GitHub Actions appear stuck after success.
+
+The script also has a watchdog timeout. Override it only if needed:
+
+```bash
+NUTSNEWS_OFFLINE_E2E_WATCHDOG_TIMEOUT_MS=180000 npm run test:e2e:offline
+```

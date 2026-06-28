@@ -22,6 +22,10 @@ function envNumber(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+const TEST_WATCHDOG_TIMEOUT_MS = envNumber('NUTSNEWS_OFFLINE_E2E_WATCHDOG_TIMEOUT_MS', 180000);
+const EXIT_AFTER_CLEANUP_DELAY_MS = envNumber('NUTSNEWS_OFFLINE_E2E_EXIT_AFTER_CLEANUP_DELAY_MS', 100);
+const SERVER_CLOSE_TIMEOUT_MS = envNumber('NUTSNEWS_OFFLINE_E2E_SERVER_CLOSE_TIMEOUT_MS', 1500);
+
 function assert(condition, message, details = undefined) {
   if (!condition) {
     const error = new Error(message);
@@ -233,7 +237,30 @@ function closeServer(server) {
   if (!server) {
     return Promise.resolve();
   }
-  return new Promise((resolvePromise) => server.close(resolvePromise));
+
+  return new Promise((resolvePromise) => {
+    let resolved = false;
+
+    const finish = () => {
+      if (resolved) {
+        return;
+      }
+      resolved = true;
+      clearTimeout(timeout);
+      resolvePromise();
+    };
+
+    const timeout = setTimeout(finish, SERVER_CLOSE_TIMEOUT_MS);
+    timeout.unref?.();
+
+    try {
+      server.close(finish);
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+    } catch {
+      finish();
+    }
+  });
 }
 
 function startMockRssServer(ctx) {
@@ -939,6 +966,16 @@ async function run() {
   let webServer;
   let workerProcess;
 
+  const watchdog = setTimeout(() => {
+    console.error(`\n❌ NutsNews fully offline Worker E2E regression timed out after ${TEST_WATCHDOG_TIMEOUT_MS}ms.`);
+    if (workerProcess?.getOutput) {
+      console.error('\nWrangler output:');
+      console.error(workerProcess.getOutput().slice(-8000));
+    }
+    process.exit(1);
+  }, TEST_WATCHDOG_TIMEOUT_MS);
+  watchdog.unref?.();
+
   console.log(`NutsNews fully offline Worker regression run: ${ctx.runId}`);
   console.log(`Worker URL: ${ctx.workerUrl}`);
   console.log(`Mock Supabase URL: ${ctx.supabaseUrl}`);
@@ -1011,6 +1048,12 @@ async function run() {
       closeServer(supabaseServer),
       closeServer(webServer),
     ]);
+
+    clearTimeout(watchdog);
+    const exitCode = process.exitCode ?? 0;
+    logOk(`Cleanup complete; exiting Worker E2E regression with code ${exitCode}.`);
+    await sleep(EXIT_AFTER_CLEANUP_DELAY_MS);
+    process.exit(exitCode);
   }
 }
 
