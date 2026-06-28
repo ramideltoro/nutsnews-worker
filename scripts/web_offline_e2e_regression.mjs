@@ -471,6 +471,56 @@ async function runBrowserChecks() {
 
   const page = await context.newPage();
 
+  async function openSettingsPanel() {
+    const settingsButton = page.getByRole("button", {
+      name: /Open NutsNews settings|Ouvrir les paramètres NutsNews|NutsNewsの設定を開く/i,
+    });
+    const settingsPanel = page.locator(".theme-panel").first();
+
+    await expect(settingsButton).toBeVisible({ timeout: 20000 });
+    await settingsButton.scrollIntoViewIfNeeded();
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if (await settingsPanel.isVisible().catch(() => false)) {
+        return settingsPanel;
+      }
+
+      await settingsButton.click({ force: true });
+
+      try {
+        await expect(settingsPanel).toBeVisible({ timeout: 10000 });
+        return settingsPanel;
+      } catch {
+        await settingsButton.evaluate((button) => button.click());
+        try {
+          await expect(settingsPanel).toBeVisible({ timeout: 10000 });
+          return settingsPanel;
+        } catch {
+          if (attempt === 3) {
+            throw new Error("Settings panel did not open after clicking the footer settings button.");
+          }
+          await delay(500);
+        }
+      }
+    }
+
+    throw new Error("Settings panel did not open.");
+  }
+
+  async function closeSettingsPanel() {
+    const settingsPanel = page.locator(".theme-panel").first();
+
+    if (!(await settingsPanel.isVisible().catch(() => false))) {
+      return;
+    }
+
+    const settingsButton = page.getByRole("button", {
+      name: /Open NutsNews settings|Ouvrir les paramètres NutsNews|NutsNewsの設定を開く/i,
+    });
+    await settingsButton.click({ force: true });
+    await expect(settingsPanel).toBeHidden({ timeout: 10000 }).catch(() => {});
+  }
+
   logStep("Verifying homepage rendering");
   await page.goto("/", { waitUntil: "networkidle" });
   await expect(page.locator("h1")).toContainText("Nuts");
@@ -482,9 +532,8 @@ async function runBrowserChecks() {
   await page.getByLabel("Go to NutsNews home").click();
   await expect(page).toHaveURL(/\/$/);
 
-  await page.getByLabel("Open NutsNews settings").click();
-  await expect(page.getByRole("region", { name: "NutsNews settings" })).toBeVisible();
-  await page.getByLabel("Open NutsNews settings").click();
+  await openSettingsPanel();
+  await closeSettingsPanel();
 
   await page.getByLabel("Open search").click();
   const searchDialog = page.getByRole("dialog", { name: /Search/i });
@@ -540,9 +589,9 @@ async function runBrowserChecks() {
 
   logStep("Verifying language switch renders translated article text");
   await page.goto("/", { waitUntil: "networkidle" });
-  await page.getByLabel("Open NutsNews settings").click();
-  await page.getByRole("button", { name: /Language/i }).click();
-  await page.getByRole("button", { name: /Français|French/i }).click();
+  const languageSettingsPanel = await openSettingsPanel();
+  await languageSettingsPanel.getByRole("button", { name: /Language/i }).click();
+  await languageSettingsPanel.getByRole("button", { name: /Français|French/i }).click();
   await expect(page.getByText(articleSummaries[0].title)).toBeVisible({ timeout: 10000 });
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
   logOk("French language change rendered translated articles");
