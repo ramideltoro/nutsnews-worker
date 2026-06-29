@@ -57,7 +57,7 @@ This makes new card translations prefer the home server while preserving OpenAI 
 Default Worker config:
 
 ```text
-ENABLED_SUMMARY_LANGUAGES=fr,ja
+ENABLED_SUMMARY_LANGUAGES=fr,ja,de-CH,de,el
 SUMMARY_TRANSLATION_LIMIT=12
 ```
 
@@ -150,7 +150,7 @@ Japanese is supported as an additional summary language using the same `public.a
 - Flag badge: 🇯🇵
 - Article API: `/api/articles?lang=ja`
 - Backfill script: `scripts/backfill_japanese_summaries.mjs`
-- Worker setting: `ENABLED_SUMMARY_LANGUAGES=fr,ja`
+- Worker setting: `ENABLED_SUMMARY_LANGUAGES=fr,ja,de-CH,de,el`
 
 Existing articles must be backfilled once. New accepted articles are translated by the Workers after the updated Worker code is deployed. Source links remain unchanged and continue to point to the original publisher.
 
@@ -163,7 +163,7 @@ The first thing to check is whether a Worker run accepted more articles than `SU
 Run:
 
 ```bash
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=80 WINDOW_MINUTES=45 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=80 WINDOW_MINUTES=45 \
 node scripts/diagnose_missing_article_translations.mjs
 ```
 

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
 /**
  * Backfill missing NutsNews article title/summary translations.
  *
@@ -15,9 +18,13 @@
  *   OPENAI_MODEL=gpt-4o-mini
  *
  * Optional env:
- *   LANGUAGE_CODES=fr,ja
+ *   LANGUAGE_CODES=fr,ja,de-CH,de,el
  *   BACKFILL_LIMIT=25              # max translation rows saved in this run
  *   CANDIDATE_LIMIT=250            # recent articles to scan for missing rows
+ *   SCAN_ALL_CANDIDATES=1           # scan article pages until a backfill batch is found
+ *   CANDIDATE_PAGE_SIZE=1000        # page size when scanning all candidates
+ *   FAILED_TRANSLATION_CACHE=/tmp/nutsnews-translation-failures.json
+ *   RETRY_FAILED=1                  # retry rows already present in FAILED_TRANSLATION_CACHE
  *   BACKFILL_SOURCE=articles       # articles or public_feed_snapshot
  *   PUBLISH_READY=1                # publish translation_pending rows after all language rows exist
  *   DRY_RUN=1
@@ -30,13 +37,17 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4o-mini';
 const LOCAL_AI_URL = process.env.LOCAL_AI_URL?.replace(/\/+$/, '');
 const LOCAL_AI_API_KEY = safeHeaderValue(process.env.LOCAL_AI_API_KEY);
 const LOCAL_AI_MODEL = process.env.LOCAL_AI_MODEL ?? 'qwen2.5:3b';
-const LANGUAGE_CODES = parseLanguages(process.env.LANGUAGE_CODES ?? process.env.LANGUAGE_CODE ?? 'fr,ja');
+const LANGUAGE_CODES = parseLanguages(process.env.LANGUAGE_CODES ?? process.env.LANGUAGE_CODE ?? 'fr,ja,de-CH,de,el');
 const BACKFILL_LIMIT = clampNumber(process.env.BACKFILL_LIMIT, 25, 1, 200);
 const CANDIDATE_LIMIT = clampNumber(process.env.CANDIDATE_LIMIT, 250, 1, 5000);
+const CANDIDATE_PAGE_SIZE = clampNumber(process.env.CANDIDATE_PAGE_SIZE, Math.min(CANDIDATE_LIMIT, 1000), 1, 1000);
+const SCAN_ALL_CANDIDATES = isTruthy(process.env.SCAN_ALL_CANDIDATES);
 const BACKFILL_SOURCE = normalizeBackfillSource(process.env.BACKFILL_SOURCE ?? 'articles');
 const DRY_RUN = isTruthy(process.env.DRY_RUN);
 const PUBLISH_READY = isTruthy(process.env.PUBLISH_READY ?? '1');
 const FORCE = isTruthy(process.env.FORCE);
+const RETRY_FAILED = isTruthy(process.env.RETRY_FAILED);
+const FAILED_TRANSLATION_CACHE = String(process.env.FAILED_TRANSLATION_CACHE ?? '').trim();
 const SUMMARY_LOOKUP_LIMIT = clampNumber(process.env.SUMMARY_LOOKUP_LIMIT, 20000, 1, 50000);
 const TRANSLATED_SUMMARY_MAX_CHARS = 250;
 
@@ -56,7 +67,7 @@ if (LOCAL_AI_URL && !LOCAL_AI_API_KEY) {
 }
 
 if (LANGUAGE_CODES.length === 0) {
-  console.error('No supported languages selected. Use LANGUAGE_CODES=fr,ja, LANGUAGE_CODES=fr, or LANGUAGE_CODES=ja.');
+  console.error('No supported languages selected. Use LANGUAGE_CODES=fr,ja,de-CH,de,el or a comma-separated subset.');
   process.exit(1);
 }
 
@@ -83,13 +94,28 @@ function encodePostgrestInFilter(values) {
     .join(',')})`;
 }
 
+function normalizeLanguageCode(value) {
+  const normalizedValue = String(value ?? '').trim();
+  const lowerValue = normalizedValue.toLowerCase();
+
+  if (lowerValue === 'de-ch' || lowerValue === 'de_ch' || lowerValue === 'ch' || lowerValue === 'swiss') {
+    return 'de-CH';
+  }
+
+  if (lowerValue === 'fr' || lowerValue === 'ja' || lowerValue === 'de' || lowerValue === 'el') {
+    return lowerValue;
+  }
+
+  return '';
+}
+
 function parseLanguages(value) {
   return Array.from(
     new Set(
       String(value ?? '')
         .split(',')
-        .map((language) => language.trim().toLowerCase())
-        .filter((language) => language === 'fr' || language === 'ja'),
+        .map(normalizeLanguageCode)
+        .filter(Boolean),
     ),
   );
 }
@@ -152,20 +178,61 @@ function trimSummary(value, maxChars = TRANSLATED_SUMMARY_MAX_CHARS) {
   return punctuated.length <= maxChars ? punctuated : trimmed.slice(0, maxChars).trim();
 }
 
+const LANGUAGE_NAMES = {
+  fr: 'French',
+  ja: 'Japanese',
+  'de-CH': 'Swiss German',
+  de: 'German',
+  el: 'Greek',
+};
+
 function getLanguageName(languageCode) {
-  if (languageCode === 'fr') {
-    return 'French';
-  }
-
-  if (languageCode === 'ja') {
-    return 'Japanese';
-  }
-
-  return 'the requested language';
+  return LANGUAGE_NAMES[languageCode] ?? 'the requested language';
 }
 
 function getSummaryKey(originalUrl, languageCode) {
   return `${languageCode}::${originalUrl}`;
+}
+
+function loadFailedTranslationCache() {
+  if (!FAILED_TRANSLATION_CACHE || RETRY_FAILED) {
+    return new Map();
+  }
+
+  try {
+    if (!existsSync(FAILED_TRANSLATION_CACHE)) {
+      return new Map();
+    }
+
+    const parsed = JSON.parse(readFileSync(FAILED_TRANSLATION_CACHE, 'utf8'));
+    const rows = Array.isArray(parsed?.failedRows) ? parsed.failedRows : [];
+    return new Map(
+      rows
+        .filter((row) => row?.originalUrl && row?.languageCode)
+        .map((row) => [getSummaryKey(row.originalUrl, row.languageCode), row]),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Could not read FAILED_TRANSLATION_CACHE ${FAILED_TRANSLATION_CACHE}: ${message}`);
+    return new Map();
+  }
+}
+
+function saveFailedTranslationCache(failedRowsByKey) {
+  if (!FAILED_TRANSLATION_CACHE || failedRowsByKey.size === 0) {
+    return;
+  }
+
+  try {
+    mkdirSync(dirname(FAILED_TRANSLATION_CACHE), { recursive: true });
+    writeFileSync(
+      FAILED_TRANSLATION_CACHE,
+      `${JSON.stringify({ failedRows: Array.from(failedRowsByKey.values()) }, null, 2)}\n`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`Could not write FAILED_TRANSLATION_CACHE ${FAILED_TRANSLATION_CACHE}: ${message}`);
+  }
 }
 
 async function supabaseFetch(path, options = {}) {
@@ -186,29 +253,59 @@ async function supabaseFetch(path, options = {}) {
   return text.trim() ? JSON.parse(text) : null;
 }
 
-async function loadCandidateArticles() {
+async function loadCandidateArticlesPage(offset = 0, limit = CANDIDATE_LIMIT) {
+  const encodedOffset = Math.max(0, Math.floor(Number(offset) || 0));
+  const encodedLimit = Math.max(1, Math.floor(Number(limit) || 1));
+
   if (BACKFILL_SOURCE === 'articles') {
     return supabaseFetch(
-      `/rest/v1/articles?select=id,source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc&limit=${CANDIDATE_LIMIT}`,
+      `/rest/v1/articles?select=id,source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc&limit=${encodedLimit}&offset=${encodedOffset}`,
     );
   }
 
   return supabaseFetch(
-    `/rest/v1/public_feed_snapshot?select=id,source,title,original_url,ai_summary,category,published_on_site_at,snapshot_rank&order=snapshot_rank.asc&limit=${CANDIDATE_LIMIT}`,
+    `/rest/v1/public_feed_snapshot?select=id,source,title,original_url,ai_summary,category,published_on_site_at,snapshot_rank&order=snapshot_rank.asc&limit=${encodedLimit}&offset=${encodedOffset}`,
   );
 }
 
-async function loadExistingSummaries() {
+async function loadExistingSummaries(articles = []) {
   if (FORCE) {
     return [];
   }
 
-  return supabaseFetch(
-    `/rest/v1/article_summaries?select=original_url,language_code&language_code=in.(${LANGUAGE_CODES.join(',')})&limit=${SUMMARY_LOOKUP_LIMIT}`,
-  );
+  const urls = Array.from(new Set((articles ?? []).map((article) => article.original_url).filter(Boolean)));
+
+  if (urls.length === 0) {
+    return [];
+  }
+
+  const rows = [];
+  const languageFilter = encodeURIComponent(encodePostgrestInFilter(LANGUAGE_CODES));
+  const batchSize = 50;
+
+  for (let index = 0; index < urls.length; index += batchSize) {
+    const urlBatch = urls.slice(index, index + batchSize);
+    const urlFilter = encodeURIComponent(encodePostgrestInFilter(urlBatch));
+    const limit = Math.min(SUMMARY_LOOKUP_LIMIT, Math.max(100, urlBatch.length * LANGUAGE_CODES.length + 10));
+    const page = await supabaseFetch(
+      `/rest/v1/article_summaries?select=original_url,language_code&original_url=${urlFilter}&language_code=${languageFilter}&limit=${limit}`,
+    );
+
+    rows.push(...(page ?? []));
+  }
+
+  const uniqueRows = new Map();
+
+  for (const row of rows) {
+    if (row?.original_url && row?.language_code) {
+      uniqueRows.set(getSummaryKey(row.original_url, row.language_code), row);
+    }
+  }
+
+  return Array.from(uniqueRows.values());
 }
 
-function buildTranslationTasks(articles, existingSummaries) {
+function buildTranslationTasks(articles, existingSummaries, failedRowsByKey = new Map(), limit = BACKFILL_LIMIT) {
   const existingKeys = new Set(
     (existingSummaries ?? []).map((summary) => getSummaryKey(summary.original_url, summary.language_code)),
   );
@@ -227,6 +324,10 @@ function buildTranslationTasks(articles, existingSummaries) {
         continue;
       }
 
+      if (!RETRY_FAILED && failedRowsByKey.has(key)) {
+        continue;
+      }
+
       if (seen.has(key)) {
         continue;
       }
@@ -234,7 +335,7 @@ function buildTranslationTasks(articles, existingSummaries) {
       seen.add(key);
       tasks.push({ article, languageCode });
 
-      if (tasks.length >= BACKFILL_LIMIT) {
+      if (tasks.length >= limit) {
         return tasks;
       }
     }
@@ -388,7 +489,7 @@ async function loadSummaryRowsForArticles(articles) {
   }
 
   return supabaseFetch(
-    `/rest/v1/article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(encodePostgrestInFilter(urls))}&language_code=in.(${LANGUAGE_CODES.join(',')})&limit=${Math.max(SUMMARY_LOOKUP_LIMIT, urls.length * LANGUAGE_CODES.length)}`,
+    `/rest/v1/article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(encodePostgrestInFilter(urls))}&language_code=${encodeURIComponent(encodePostgrestInFilter(LANGUAGE_CODES))}&limit=${Math.max(SUMMARY_LOOKUP_LIMIT, urls.length * LANGUAGE_CODES.length)}`,
   );
 }
 
@@ -433,18 +534,44 @@ async function publishFullyTranslatedArticles(articles) {
   return readyUrls.length;
 }
 
-const articles = await loadCandidateArticles();
-const existingSummaries = await loadExistingSummaries();
-const tasks = buildTranslationTasks(articles, existingSummaries);
+const failedRowsByKey = loadFailedTranslationCache();
+const articles = [];
+const tasks = [];
+let candidateArticlesScanned = 0;
+let candidateOffset = 0;
+const pageSize = SCAN_ALL_CANDIDATES ? CANDIDATE_PAGE_SIZE : CANDIDATE_LIMIT;
+
+while (tasks.length < BACKFILL_LIMIT) {
+  const page = await loadCandidateArticlesPage(candidateOffset, pageSize);
+
+  if (!page?.length) {
+    break;
+  }
+
+  candidateArticlesScanned += page.length;
+  articles.push(...page);
+
+  const existingSummaries = await loadExistingSummaries(page);
+  const pageTasks = buildTranslationTasks(page, existingSummaries, failedRowsByKey, BACKFILL_LIMIT - tasks.length);
+  tasks.push(...pageTasks);
+
+  if (!SCAN_ALL_CANDIDATES || page.length < pageSize || candidateArticlesScanned >= CANDIDATE_LIMIT) {
+    break;
+  }
+
+  candidateOffset += page.length;
+}
 
 console.log('NutsNews translation backfill');
 console.log('-----------------------------');
 console.log(`Source: ${BACKFILL_SOURCE}`);
-console.log(`Candidate articles scanned: ${articles?.length ?? 0}`);
+console.log(`Candidate articles scanned: ${candidateArticlesScanned}`);
 console.log(`Languages: ${LANGUAGE_CODES.join(', ')}`);
 console.log(`Missing translation rows selected: ${tasks.length}`);
 console.log(`Provider preference: ${LOCAL_AI_URL ? 'local AI first' : 'OpenAI only'}`);
 console.log(`Publish ready articles: ${PUBLISH_READY ? 'yes' : 'no'}`);
+console.log(`Scan all candidates: ${SCAN_ALL_CANDIDATES ? 'yes' : 'no'}`);
+console.log(`Failure cache: ${FAILED_TRANSLATION_CACHE || 'off'}`);
 
 if (tasks.length === 0) {
   console.log('Nothing to backfill.');
@@ -461,13 +588,49 @@ if (DRY_RUN) {
 }
 
 const summaries = [];
+const failedRows = [];
 
 for (const task of tasks) {
   console.log(`Translating [${task.languageCode}]: ${task.article.title}`);
-  summaries.push(await translateArticle(task.article, task.languageCode));
+
+  try {
+    const summary = await translateArticle(task.article, task.languageCode);
+    await upsertSummaries([summary]);
+    summaries.push(summary);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failedRow = {
+      languageCode: task.languageCode,
+      originalUrl: task.article.original_url,
+      title: task.article.title,
+      error: message,
+      failedAt: new Date().toISOString(),
+    };
+    failedRows.push(failedRow);
+    failedRowsByKey.set(getSummaryKey(task.article.original_url, task.languageCode), failedRow);
+    console.warn(`Skipping failed row [${task.languageCode}] ${task.article.title}: ${message}`);
+  }
 }
 
-await upsertSummaries(summaries);
-const publishedCount = await publishFullyTranslatedArticles(articles);
+saveFailedTranslationCache(failedRowsByKey);
+
+let publishedCount = 0;
+
+try {
+  publishedCount = await publishFullyTranslatedArticles(articles);
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`Publish-ready check failed, but saved translations were kept: ${message}`);
+}
+
 console.log(`Saved ${summaries.length} translation row(s).`);
+console.log(`Failed/skipped ${failedRows.length} translation row(s).`);
 console.log(`Published/confirmed ${publishedCount} fully translated article(s).`);
+
+if (failedRows.length > 0) {
+  console.log('Failed rows:');
+
+  for (const [index, row] of failedRows.entries()) {
+    console.log(`${index + 1}. [${row.languageCode}] ${row.title} — ${row.error}`);
+  }
+}

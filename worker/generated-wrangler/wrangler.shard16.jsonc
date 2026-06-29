@@ -14,8 +14,7 @@
   "vars": {
     "FEED_SHARD_INDEX": "16",
     "FEEDS_PER_SHARD": "20",
-    "ENABLED_SUMMARY_LANGUAGES": "fr,ja",
-    "SUMMARY_TRANSLATION_LIMIT": "6"
+    "ENABLED_SUMMARY_LANGUAGES": "fr,ja,de-CH,de,el"
   },
   "secrets_store_secrets": [
     {

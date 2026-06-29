@@ -621,7 +621,7 @@ export LOCAL_AI_URL="https://ai.nutsnews.com"
 export LOCAL_AI_MODEL="qwen2.5:3b"
 export AI_PROVIDER_FALLBACK_TO_OPENAI=true
 export AI_REVIEW_CONCURRENCY=1
-export ENABLED_SUMMARY_LANGUAGES="fr,ja"
+export ENABLED_SUMMARY_LANGUAGES="fr,ja,de-CH,de,el"
 export SUMMARY_TRANSLATION_LIMIT=12
 ```
 

@@ -116,7 +116,7 @@ type AiArticleDecision = {
 	reason: string;
 };
 
-type SummaryLanguageCode = 'fr' | 'ja';
+type SummaryLanguageCode = 'fr' | 'ja' | 'de-CH' | 'de' | 'el';
 
 type LocalizedSummaryDecision = {
 	language_code: SummaryLanguageCode;
@@ -443,7 +443,7 @@ const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
 const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
-const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja';
+const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja,de-CH,de,el';
 const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 6;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
 const SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT = 80;
@@ -1527,12 +1527,40 @@ function getAiProvider(value: string | undefined): AiProvider {
 	return value?.toLowerCase() === 'local' ? 'local' : 'openai';
 }
 
+const SUMMARY_LANGUAGE_NAMES: Record<SummaryLanguageCode, string> = {
+	fr: 'French',
+	ja: 'Japanese',
+	'de-CH': 'Swiss German',
+	de: 'German',
+	el: 'Greek',
+};
+
+function normalizeSummaryLanguageCode(value: string): SummaryLanguageCode | null {
+	const normalizedValue = value.trim();
+
+	if (!normalizedValue) {
+		return null;
+	}
+
+	const lowerValue = normalizedValue.toLowerCase();
+
+	if (lowerValue === 'de-ch' || lowerValue === 'de_ch' || lowerValue === 'ch' || lowerValue === 'swiss') {
+		return 'de-CH';
+	}
+
+	if (lowerValue === 'fr' || lowerValue === 'ja' || lowerValue === 'de' || lowerValue === 'el') {
+		return lowerValue;
+	}
+
+	return null;
+}
+
 function isSummaryLanguageCode(value: string): value is SummaryLanguageCode {
-	return value === 'fr' || value === 'ja';
+	return normalizeSummaryLanguageCode(value) === value;
 }
 
 function getSummaryLanguageName(languageCode: SummaryLanguageCode) {
-	return languageCode === 'fr' ? 'French' : 'Japanese';
+	return SUMMARY_LANGUAGE_NAMES[languageCode];
 }
 
 function getEnabledSummaryLanguages(value: string | undefined): SummaryLanguageCode[] {
@@ -1544,8 +1572,8 @@ function getEnabledSummaryLanguages(value: string | undefined): SummaryLanguageC
 
 	const languages = rawValue
 		.split(',')
-		.map((language) => language.trim().toLowerCase())
-		.filter(isSummaryLanguageCode);
+		.map((language) => normalizeSummaryLanguageCode(language))
+		.filter((language): language is SummaryLanguageCode => Boolean(language));
 
 	return Array.from(new Set(languages));
 }

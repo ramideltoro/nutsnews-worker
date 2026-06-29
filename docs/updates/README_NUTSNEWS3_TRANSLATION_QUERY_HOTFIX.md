@@ -37,13 +37,13 @@ set -a
 source web/.env.local
 set +a
 
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
 node scripts/diagnose_missing_article_translations.mjs
 ```
 
 If Supabase still rejects a request, lower chunk size without losing the 250-article audit window:
 
 ```bash
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=250 WINDOW_MINUTES=45 IN_CHUNK_SIZE=20 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=250 WINDOW_MINUTES=45 IN_CHUNK_SIZE=20 \
 node scripts/diagnose_missing_article_translations.mjs
 ```

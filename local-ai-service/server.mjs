@@ -205,23 +205,33 @@ function buildPrompt({ title, source, excerpt, url }) {
   return `You are the NutsNews local AI reviewer.\n\nNutsNews accepts stories that are positive, uplifting, inspiring, useful, community-focused, wellness-focused, science-focused, animal-focused, travel-focused, culture-focused, nature-focused, space-focused, creativity-focused, or achievement-focused.\n\nNutsNews rejects politics, war, crime, tragedy, outrage, fear, finance/stock-market content, clickbait celebrity gossip, and stories that are mostly negative even if they contain one positive angle.\n\nReturn strict JSON only using exactly these keys:\n{\n  "decision": "accept" or "reject",\n  "category": "one short category label",\n  "positivity_score": integer from 0 to 10,\n  "summary": "200-250 characters for accepted stories, written as 1-2 warm, calm sentences; empty string for rejected stories",\n  "reason": "short reason for the decision"\n}\n\nFor accepted stories, the summary must be between 200 and 250 characters, including spaces. Write 1-2 warm, calm, complete sentences with enough detail for a NutsNews card. Keep it original, specific to the article, and do not copy the article text. For rejected stories, return an empty summary string.\n\nArticle source: ${source}\nArticle title: ${title}\nArticle URL: ${url}\nArticle text:\n${excerpt}`;
 }
 
+const SUPPORTED_TRANSLATION_LANGUAGES = {
+  fr: "French",
+  ja: "Japanese",
+  "de-CH": "Swiss German",
+  de: "German",
+  el: "Greek",
+};
+
 function getLanguageName(languageCode) {
-  if (languageCode === "fr") {
-    return "French";
-  }
-
-  if (languageCode === "ja") {
-    return "Japanese";
-  }
-
-  return "the requested language";
+  return SUPPORTED_TRANSLATION_LANGUAGES[languageCode] ?? "the requested language";
 }
 
 function normalizeLanguageCode(value) {
-  const languageCode = normalizeString(value).toLowerCase();
+  const rawLanguageCode = normalizeString(value);
+  const lowerLanguageCode = rawLanguageCode.toLowerCase();
 
-  if (languageCode === "fr" || languageCode === "ja") {
-    return languageCode;
+  if (
+    lowerLanguageCode === "de-ch" ||
+    lowerLanguageCode === "de_ch" ||
+    lowerLanguageCode === "ch" ||
+    lowerLanguageCode === "swiss"
+  ) {
+    return "de-CH";
+  }
+
+  if (lowerLanguageCode === "fr" || lowerLanguageCode === "ja" || lowerLanguageCode === "de" || lowerLanguageCode === "el") {
+    return lowerLanguageCode;
   }
 
   return "";
@@ -641,7 +651,7 @@ async function handleTranslate(req, res) {
 
     if (!languageCode) {
       jsonResponse(res, 400, {
-        error: "language_code must be one of: fr, ja.",
+        error: "language_code must be one of: fr, ja, de-CH, de, el.",
       });
       return;
     }

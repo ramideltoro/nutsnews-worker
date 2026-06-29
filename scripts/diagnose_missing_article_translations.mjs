@@ -2,10 +2,35 @@
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || '').replace(/\/+$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || '';
-const LANGUAGE_CODES = (process.env.LANGUAGE_CODES || 'fr,ja')
-  .split(',')
-  .map((value) => value.trim().toLowerCase())
-  .filter(Boolean);
+const SUPPORTED_LANGUAGE_CODES = new Set(['fr', 'ja', 'de-CH', 'de', 'el']);
+
+function normalizeLanguageCode(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const normalized = raw.replace(/_/g, '-').toLowerCase();
+  if (normalized === 'de-ch' || normalized === 'ch' || normalized === 'swiss') {
+    return 'de-CH';
+  }
+  if (normalized === 'de') return 'de';
+  if (normalized === 'el' || normalized === 'gr' || normalized === 'greek') return 'el';
+  if (normalized === 'fr') return 'fr';
+  if (normalized === 'ja') return 'ja';
+  return normalized;
+}
+
+const LANGUAGE_CODES = Array.from(
+  new Set(
+    (process.env.LANGUAGE_CODES || 'fr,ja,de-CH,de,el')
+      .split(',')
+      .map(normalizeLanguageCode)
+      .filter((value) => SUPPORTED_LANGUAGE_CODES.has(value)),
+  ),
+);
+
+if (LANGUAGE_CODES.length === 0) {
+  console.error('No supported languages selected. Use LANGUAGE_CODES=fr,ja,de-CH,de,el or a comma-separated subset.');
+  process.exit(1);
+}
 const AUDIT_LIMIT = Math.max(1, Math.min(Number(process.env.AUDIT_LIMIT || 60), 500));
 const WINDOW_MINUTES = Math.max(1, Math.min(Number(process.env.WINDOW_MINUTES || 45), 360));
 const SHOW_ALL = /^(1|true|yes)$/i.test(process.env.SHOW_ALL || '');
@@ -176,7 +201,7 @@ const reviewsByUrl = groupByOriginalUrl(reviews || []);
 const rows = [];
 for (const article of articles || []) {
   const summaryRows = summariesByUrl.get(article.original_url) || [];
-  const availableLanguageCodes = new Set(summaryRows.map((summary) => String(summary.language_code).toLowerCase()));
+  const availableLanguageCodes = new Set(summaryRows.map((summary) => normalizeLanguageCode(summary.language_code)).filter(Boolean));
   const missingLanguageCodes = LANGUAGE_CODES.filter((languageCode) => !availableLanguageCodes.has(languageCode));
 
   if (!SHOW_ALL && missingLanguageCodes.length === 0) {

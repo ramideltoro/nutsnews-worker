@@ -50,7 +50,7 @@ set -a
 source web/.env.local
 set +a
 
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
 node scripts/diagnose_missing_article_translations.mjs
 ```
 

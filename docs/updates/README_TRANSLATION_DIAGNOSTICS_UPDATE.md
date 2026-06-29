@@ -106,14 +106,14 @@ export SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
 Scan the latest home feed articles:
 
 ```bash
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=80 WINDOW_MINUTES=45 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=80 WINDOW_MINUTES=45 \
 node scripts/diagnose_missing_article_translations.mjs
 ```
 
 If the six incident articles are older than the latest 80 articles, increase the scan:
 
 ```bash
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=250 WINDOW_MINUTES=45 \
 node scripts/diagnose_missing_article_translations.mjs
 ```
 
@@ -181,10 +181,10 @@ export LOCAL_AI_URL="https://ai.nutsnews.com"
 export LOCAL_AI_API_KEY="YOUR_LOCAL_AI_API_KEY"
 export LOCAL_AI_MODEL="qwen2.5:3b"
 
-LANGUAGE_CODES=fr,ja BACKFILL_SOURCE=public_feed_snapshot CANDIDATE_LIMIT=250 BACKFILL_LIMIT=12 DRY_RUN=1 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el BACKFILL_SOURCE=public_feed_snapshot CANDIDATE_LIMIT=250 BACKFILL_LIMIT=12 DRY_RUN=1 \
 node scripts/backfill_article_summaries.mjs
 
-LANGUAGE_CODES=fr,ja BACKFILL_SOURCE=public_feed_snapshot CANDIDATE_LIMIT=250 BACKFILL_LIMIT=12 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el BACKFILL_SOURCE=public_feed_snapshot CANDIDATE_LIMIT=250 BACKFILL_LIMIT=12 \
 node scripts/backfill_article_summaries.mjs
 ```
 

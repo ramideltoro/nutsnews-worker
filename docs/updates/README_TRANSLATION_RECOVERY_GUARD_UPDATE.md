@@ -26,14 +26,14 @@ cd /Users/ramideltoro/WebstormProjects/nutsnews3
 export SUPABASE_URL="your-supabase-url"
 export SUPABASE_SERVICE_ROLE_KEY="your-service-role-key"
 
-LANGUAGE_CODES=fr,ja AUDIT_SOURCE=public_feed_snapshot AUDIT_LIMIT=30 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_SOURCE=public_feed_snapshot AUDIT_LIMIT=30 \
   node scripts/audit_article_translations.mjs
 ```
 
 2. Diagnose the latest published articles and their nearby Worker runs.
 
 ```bash
-LANGUAGE_CODES=fr,ja AUDIT_LIMIT=60 WINDOW_MINUTES=90 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el AUDIT_LIMIT=60 WINDOW_MINUTES=90 \
   node scripts/diagnose_missing_article_translations.mjs
 ```
 
@@ -45,7 +45,7 @@ export LOCAL_AI_API_KEY="your-local-ai-key"
 export LOCAL_AI_MODEL="qwen2.5:3b"
 export OPENAI_API_KEY="your-openai-key"
 
-LANGUAGE_CODES=fr,ja BACKFILL_SOURCE=articles BACKFILL_LIMIT=40 PUBLISH_READY=1 \
+LANGUAGE_CODES=fr,ja,de-CH,de,el BACKFILL_SOURCE=articles BACKFILL_LIMIT=40 PUBLISH_READY=1 \
   node scripts/backfill_article_summaries.mjs
 ```
 

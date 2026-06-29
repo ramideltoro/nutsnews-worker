@@ -8,14 +8,14 @@
  *   SUPABASE_SERVICE_ROLE_KEY
  *
  * Optional env:
- *   LANGUAGE_CODES=fr,ja
+ *   LANGUAGE_CODES=fr,ja,de-CH,de,el
  *   AUDIT_LIMIT=30
  *   AUDIT_SOURCE=public_feed_snapshot   # public_feed_snapshot or articles
  */
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)?.replace(/\/+$/, '');
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const LANGUAGE_CODES = parseLanguages(process.env.LANGUAGE_CODES ?? process.env.LANGUAGE_CODE ?? 'fr,ja');
+const LANGUAGE_CODES = parseLanguages(process.env.LANGUAGE_CODES ?? process.env.LANGUAGE_CODE ?? 'fr,ja,de-CH,de,el');
 const AUDIT_LIMIT = clampNumber(process.env.AUDIT_LIMIT, 30, 1, 500);
 const AUDIT_SOURCE = normalizeAuditSource(process.env.AUDIT_SOURCE ?? 'public_feed_snapshot');
 const SUMMARY_LOOKUP_LIMIT = clampNumber(process.env.SUMMARY_LOOKUP_LIMIT, 20000, 1, 50000);
@@ -26,7 +26,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
 }
 
 if (LANGUAGE_CODES.length === 0) {
-  console.error('No supported languages selected. Use LANGUAGE_CODES=fr,ja, LANGUAGE_CODES=fr, or LANGUAGE_CODES=ja.');
+  console.error('No supported languages selected. Use LANGUAGE_CODES=fr,ja,de-CH,de,el or a comma-separated subset.');
   process.exit(1);
 }
 
@@ -36,13 +36,28 @@ const supabaseHeaders = {
   'Content-Type': 'application/json',
 };
 
+function normalizeLanguageCode(value) {
+  const normalizedValue = String(value ?? '').trim();
+  const lowerValue = normalizedValue.toLowerCase();
+
+  if (lowerValue === 'de-ch' || lowerValue === 'de_ch' || lowerValue === 'ch' || lowerValue === 'swiss') {
+    return 'de-CH';
+  }
+
+  if (lowerValue === 'fr' || lowerValue === 'ja' || lowerValue === 'de' || lowerValue === 'el') {
+    return lowerValue;
+  }
+
+  return '';
+}
+
 function parseLanguages(value) {
   return Array.from(
     new Set(
       String(value ?? '')
         .split(',')
-        .map((language) => language.trim().toLowerCase())
-        .filter((language) => language === 'fr' || language === 'ja'),
+        .map(normalizeLanguageCode)
+        .filter(Boolean),
     ),
   );
 }

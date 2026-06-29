@@ -786,7 +786,7 @@ function writeGeneratedWranglerConfig(ctx) {
       FEED_SHARD_INDEX: '0',
       FEEDS_PER_SHARD: '1',
       ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT: '3',
-      ENABLED_SUMMARY_LANGUAGES: 'fr,ja',
+      ENABLED_SUMMARY_LANGUAGES: 'fr,ja,de-CH,de,el',
       SUMMARY_TRANSLATION_LIMIT: '8',
       UPSTASH_REDIS_ENABLED: 'false',
     },
@@ -879,6 +879,17 @@ function getSummaryLanguages(db, article) {
   return new Set(db.article_summaries.filter((row) => row.original_url === article.url).map((row) => row.language_code));
 }
 
+const EXPECTED_TRANSLATION_LANGUAGES = ['fr', 'ja', 'de-CH', 'de', 'el'];
+
+function getMockTranslationPrefix(languageCode) {
+  if (languageCode === 'fr') return '[FR]';
+  if (languageCode === 'ja') return '[JA]';
+  if (languageCode === 'de-CH') return '[de-CH]';
+  if (languageCode === 'de') return '[de]';
+  if (languageCode === 'el') return '[el]';
+  return `[${languageCode}]`;
+}
+
 function verifyDatabaseState(db, ctx) {
   logStep('Verifying mock database state');
 
@@ -890,8 +901,9 @@ function verifyDatabaseState(db, ctx) {
     assert(Boolean(row.ai_summary), `Accepted article is missing ai_summary: ${article.scenario}`, row);
 
     const languages = getSummaryLanguages(db, article);
-    assert(languages.has('fr'), `Accepted article is missing French summary: ${article.scenario}`, db.article_summaries);
-    assert(languages.has('ja'), `Accepted article is missing Japanese summary: ${article.scenario}`, db.article_summaries);
+    for (const languageCode of EXPECTED_TRANSLATION_LANGUAGES) {
+      assert(languages.has(languageCode), `Accepted article is missing ${languageCode} summary: ${article.scenario}`, db.article_summaries);
+    }
   }
 
   for (const article of ctx.rejected) {
@@ -911,7 +923,7 @@ function verifyDatabaseState(db, ctx) {
 async function verifyMockWeb(ctx) {
   logStep('Verifying mock web API and homepage rendering');
 
-  for (const languageCode of ['en', 'fr', 'ja']) {
+  for (const languageCode of ['en', ...EXPECTED_TRANSLATION_LANGUAGES]) {
     const data = await fetchJson(`${ctx.webBaseUrl}/api/articles?lang=${languageCode}&_=${Date.now()}`);
     assert(Array.isArray(data.articles), `Mock web API did not return articles for ${languageCode}`, data);
 
@@ -919,10 +931,10 @@ async function verifyMockWeb(ctx) {
       const article = data.articles.find((item) => item.original_url === expected.url);
       assert(article, `Mock web API ${languageCode} response did not include ${expected.scenario}`, data);
 
-      if (languageCode === 'fr' || languageCode === 'ja') {
+      if (languageCode !== 'en') {
         assert(article.language_code === languageCode, `Mock web API ${languageCode} did not return localized language_code`, article);
         assert(article.translation_available === true, `Mock web API ${languageCode} translation was not available`, article);
-        assert(article.title.startsWith(languageCode === 'fr' ? '[FR]' : '[JA]'), `Mock web API ${languageCode} title was not localized`, article);
+        assert(article.title.startsWith(getMockTranslationPrefix(languageCode)), `Mock web API ${languageCode} title was not localized`, article);
       }
     }
   }
@@ -930,7 +942,7 @@ async function verifyMockWeb(ctx) {
   const homeHtml = await fetchText(`${ctx.webBaseUrl}/?e2e=${encodeURIComponent(ctx.runId)}&_=${Date.now()}`);
   assert(homeHtml.includes('NutsNews'), 'Mock homepage did not render the NutsNews shell.');
   assert(ctx.accepted.some((article) => homeHtml.includes(article.title)), 'Mock homepage did not render an accepted article title.', homeHtml.slice(0, 1000));
-  logOk('Mock English/French/Japanese API output and homepage HTML verified');
+  logOk('Mock multilingual API output and homepage HTML verified');
 }
 
 async function verifyTranslationRecovery(ctx, db) {
@@ -943,13 +955,13 @@ async function verifyTranslationRecovery(ctx, db) {
   const recoveryResult = await fetchJson(`${ctx.workerUrl}/?limit=1&imageLookups=1&_=${Date.now()}`);
   assert(recoveryResult.aiReviewedCount === 0, 'Recovery run should not re-review already processed articles.', recoveryResult);
   assert(recoveryResult.articleSummaryRecoveryCandidateCount >= 1, 'Recovery run did not find the published article with missing translations.', recoveryResult);
-  assert(recoveryResult.articleSummaryRecoveryAttemptedTaskCount >= 2, 'Recovery run did not attempt French and Japanese recovery translations.', recoveryResult);
-  assert(recoveryResult.articleSummaryTranslationCount >= 2, 'Recovery run did not regenerate missing translations.', recoveryResult);
+  assert(recoveryResult.articleSummaryRecoveryAttemptedTaskCount >= EXPECTED_TRANSLATION_LANGUAGES.length, 'Recovery run did not attempt all recovery translations.', recoveryResult);
+  assert(recoveryResult.articleSummaryTranslationCount >= EXPECTED_TRANSLATION_LANGUAGES.length, 'Recovery run did not regenerate all missing translations.', recoveryResult);
   assert(recoveryResult.articleSummaryFailedTaskCount === 0, 'Recovery run had failed translation tasks.', recoveryResult);
   assert(recoveryResult.publicFeedSnapshotRefreshOk === true, 'Recovery run did not refresh public feed snapshot.', recoveryResult);
 
   const languages = getSummaryLanguages(db, target);
-  assert(languages.has('fr') && languages.has('ja'), 'Recovery run did not restore French and Japanese summaries.', db.article_summaries);
+  assert(EXPECTED_TRANSLATION_LANGUAGES.every((languageCode) => languages.has(languageCode)), 'Recovery run did not restore all configured summaries.', db.article_summaries);
   logOk('Translation recovery path verified');
 }
 
