@@ -21,6 +21,7 @@ const optionalShardVars = Object.fromEntries(
 		'AI_REVIEW_CONCURRENCY',
 		'ENABLED_SUMMARY_LANGUAGES',
 		'SUMMARY_TRANSLATION_LIMIT',
+		'HOLD_ARTICLES_FOR_TRANSLATIONS',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'UPSTASH_REDIS_ENABLED',
 		'UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS',
@@ -123,7 +124,7 @@ for (let index = 0; index < shardCount; index += 1) {
 	fs.writeFileSync(path.join(generatedDir, `wrangler.shard${index}.jsonc`), JSON.stringify(config, null, 2) + '\n');
 }
 
-const localAiSummary = process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '';
+const localAiSummary = process.env.LOCAL_AI_URL ? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? 'true'}.` : (process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '');
 const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 

@@ -14,7 +14,11 @@
   "vars": {
     "FEED_SHARD_INDEX": "17",
     "FEEDS_PER_SHARD": "20",
-    "ENABLED_SUMMARY_LANGUAGES": "fr,ja,de-CH,de,el"
+    "AI_PROVIDER": "openai",
+    "AI_PROVIDER_FALLBACK_TO_OPENAI": "true",
+    "ENABLED_SUMMARY_LANGUAGES": "fr,ja,de-CH,de,el",
+    "SUMMARY_TRANSLATION_LIMIT": "1",
+    "HOLD_ARTICLES_FOR_TRANSLATIONS": "true"
   },
   "secrets_store_secrets": [
     {

@@ -230,6 +230,29 @@ type ArticleSummaryInsert = {
 	updated_at: string;
 };
 
+type ArticleSummaryFailureSample = {
+	originalUrl: string;
+	title: string;
+	languageCode: SummaryLanguageCode;
+	taskSource: 'new_article' | 'recovery';
+	providerOrder: AiProvider[];
+	errorMessage: string;
+};
+
+type ArticleSummarySaveErrorSample = {
+	status: number | null;
+	errorText: string;
+	summaryCount: number;
+	languageCodes: SummaryLanguageCode[];
+	sampleOriginalUrls: string[];
+	durationMs: number;
+};
+
+type ArticleSummarySaveResult = {
+	ok: boolean;
+	errorSamples: ArticleSummarySaveErrorSample[];
+};
+
 type RefreshOptions = {
 	maxAiReviews?: number;
 	imageLookupLimit?: number;
@@ -371,6 +394,9 @@ type RefreshResult = {
 	eligibleForAiCount: number;
 	aiReviewedCount: number;
 	aiProvider: AiProvider;
+	aiReviewProviderOrder: AiProvider[];
+	localAiConfigured: boolean;
+	openAiFallbackEnabled: boolean;
 	localAiModel: string;
 	localAiCallCount: number;
 	localAiPromptTokens: number;
@@ -384,11 +410,17 @@ type RefreshResult = {
 	reviewSaveOk: boolean;
 	articleSaveOk: boolean;
 	articleSummaryTranslationCount: number;
+	articleSummaryTranslationTaskBudget: number;
+	articleSummaryLocalTranslationCount: number;
+	articleSummaryOpenAiTranslationCount: number;
+	translationProviderOrder: AiProvider[];
 	articleSummaryAttemptedTaskCount: number;
 	articleSummaryFailedTaskCount: number;
+	articleSummaryFailureSamples: ArticleSummaryFailureSample[];
 	articleSummarySkippedByLimitArticleCount: number;
 	articleSummarySkippedByLimitLanguageTaskCount: number;
 	articleSummarySaveOk: boolean;
+	articleSummarySaveErrorSamples: ArticleSummarySaveErrorSample[];
 	articleSummaryRecoveryCandidateCount: number;
 	articleSummaryRecoveryAttemptedTaskCount: number;
 	articleSummaryPublishCount: number;
@@ -446,6 +478,7 @@ const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja,de-CH,de,el';
 const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 6;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
+const HARD_MAX_SUMMARY_TRANSLATION_TASKS_PER_RUN = 5;
 const SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT = 80;
 const SUMMARY_TRANSLATION_RETRY_ATTEMPTS = 2;
 const SUMMARY_TRANSLATION_RETRY_DELAY_MS = 750;
@@ -1615,7 +1648,7 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	const localAiUrl = await resolveValue(env.LOCAL_AI_URL);
 	const localAiApiKey = await resolveValue(env.LOCAL_AI_API_KEY);
 	const localAiModel = env.LOCAL_AI_MODEL?.trim() || DEFAULT_LOCAL_AI_MODEL;
-	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, false);
+	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, true);
 
 	if (!supabaseUrl) {
 		throw new Error('Missing SUPABASE_URL secret.');
@@ -1625,16 +1658,16 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY secret.');
 	}
 
-	if (aiProvider === 'openai' && !openAiApiKey) {
-		throw new Error('Missing OPENAI_API_KEY secret.');
+	if (!openAiApiKey && !localAiUrl) {
+		throw new Error('Missing AI provider secrets. Set OPENAI_API_KEY, or set LOCAL_AI_URL + LOCAL_AI_API_KEY.');
 	}
 
-	if (aiProvider === 'local' && !localAiUrl) {
-		throw new Error('Missing LOCAL_AI_URL secret or environment variable.');
-	}
-
-	if (aiProvider === 'local' && !localAiApiKey) {
+	if (localAiUrl && !localAiApiKey && !openAiApiKey) {
 		throw new Error('Missing LOCAL_AI_API_KEY secret or environment variable.');
+	}
+
+	if (!openAiApiKey && (!localAiUrl || !localAiApiKey)) {
+		throw new Error('Missing OPENAI_API_KEY secret and complete local AI config.');
 	}
 
 	return {
@@ -1717,6 +1750,14 @@ function clampArticlePageImageLookupLimit(value: number | undefined, fallback: n
 
 function shouldHoldAcceptedArticlesForTranslations(config: RuntimeConfig) {
 	return config.holdArticlesForTranslations && config.enabledSummaryLanguages.length > 0 && config.summaryTranslationLimit > 0;
+}
+
+function getSummaryTranslationTaskBudget(config: RuntimeConfig) {
+	if (config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
+		return 0;
+	}
+
+	return Math.max(0, Math.min(config.summaryTranslationLimit, HARD_MAX_SUMMARY_TRANSLATION_TASKS_PER_RUN));
 }
 
 function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number, requestedLookupLimit: number) {
@@ -3088,7 +3129,6 @@ async function classifyAndSummarizeArticle(env: Env, config: RuntimeConfig, arti
 	}
 
 	let response: Response;
-
 	try {
 		response = await fetch('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
@@ -3426,9 +3466,35 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 	config: RuntimeConfig,
 	article: RssArticle,
 ): Promise<AiClassificationResult> {
-	if (config.aiProvider === 'local') {
+	if (hasLocalAiReviewConfig(config)) {
+		await logInfo(env, 'worker.local_ai.review_attempting', 'Trying local AI article review before OpenAI fallback', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			localAiUrl: config.localAiUrl,
+			localAiModel: config.localAiModel,
+			openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+		});
+
 		return classifyAndSummarizeArticleWithLocalAi(env, config, article);
 	}
+
+	if (config.localAiUrl || config.localAiApiKey) {
+		await logWarn(env, 'worker.local_ai.review_skipped_missing_config', 'Skipped local AI article review because LOCAL_AI_URL or LOCAL_AI_API_KEY is missing', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		});
+	}
+
+	await logInfo(env, 'worker.openai.review_attempting', 'Trying OpenAI article review', {
+		source: article.source,
+		title: article.title,
+		articleUrl: article.url,
+		openAiModel: OPENAI_MODEL,
+	});
 
 	return classifyAndSummarizeArticle(env, config, article);
 }
@@ -3461,6 +3527,18 @@ type LocalAiTranslationResponse = Partial<LocalizedSummaryDecision> & {
 
 function hasLocalAiTranslationConfig(config: RuntimeConfig) {
 	return Boolean(config.localAiUrl && config.localAiApiKey);
+}
+
+function hasLocalAiReviewConfig(config: RuntimeConfig) {
+	return Boolean(config.localAiUrl && config.localAiApiKey);
+}
+
+function getAiReviewProviderOrder(config: RuntimeConfig): AiProvider[] {
+	return hasLocalAiReviewConfig(config) ? ['local', 'openai'] : ['openai'];
+}
+
+function getSummaryTranslationProviderOrder(config: RuntimeConfig): AiProvider[] {
+	return hasLocalAiTranslationConfig(config) ? ['local', 'openai'] : ['openai'];
 }
 
 function getLocalAiTranslateUrl(config: RuntimeConfig) {
@@ -3785,18 +3863,42 @@ async function translateArticleSummary(
 	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
 ): Promise<ArticleSummaryInsert | null> {
-	const localTranslation = await translateArticleSummaryWithLocalAi(env, config, article, languageCode);
-
-	if (localTranslation) {
-		return localTranslation;
-	}
-
 	if (hasLocalAiTranslationConfig(config)) {
+		await logInfo(env, 'worker.translation.local.attempting', 'Trying local AI summary translation before OpenAI fallback', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			localAiUrl: config.localAiUrl,
+			localAiModel: config.localAiModel,
+		});
+
+		const localTranslation = await translateArticleSummaryWithLocalAi(env, config, article, languageCode);
+
+		if (localTranslation) {
+			return localTranslation;
+		}
+
 		await logWarn(env, 'worker.translation.fallback_to_openai', 'Falling back to OpenAI after local summary translation failed', {
 			articleUrl: article.original_url,
+			title: article.title,
 			languageCode,
 		});
+	} else {
+		await logWarn(env, 'worker.translation.local.skipped_missing_config', 'Skipped local AI summary translation because LOCAL_AI_URL or LOCAL_AI_API_KEY is missing', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		});
 	}
+
+	await logInfo(env, 'worker.translation.openai.attempting', 'Trying OpenAI summary translation', {
+		articleUrl: article.original_url,
+		title: article.title,
+		languageCode,
+		openAiModel: OPENAI_MODEL,
+	});
 
 	return translateArticleSummaryWithOpenAi(env, config, article, languageCode);
 }
@@ -3982,10 +4084,13 @@ type ArticleSummaryTranslationBuildResult = {
 	summaries: ArticleSummaryInsert[];
 	attemptedTaskCount: number;
 	failedTaskCount: number;
+	failureSamples: ArticleSummaryFailureSample[];
 	skippedByLimitArticleCount: number;
 	skippedByLimitLanguageTaskCount: number;
 	recoveryCandidateCount: number;
 	recoveryAttemptedTaskCount: number;
+	localTranslationCount: number;
+	openAiTranslationCount: number;
 };
 
 async function buildArticleSummaryTranslations(
@@ -3997,18 +4102,35 @@ async function buildArticleSummaryTranslations(
 		summaries: [],
 		attemptedTaskCount: 0,
 		failedTaskCount: 0,
+		failureSamples: [],
 		skippedByLimitArticleCount: 0,
 		skippedByLimitLanguageTaskCount: 0,
 		recoveryCandidateCount: 0,
 		recoveryAttemptedTaskCount: 0,
+		localTranslationCount: 0,
+		openAiTranslationCount: 0,
 	};
 
 	if (config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
 		return emptyResult;
 	}
 
-	const articlesSelectedForTranslation = acceptedArticles.slice(0, config.summaryTranslationLimit);
-	const articlesSkippedByLimit = acceptedArticles.slice(config.summaryTranslationLimit);
+	const maxTranslationTaskCount = getSummaryTranslationTaskBudget(config);
+	const articlesSelectedForTranslation: ArticleInsert[] = [];
+	const articlesSkippedByLimit: ArticleInsert[] = [];
+	let selectedNewArticleTaskCount = 0;
+
+	for (const article of acceptedArticles) {
+		const articleTaskCount = config.enabledSummaryLanguages.length;
+
+		if (articleTaskCount > 0 && selectedNewArticleTaskCount + articleTaskCount <= maxTranslationTaskCount) {
+			articlesSelectedForTranslation.push(article);
+			selectedNewArticleTaskCount += articleTaskCount;
+		} else {
+			articlesSkippedByLimit.push(article);
+		}
+	}
+
 	const skippedByLimitArticleCount = articlesSkippedByLimit.length;
 	const skippedByLimitLanguageTaskCount = skippedByLimitArticleCount * config.enabledSummaryLanguages.length;
 
@@ -4016,10 +4138,11 @@ async function buildArticleSummaryTranslations(
 		await logWarn(
 			env,
 			'worker.translation.skipped_by_limit',
-			'Accepted articles were held as translation_pending because SUMMARY_TRANSLATION_LIMIT was lower than the accepted article count',
+			'Accepted articles were held as translation_pending because this invocation reached the safe summary translation task budget',
 			{
 				acceptedArticleCount: acceptedArticles.length,
 				summaryTranslationLimit: config.summaryTranslationLimit,
+				summaryTranslationTaskBudget: maxTranslationTaskCount,
 				enabledSummaryLanguages: config.enabledSummaryLanguages,
 				skippedByLimitArticleCount,
 				skippedByLimitLanguageTaskCount,
@@ -4052,7 +4175,8 @@ async function buildArticleSummaryTranslations(
 		}
 	}
 
-	const recoveryArticleBudget = Math.max(0, config.summaryTranslationLimit - articlesSelectedForTranslation.length);
+	const remainingTranslationTaskBudget = Math.max(0, maxTranslationTaskCount - translationTasks.length);
+	const recoveryArticleBudget = Math.ceil(remainingTranslationTaskBudget / Math.max(1, config.enabledSummaryLanguages.length));
 	const recoveryArticles = await loadSummaryTranslationRecoveryArticles(
 		env,
 		config,
@@ -4071,9 +4195,17 @@ async function buildArticleSummaryTranslations(
 			const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
 
 			for (const languageCode of config.enabledSummaryLanguages) {
+				if (translationTasks.length >= maxTranslationTaskCount) {
+					break;
+				}
+
 				if (!existingLanguageCodes.has(languageCode)) {
 					addTask(article, languageCode, 'recovery');
 				}
+			}
+
+			if (translationTasks.length >= maxTranslationTaskCount) {
+				break;
 			}
 		}
 	}
@@ -4087,31 +4219,58 @@ async function buildArticleSummaryTranslations(
 		};
 	}
 
-	const translations = await mapWithConcurrency(translationTasks, 2, ({ article, languageCode }) =>
-		translateArticleSummary(env, config, article, languageCode),
-	);
-	const summaries = translations.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+	const translationResults = await mapWithConcurrency(translationTasks, 2, async (task) => {
+		const summary = await translateArticleSummary(env, config, task.article, task.languageCode);
+		return { task, summary };
+	});
+	const summaries = translationResults
+		.map((result) => result.summary)
+		.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+	const failureSamples: ArticleSummaryFailureSample[] = translationResults
+		.filter((result) => !result.summary)
+		.slice(0, 12)
+		.map(({ task }) => ({
+			originalUrl: task.article.original_url,
+			title: task.article.title,
+			languageCode: task.languageCode,
+			taskSource: task.taskSource,
+			providerOrder: getSummaryTranslationProviderOrder(config),
+			errorMessage: 'No translation returned after provider attempts. Check worker.translation.* logs for the exact local/OpenAI error.',
+		}));
 	const recoveryAttemptedTaskCount = translationTasks.filter((task) => task.taskSource === 'recovery').length;
+	const localTranslationCount = summaries.filter((summary) => summary.generated_by === 'local').length;
+	const openAiTranslationCount = summaries.filter((summary) => summary.generated_by === 'openai').length;
 
 	return {
 		summaries,
 		attemptedTaskCount: translationTasks.length,
 		failedTaskCount: translationTasks.length - summaries.length,
+		failureSamples,
 		skippedByLimitArticleCount,
 		skippedByLimitLanguageTaskCount,
 		recoveryCandidateCount: recoveryArticles.length,
 		recoveryAttemptedTaskCount,
+		localTranslationCount,
+		openAiTranslationCount,
 	};
 }
 
-async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summaries: ArticleSummaryInsert[]): Promise<boolean> {
+async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summaries: ArticleSummaryInsert[]): Promise<ArticleSummarySaveResult> {
 	const startedAt = Date.now();
 
 	if (summaries.length === 0) {
-		return true;
+		return { ok: true, errorSamples: [] };
 	}
 
 	let response: Response;
+	const buildSaveErrorSample = (status: number | null, errorText: string): ArticleSummarySaveErrorSample => ({
+		status,
+		errorText,
+		summaryCount: summaries.length,
+		languageCodes: Array.from(new Set(summaries.map((summary) => summary.language_code))).slice(0, 10),
+		sampleOriginalUrls: summaries.map((summary) => summary.original_url).slice(0, 10),
+		durationMs: Date.now() - startedAt,
+	});
 
 	try {
 		response = await fetch(`${config.supabaseUrl}/rest/v1/article_summaries?on_conflict=original_url,language_code`, {
@@ -4135,7 +4294,7 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 				durationMs: Date.now() - startedAt,
 			},
 		);
-		return false;
+		return { ok: false, errorSamples: [buildSaveErrorSample(null, getErrorMessage(error))] };
 	}
 
 	if (!response.ok) {
@@ -4146,7 +4305,7 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 			summaryCount: summaries.length,
 			durationMs: Date.now() - startedAt,
 		});
-		return false;
+		return { ok: false, errorSamples: [buildSaveErrorSample(response.status, errorText)] };
 	}
 
 	await logInfo(env, 'worker.supabase.article_summary_batch_saved', 'Batch-saved article summaries', {
@@ -4154,7 +4313,7 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 		durationMs: Date.now() - startedAt,
 	});
 
-	return true;
+	return { ok: true, errorSamples: [] };
 }
 
 function buildFeedOutcomeCounts(reviewedArticles: ReviewedArticleResult[]): Map<string, FeedOutcomeCounts> {
@@ -4913,6 +5072,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		runSource: options.runSource ?? 'unknown',
 		requestId: options.requestId ?? null,
 		aiProvider: config.aiProvider,
+		aiReviewProviderOrder: getAiReviewProviderOrder(config),
+		localAiConfigured: hasLocalAiReviewConfig(config),
+		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
 		localAiModel: config.localAiModel,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 	});
@@ -5024,13 +5186,31 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			summaries: [],
 			attemptedTaskCount: 0,
 			failedTaskCount: 0,
+			failureSamples: [],
 			skippedByLimitArticleCount: 0,
 			skippedByLimitLanguageTaskCount: 0,
 			recoveryCandidateCount: 0,
 			recoveryAttemptedTaskCount: 0,
+			localTranslationCount: 0,
+			openAiTranslationCount: 0,
 		};
 	const articleSummaryRows = articleSummaryBuildResult.summaries;
-	const articleSummarySaveOk = articleSaveOk ? await saveArticleSummariesBatch(env, config, articleSummaryRows) : false;
+	const articleSummarySaveResult = articleSaveOk
+		? await saveArticleSummariesBatch(env, config, articleSummaryRows)
+		: {
+			ok: false,
+			errorSamples: [
+				{
+					status: null,
+					errorText: 'Skipped article summary save because accepted article save failed.',
+					summaryCount: articleSummaryRows.length,
+					languageCodes: Array.from(new Set(articleSummaryRows.map((summary) => summary.language_code))).slice(0, 10),
+					sampleOriginalUrls: articleSummaryRows.map((summary) => summary.original_url).slice(0, 10),
+					durationMs: 0,
+				},
+			],
+		};
+	const articleSummarySaveOk = articleSummarySaveResult.ok;
 	const articleUrlsWithNewOrRecoveredTranslations = Array.from(
 		new Set([
 			...acceptedArticleRows.map((article) => article.original_url),
@@ -5065,11 +5245,17 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		summaryTranslationLimit: config.summaryTranslationLimit,
 		acceptedArticleCount: acceptedArticleRows.length,
 		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
+		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
 		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
+		articleSummaryFailureSamples: articleSummaryBuildResult.failureSamples,
 		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
 		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
+		articleSummarySaveErrorSamples: articleSummarySaveResult.errorSamples,
 		articleSummaryRecoveryCandidateCount: articleSummaryBuildResult.recoveryCandidateCount,
 		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
 		articleSummaryPublishCount,
@@ -5200,6 +5386,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		eligibleForAiCount: articlesEligibleForAi.length,
 		aiReviewedCount: aiReviewedArticles.length,
 		aiProvider: config.aiProvider,
+		aiReviewProviderOrder: getAiReviewProviderOrder(config),
+		localAiConfigured: hasLocalAiReviewConfig(config),
+		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
 		localAiModel: config.localAiModel,
 		localAiCallCount: localAiReviewedArticles.length,
 		localAiPromptTokens: localAiUsage.promptTokens,
@@ -5213,11 +5402,17 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		reviewSaveOk,
 		articleSaveOk,
 		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
+		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
 		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
+		articleSummaryFailureSamples: articleSummaryBuildResult.failureSamples,
 		articleSummarySkippedByLimitArticleCount: articleSummaryBuildResult.skippedByLimitArticleCount,
 		articleSummarySkippedByLimitLanguageTaskCount: articleSummaryBuildResult.skippedByLimitLanguageTaskCount,
 		articleSummarySaveOk,
+		articleSummarySaveErrorSamples: articleSummarySaveResult.errorSamples,
 		articleSummaryRecoveryCandidateCount: articleSummaryBuildResult.recoveryCandidateCount,
 		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
 		articleSummaryPublishCount,
