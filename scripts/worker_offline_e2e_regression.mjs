@@ -658,7 +658,7 @@ function startMockSupabaseServer(ctx, db) {
 
 function apiArticlesPayload(db, languageCode) {
   const articles = db.public_feed_snapshot.slice(0, 10).map((article) => {
-    if (languageCode === 'fr' || languageCode === 'ja') {
+    if (EXPECTED_TRANSLATION_LANGUAGES.includes(languageCode)) {
       const summary = db.article_summaries.find((row) => row.original_url === article.original_url && row.language_code === languageCode);
       if (summary) {
         return {
@@ -890,20 +890,51 @@ function getMockTranslationPrefix(languageCode) {
   return `[${languageCode}]`;
 }
 
-function verifyDatabaseState(db, ctx) {
-  logStep('Verifying mock database state');
+function verifyDatabaseState(db, ctx, { requireCompleteTranslations }) {
+  logStep(requireCompleteTranslations ? 'Verifying complete mock database state' : 'Verifying initial mock database state');
+
+  let fullyTranslatedAcceptedArticleCount = 0;
 
   for (const article of ctx.accepted) {
     const row = getArticle(db, article);
     assert(row, `Accepted article was not stored: ${article.scenario}`);
-    assert(row.status === 'published', `Accepted article was not published: ${article.scenario}`, row);
+    assert(
+      row.status === 'published' || row.status === 'translation_pending',
+      `Accepted article has an unexpected status: ${article.scenario}`,
+      row,
+    );
+    if (requireCompleteTranslations) {
+      assert(row.status === 'published', `Accepted article was not published after translation recovery: ${article.scenario}`, row);
+    }
     assert(Boolean(row.image_url), `Accepted article is missing image_url: ${article.scenario}`, row);
     assert(Boolean(row.ai_summary), `Accepted article is missing ai_summary: ${article.scenario}`, row);
 
     const languages = getSummaryLanguages(db, article);
-    for (const languageCode of EXPECTED_TRANSLATION_LANGUAGES) {
-      assert(languages.has(languageCode), `Accepted article is missing ${languageCode} summary: ${article.scenario}`, db.article_summaries);
+    const hasEveryExpectedLanguage = EXPECTED_TRANSLATION_LANGUAGES.every((languageCode) => languages.has(languageCode));
+
+    if (hasEveryExpectedLanguage) {
+      fullyTranslatedAcceptedArticleCount += 1;
     }
+
+    if (requireCompleteTranslations) {
+      for (const languageCode of EXPECTED_TRANSLATION_LANGUAGES) {
+        assert(languages.has(languageCode), `Accepted article is missing ${languageCode} summary: ${article.scenario}`, db.article_summaries);
+      }
+    }
+  }
+
+  if (requireCompleteTranslations) {
+    assert(
+      fullyTranslatedAcceptedArticleCount >= ctx.accepted.length,
+      'Not every accepted article has all configured summary translations after recovery.',
+      db.article_summaries,
+    );
+  } else {
+    assert(
+      fullyTranslatedAcceptedArticleCount >= 1,
+      'Initial run did not fully translate at least one accepted article.',
+      db.article_summaries,
+    );
   }
 
   for (const article of ctx.rejected) {
@@ -914,35 +945,50 @@ function verifyDatabaseState(db, ctx) {
     assert(review.decision === 'reject', `Rejected article review decision was not reject: ${article.scenario}`, review);
   }
 
-  assert(db.public_feed_snapshot.length >= ctx.accepted.length, 'public_feed_snapshot was not refreshed with accepted articles.', db.public_feed_snapshot);
+  assert(db.public_feed_snapshot.length >= 1, 'public_feed_snapshot was not refreshed with accepted articles.', db.public_feed_snapshot);
+  if (requireCompleteTranslations) {
+    assert(db.public_feed_snapshot.length >= ctx.accepted.length, 'public_feed_snapshot was not refreshed with all accepted articles.', db.public_feed_snapshot);
+  }
   assert(db.worker_runs.length >= 1, 'worker_runs telemetry was not saved.', db.worker_runs);
   assert(db.ai_usage_runs.length >= 1, 'ai_usage_runs telemetry was not saved.', db.ai_usage_runs);
-  logOk('Mock DB rows, statuses, reviews, translations, snapshot, and telemetry verified');
+  logOk(requireCompleteTranslations ? 'Complete mock DB rows, translations, snapshot, and telemetry verified' : 'Initial mock DB rows, partial translations, snapshot, and telemetry verified');
 }
 
-async function verifyMockWeb(ctx) {
-  logStep('Verifying mock web API and homepage rendering');
+async function verifyMockWeb(ctx, db, { requireCompleteTranslations }) {
+  logStep(requireCompleteTranslations ? 'Verifying complete mock web API and homepage rendering' : 'Verifying initial mock web API and homepage rendering');
+
+  const expectedArticles = requireCompleteTranslations
+    ? ctx.accepted
+    : ctx.accepted.filter((expected) => db.public_feed_snapshot.some((article) => article.original_url === expected.url));
+  assert(expectedArticles.length >= 1, 'Mock web verification has no published accepted articles to check.', db.public_feed_snapshot);
 
   for (const languageCode of ['en', ...EXPECTED_TRANSLATION_LANGUAGES]) {
     const data = await fetchJson(`${ctx.webBaseUrl}/api/articles?lang=${languageCode}&_=${Date.now()}`);
     assert(Array.isArray(data.articles), `Mock web API did not return articles for ${languageCode}`, data);
 
-    for (const expected of ctx.accepted) {
+    for (const expected of expectedArticles) {
       const article = data.articles.find((item) => item.original_url === expected.url);
       assert(article, `Mock web API ${languageCode} response did not include ${expected.scenario}`, data);
 
       if (languageCode !== 'en') {
-        assert(article.language_code === languageCode, `Mock web API ${languageCode} did not return localized language_code`, article);
-        assert(article.translation_available === true, `Mock web API ${languageCode} translation was not available`, article);
-        assert(article.title.startsWith(getMockTranslationPrefix(languageCode)), `Mock web API ${languageCode} title was not localized`, article);
+        if (requireCompleteTranslations) {
+          assert(article.language_code === languageCode, `Mock web API ${languageCode} did not return localized language_code`, article);
+          assert(article.translation_available === true, `Mock web API ${languageCode} translation was not available`, article);
+          assert(article.title.startsWith(getMockTranslationPrefix(languageCode)), `Mock web API ${languageCode} title was not localized`, article);
+        } else if (article.translation_available) {
+          assert(article.language_code === languageCode, `Mock web API ${languageCode} did not mark the localized article language correctly`, article);
+          assert(article.title.startsWith(getMockTranslationPrefix(languageCode)), `Mock web API ${languageCode} title was not localized`, article);
+        } else {
+          assert(article.language_code === 'en', `Mock web API ${languageCode} fallback did not return the original English article`, article);
+        }
       }
     }
   }
 
   const homeHtml = await fetchText(`${ctx.webBaseUrl}/?e2e=${encodeURIComponent(ctx.runId)}&_=${Date.now()}`);
   assert(homeHtml.includes('NutsNews'), 'Mock homepage did not render the NutsNews shell.');
-  assert(ctx.accepted.some((article) => homeHtml.includes(article.title)), 'Mock homepage did not render an accepted article title.', homeHtml.slice(0, 1000));
-  logOk('Mock multilingual API output and homepage HTML verified');
+  assert(expectedArticles.some((article) => homeHtml.includes(article.title)), 'Mock homepage did not render an accepted article title.', homeHtml.slice(0, 1000));
+  logOk(requireCompleteTranslations ? 'Complete mock multilingual API output and homepage HTML verified' : 'Initial mock multilingual API output and homepage HTML verified');
 }
 
 async function verifyTranslationRecovery(ctx, db) {
@@ -1023,7 +1069,16 @@ async function run() {
     assert(workerResult.rejectedCount >= 3, 'Worker did not reject all negative scenarios.', workerResult);
     assert(workerResult.reviewSaveOk === true, 'Worker did not save review rows.', workerResult);
     assert(workerResult.articleSaveOk === true, 'Worker did not save accepted articles.', workerResult);
-    assert(workerResult.articleSummaryTranslationCount >= 4, 'Worker did not translate both accepted articles to French and Japanese.', workerResult);
+    assert(
+      workerResult.articleSummaryTranslationCount >= EXPECTED_TRANSLATION_LANGUAGES.length,
+      'Worker did not translate at least one accepted article to all configured summary languages.',
+      workerResult,
+    );
+    assert(
+      workerResult.articleSummarySkippedByLimitArticleCount >= 1,
+      'Worker did not report the accepted article deferred by the summary translation task budget.',
+      workerResult,
+    );
     assert(workerResult.articleSummaryFailedTaskCount === 0, 'Worker had failed translation tasks.', workerResult);
     assert(workerResult.articleSummarySaveOk === true, 'Worker did not save translated summaries.', workerResult);
     assert(workerResult.articleSummaryPublishOk === true, 'Worker did not publish translated articles.', workerResult);
@@ -1033,10 +1088,11 @@ async function run() {
     assert(workerResult.openAiCallCount === 0, 'Worker unexpectedly called OpenAI path in offline test.', workerResult);
     logOk('Worker refresh result verified');
 
-    verifyDatabaseState(db, ctx);
-    await verifyMockWeb(ctx);
+    verifyDatabaseState(db, ctx, { requireCompleteTranslations: false });
+    await verifyMockWeb(ctx, db, { requireCompleteTranslations: false });
     await verifyTranslationRecovery(ctx, db);
-    await verifyMockWeb(ctx);
+    verifyDatabaseState(db, ctx, { requireCompleteTranslations: true });
+    await verifyMockWeb(ctx, db, { requireCompleteTranslations: true });
 
     console.log('\n✅ NutsNews fully offline Worker E2E regression passed.');
   } catch (error) {
