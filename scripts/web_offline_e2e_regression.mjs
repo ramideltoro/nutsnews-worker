@@ -525,7 +525,7 @@ async function runBrowserChecks() {
   await page.goto("/", { waitUntil: "networkidle" });
   await expect(page.locator("h1")).toContainText("Nuts");
   await expect(page.locator("h1")).toContainText("News");
-  await expect(page.getByText(articles[0].title)).toBeVisible();
+  await expect(page.getByText(articles[0].title).first()).toBeVisible();
   logOk("Homepage rendered with mock article");
 
   logStep("Verifying footer home, search, settings, about, contact, and privacy controls");
@@ -540,7 +540,7 @@ async function runBrowserChecks() {
   await expect(searchDialog).toBeVisible();
   await searchDialog.locator("#footer-archive-search").fill("planets");
   await searchDialog.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page.getByText(articles[0].title)).toBeVisible();
+  await expect(page.getByText(articles[0].title).first()).toBeVisible();
   await searchDialog.getByRole("button", { name: "Close search", exact: true }).click();
   logOk("Footer search returned a mock article");
 
