@@ -592,7 +592,7 @@ async function runBrowserChecks() {
   const languageSettingsPanel = await openSettingsPanel();
   await languageSettingsPanel.getByRole("button", { name: /Language/i }).click();
   await languageSettingsPanel.getByRole("button", { name: /Français|French/i }).click();
-  await expect(page.getByText(articleSummaries[0].title)).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText(articleSummaries[0].title).first()).toBeVisible({ timeout: 10000 });
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
   logOk("French language change rendered translated articles");
 
