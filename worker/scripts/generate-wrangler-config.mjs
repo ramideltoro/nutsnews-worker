@@ -12,6 +12,12 @@ const includeUpstashRedisSecretBindings = process.env.ENABLE_UPSTASH_REDIS_SECRE
 const upstashRedisRestUrlSecretName = process.env.UPSTASH_REDIS_REST_URL_SECRET_NAME ?? 'UPSTASH_REDIS_REST_URL';
 const upstashRedisRestTokenSecretName = process.env.UPSTASH_REDIS_REST_TOKEN_SECRET_NAME ?? 'UPSTASH_REDIS_REST_TOKEN';
 
+const defaultTranslationVars = {
+	ENABLED_SUMMARY_LANGUAGES: process.env.ENABLED_SUMMARY_LANGUAGES ?? 'fr,ja,de-CH,de,el',
+	SUMMARY_TRANSLATION_LIMIT: process.env.SUMMARY_TRANSLATION_LIMIT ?? '5',
+	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? 'true',
+};
+
 const optionalShardVars = Object.fromEntries(
 	[
 		'AI_PROVIDER',
@@ -19,9 +25,6 @@ const optionalShardVars = Object.fromEntries(
 		'LOCAL_AI_MODEL',
 		'AI_PROVIDER_FALLBACK_TO_OPENAI',
 		'AI_REVIEW_CONCURRENCY',
-		'ENABLED_SUMMARY_LANGUAGES',
-		'SUMMARY_TRANSLATION_LIMIT',
-		'HOLD_ARTICLES_FOR_TRANSLATIONS',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'UPSTASH_REDIS_ENABLED',
 		'UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS',
@@ -57,6 +60,7 @@ for (let index = 0; index < shardCount; index += 1) {
 		vars: {
 			FEED_SHARD_INDEX: String(index),
 			FEEDS_PER_SHARD: String(feedsPerShard),
+			...defaultTranslationVars,
 			...optionalShardVars,
 		},
 		secrets_store_secrets: [
@@ -127,7 +131,8 @@ for (let index = 0; index < shardCount; index += 1) {
 const localAiSummary = process.env.LOCAL_AI_URL ? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? 'true'}.` : (process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '');
 const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
+const translationSummary = ` Summary translations: languages=${defaultTranslationVars.ENABLED_SUMMARY_LANGUAGES}, limit=${defaultTranslationVars.SUMMARY_TRANSLATION_LIMIT}, hold=${defaultTranslationVars.HOLD_ARTICLES_FOR_TRANSLATIONS}.`;
 
 console.log(
-	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${kvSummary}${redisSummary}`,
+	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${translationSummary}${kvSummary}${redisSummary}`,
 );

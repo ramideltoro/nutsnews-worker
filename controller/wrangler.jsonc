@@ -17,6 +17,7 @@
     "SHARD_RUN_INTERVAL_MINUTES": "5",
     "SHARD_WORKER_PREFIX": "nutsnews-worker",
     "SHARD_WORKER_SUBDOMAIN": "nutsnews",
-    "MAX_AI_REVIEWS_PER_SHARD": "12"
+    "MAX_AI_REVIEWS_PER_SHARD": "12",
+    "TRANSLATION_BACKLOG_ENABLED": "true"
   }
 }

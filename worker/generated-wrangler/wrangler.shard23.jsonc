@@ -14,6 +14,9 @@
   "vars": {
     "FEED_SHARD_INDEX": "23",
     "FEEDS_PER_SHARD": "20",
+    "ENABLED_SUMMARY_LANGUAGES": "fr,ja,de-CH,de,el",
+    "SUMMARY_TRANSLATION_LIMIT": "5",
+    "HOLD_ARTICLES_FOR_TRANSLATIONS": "true",
     "AI_PROVIDER": "local",
     "LOCAL_AI_URL": "https://ai.nutsnews.com",
     "LOCAL_AI_MODEL": "qwen2.5:3b",

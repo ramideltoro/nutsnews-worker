@@ -10,9 +10,12 @@ type Env = {
   SHARD_WORKER_PREFIX?: string;
   SHARD_WORKER_SUBDOMAIN?: string;
   MAX_AI_REVIEWS_PER_SHARD?: string;
+  TRANSLATION_BACKLOG_ENABLED?: string;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
+
+type ShardRunMode = 'refresh' | 'translate-backlog';
 
 type ShardRunResult = {
   shardIndex: number;
@@ -20,6 +23,7 @@ type ShardRunResult = {
   ok: boolean;
   status: number;
   response: unknown;
+  mode: ShardRunMode;
 };
 
 function getNumberValue(
@@ -48,6 +52,12 @@ function getMaxAiReviewsPerShard(env: Env): number {
   return getNumberValue(env.MAX_AI_REVIEWS_PER_SHARD, 12, 1);
 }
 
+function isTranslationBacklogEnabled(env: Env): boolean {
+  const value = (env.TRANSLATION_BACKLOG_ENABLED ?? "true").trim().toLowerCase();
+
+  return !["0", "false", "off", "no"].includes(value);
+}
+
 function getShardWorkerPrefix(env: Env): string {
   return env.SHARD_WORKER_PREFIX || "nutsnews-worker";
 }
@@ -64,9 +74,14 @@ function getAutomaticShardIndex(env: Env, now = Date.now()): number {
   return Math.floor(now / runWindowMs) % shardCount;
 }
 
-function buildShardUrl(env: Env, shardIndex: number): string {
+function buildShardUrl(env: Env, shardIndex: number, mode: ShardRunMode): string {
   const prefix = getShardWorkerPrefix(env);
   const subdomain = getShardWorkerSubdomain(env);
+
+  if (mode === "translate-backlog") {
+    return `https://${prefix}-${shardIndex}.${subdomain}.workers.dev/translate-backlog`;
+  }
+
   const limit = getMaxAiReviewsPerShard(env);
 
   return `https://${prefix}-${shardIndex}.${subdomain}.workers.dev/?limit=${limit}`;
@@ -88,14 +103,16 @@ async function runShard(
     env: Env,
     shardIndex: number,
     requestId: string,
+    mode: ShardRunMode = "refresh",
 ): Promise<ShardRunResult> {
   const startedAt = Date.now();
-  const shardUrl = buildShardUrl(env, shardIndex);
+  const shardUrl = buildShardUrl(env, shardIndex, mode);
 
   await logInfo(env, "controller.shard.call_started", "Controller calling shard", {
     requestId,
     shardIndex,
     shardUrl,
+    mode,
     maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
   });
 
@@ -120,6 +137,7 @@ async function runShard(
     const result = {
       shardIndex,
       shardUrl,
+      mode,
       ok: response.ok,
       status: response.status,
       response: body,
@@ -129,6 +147,7 @@ async function runShard(
       requestId,
       shardIndex,
       shardUrl,
+      mode,
       ok: response.ok,
       status: response.status,
       durationMs: Date.now() - startedAt,
@@ -158,6 +177,7 @@ async function runShard(
     const result = {
       shardIndex,
       shardUrl,
+      mode,
       ok: false,
       status: 0,
       response: serializeUnknown(error),
@@ -201,6 +221,16 @@ function parseManualShard(url: URL, env: Env): number | null {
   return Math.floor(shardIndex);
 }
 
+function parseManualControllerMode(url: URL): ShardRunMode | null {
+  const mode = (url.searchParams.get("mode") ?? "").trim().toLowerCase();
+
+  if (url.pathname === "/translate-backlog" || mode === "translate-backlog" || mode === "translation-backlog") {
+    return "translate-backlog";
+  }
+
+  return null;
+}
+
 function createRequestId() {
   return crypto.randomUUID();
 }
@@ -229,19 +259,27 @@ export default {
 
     try {
       const manualShardIndex = parseManualShard(url, env);
+      const requestedMode = parseManualControllerMode(url);
       const shardIndex =
           manualShardIndex ?? getAutomaticShardIndex(env, Date.now());
 
-      const result = await runShard(env, shardIndex, requestId);
+      const result = await runShard(env, shardIndex, requestId, requestedMode ?? "refresh");
+      const translationBacklogResult =
+          requestedMode === null && isTranslationBacklogEnabled(env)
+              ? await runShard(env, shardIndex, requestId, "translate-backlog")
+              : null;
 
       const responseBody = {
         message: "NutsNews controller run complete",
-        mode: manualShardIndex === null ? "automatic" : "manual",
+        controllerMode: manualShardIndex === null ? "automatic" : "manual",
+        requestedMode: requestedMode ?? "refresh",
+        translationBacklogEnabled: isTranslationBacklogEnabled(env),
         shardCount: getShardCount(env),
         shardRunIntervalMinutes: getRunIntervalMinutes(env),
         maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
         requestId,
-        ...result,
+        result,
+        translationBacklogResult,
       };
 
       await logInfo(
@@ -250,7 +288,9 @@ export default {
           "NutsNews controller request completed",
           {
             requestId,
-            mode: manualShardIndex === null ? "automatic" : "manual",
+            controllerMode: manualShardIndex === null ? "automatic" : "manual",
+            requestedMode: requestedMode ?? "refresh",
+            translationBacklogOk: translationBacklogResult?.ok ?? null,
             shardIndex,
             ok: result.ok,
             status: result.status,
@@ -310,7 +350,10 @@ export default {
         },
     );
 
-    const result = await runShard(env, shardIndex, requestId);
+    const result = await runShard(env, shardIndex, requestId, "refresh");
+    const translationBacklogResult = isTranslationBacklogEnabled(env)
+        ? await runShard(env, shardIndex, requestId, "translate-backlog")
+        : null;
 
     await logInfo(
         env,
@@ -321,6 +364,9 @@ export default {
           shardIndex,
           ok: result.ok,
           status: result.status,
+          translationBacklogEnabled: isTranslationBacklogEnabled(env),
+          translationBacklogOk: translationBacklogResult?.ok ?? null,
+          translationBacklogStatus: translationBacklogResult?.status ?? null,
           durationMs: Date.now() - startedAt,
         },
     );

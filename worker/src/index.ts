@@ -450,6 +450,32 @@ type RefreshResult = {
 	durationMs: number;
 };
 
+
+type WorkerRequestMode = 'refresh' | 'translate-backlog';
+
+type TranslationBacklogResult = {
+	message: string;
+	shardIndex: number;
+	enabledSummaryLanguages: SummaryLanguageCode[];
+	summaryTranslationLimit: number;
+	articleSummaryTranslationTaskBudget: number;
+	articleSummaryTranslationCount: number;
+	articleSummaryLocalTranslationCount: number;
+	articleSummaryOpenAiTranslationCount: number;
+	translationProviderOrder: AiProvider[];
+	articleSummaryAttemptedTaskCount: number;
+	articleSummaryFailedTaskCount: number;
+	articleSummaryFailureSamples: ArticleSummaryFailureSample[];
+	articleSummaryRecoveryCandidateCount: number;
+	articleSummaryRecoveryAttemptedTaskCount: number;
+	articleSummarySaveOk: boolean;
+	articleSummarySaveErrorSamples: ArticleSummarySaveErrorSample[];
+	articleSummaryPublishCount: number;
+	articleSummaryPublishOk: boolean;
+	publicFeedSnapshotRefreshOk: boolean;
+	durationMs: number;
+};
+
 const MAX_ITEMS_PER_FEED = 35;
 const MAX_CANDIDATES_PER_RUN = 300;
 const DEFAULT_MAX_AI_REVIEWS_PER_RUN = 12;
@@ -476,7 +502,7 @@ const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
 const DEFAULT_AI_REVIEW_ALERT_RUN_LIMIT = 12;
 const DEFAULT_AI_TOKEN_ALERT_RUN_LIMIT = 50000;
 const DEFAULT_ENABLED_SUMMARY_LANGUAGES = 'fr,ja,de-CH,de,el';
-const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 6;
+const DEFAULT_SUMMARY_TRANSLATION_LIMIT = 5;
 const HARD_MAX_SUMMARY_TRANSLATION_LIMIT = 18;
 const HARD_MAX_SUMMARY_TRANSLATION_TASKS_PER_RUN = 5;
 const SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT = 80;
@@ -1717,7 +1743,7 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		),
 		enabledSummaryLanguages: getEnabledSummaryLanguages(env.ENABLED_SUMMARY_LANGUAGES),
 		summaryTranslationLimit: getSummaryTranslationLimit(env.SUMMARY_TRANSLATION_LIMIT),
-		holdArticlesForTranslations: getBooleanConfig(env.HOLD_ARTICLES_FOR_TRANSLATIONS, false),
+		holdArticlesForTranslations: getBooleanConfig(env.HOLD_ARTICLES_FOR_TRANSLATIONS, true),
 	};
 }
 
@@ -4391,16 +4417,68 @@ async function buildArticleSummaryTranslations(
 	}
 
 	const maxTranslationTaskCount = getSummaryTranslationTaskBudget(config);
+
+	if (maxTranslationTaskCount <= 0) {
+		return emptyResult;
+	}
+
+	const acceptedOriginalUrls = new Set(acceptedArticles.map((article) => article.original_url));
+	const taskKeys = new Set<string>();
+	const translationTasks: Array<{ article: ArticleSummarySourceArticle; languageCode: SummaryLanguageCode; taskSource: 'new_article' | 'recovery' }> = [];
+	const addTask = (article: ArticleSummarySourceArticle, languageCode: SummaryLanguageCode, taskSource: 'new_article' | 'recovery') => {
+		if (translationTasks.length >= maxTranslationTaskCount) {
+			return;
+		}
+
+		const key = getSummaryTaskKey(article, languageCode);
+
+		if (taskKeys.has(key)) {
+			return;
+		}
+
+		taskKeys.add(key);
+		translationTasks.push({ article, languageCode, taskSource });
+	};
+
+	// Drain old translation gaps first. This prevents today's pending/untranslated articles from
+	// starving forever when the RSS lane keeps accepting new articles on every run.
+	const recoveryArticleBudget = Math.ceil(maxTranslationTaskCount / Math.max(1, config.enabledSummaryLanguages.length));
+	const recoveryArticles = await loadSummaryTranslationRecoveryArticles(env, config, recoveryArticleBudget, acceptedOriginalUrls);
+
+	if (recoveryArticles.length > 0) {
+		const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
+			env,
+			config,
+			recoveryArticles.map((article) => article.original_url),
+		);
+
+		for (const article of recoveryArticles) {
+			const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
+
+			for (const languageCode of config.enabledSummaryLanguages) {
+				if (!existingLanguageCodes.has(languageCode)) {
+					addTask(article, languageCode, 'recovery');
+				}
+			}
+
+			if (translationTasks.length >= maxTranslationTaskCount) {
+				break;
+			}
+		}
+	}
+
 	const articlesSelectedForTranslation: ArticleInsert[] = [];
 	const articlesSkippedByLimit: ArticleInsert[] = [];
-	let selectedNewArticleTaskCount = 0;
 
 	for (const article of acceptedArticles) {
 		const articleTaskCount = config.enabledSummaryLanguages.length;
 
-		if (articleTaskCount > 0 && selectedNewArticleTaskCount + articleTaskCount <= maxTranslationTaskCount) {
+		if (articleTaskCount > 0 && translationTasks.length + articleTaskCount <= maxTranslationTaskCount) {
 			articlesSelectedForTranslation.push(article);
-			selectedNewArticleTaskCount += articleTaskCount;
+
+			for (const languageCode of config.enabledSummaryLanguages) {
+				addTask(article, languageCode, 'new_article');
+			}
 		} else {
 			articlesSkippedByLimit.push(article);
 		}
@@ -4413,9 +4491,11 @@ async function buildArticleSummaryTranslations(
 		await logWarn(
 			env,
 			'worker.translation.skipped_by_limit',
-			'Accepted articles were held as translation_pending because this invocation reached the safe summary translation task budget',
+			'Accepted articles were left as translation_pending because this invocation reached the safe summary translation task budget',
 			{
 				acceptedArticleCount: acceptedArticles.length,
+				recoveryCandidateCount: recoveryArticles.length,
+				recoveryTaskCount: translationTasks.filter((task) => task.taskSource === 'recovery').length,
 				summaryTranslationLimit: config.summaryTranslationLimit,
 				summaryTranslationTaskBudget: maxTranslationTaskCount,
 				enabledSummaryLanguages: config.enabledSummaryLanguages,
@@ -4429,60 +4509,6 @@ async function buildArticleSummaryTranslations(
 				})),
 			},
 		);
-	}
-
-	const taskKeys = new Set<string>();
-	const translationTasks: Array<{ article: ArticleSummarySourceArticle; languageCode: SummaryLanguageCode; taskSource: 'new_article' | 'recovery' }> = [];
-	const addTask = (article: ArticleSummarySourceArticle, languageCode: SummaryLanguageCode, taskSource: 'new_article' | 'recovery') => {
-		const key = getSummaryTaskKey(article, languageCode);
-
-		if (taskKeys.has(key)) {
-			return;
-		}
-
-		taskKeys.add(key);
-		translationTasks.push({ article, languageCode, taskSource });
-	};
-
-	for (const article of articlesSelectedForTranslation) {
-		for (const languageCode of config.enabledSummaryLanguages) {
-			addTask(article, languageCode, 'new_article');
-		}
-	}
-
-	const remainingTranslationTaskBudget = Math.max(0, maxTranslationTaskCount - translationTasks.length);
-	const recoveryArticleBudget = Math.ceil(remainingTranslationTaskBudget / Math.max(1, config.enabledSummaryLanguages.length));
-	const recoveryArticles = await loadSummaryTranslationRecoveryArticles(
-		env,
-		config,
-		recoveryArticleBudget,
-		new Set(acceptedArticles.map((article) => article.original_url)),
-	);
-
-	if (recoveryArticles.length > 0) {
-		const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
-			env,
-			config,
-			recoveryArticles.map((article) => article.original_url),
-		);
-
-		for (const article of recoveryArticles) {
-			const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
-
-			for (const languageCode of config.enabledSummaryLanguages) {
-				if (translationTasks.length >= maxTranslationTaskCount) {
-					break;
-				}
-
-				if (!existingLanguageCodes.has(languageCode)) {
-					addTask(article, languageCode, 'recovery');
-				}
-			}
-
-			if (translationTasks.length >= maxTranslationTaskCount) {
-				break;
-			}
-		}
 	}
 
 	if (translationTasks.length === 0) {
@@ -5779,6 +5805,70 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	return result;
 }
 
+
+async function translateSummaryBacklog(
+	env: Env,
+	options: { runSource: 'manual' | 'scheduled' | 'unknown'; requestId?: string | null },
+): Promise<TranslationBacklogResult> {
+	const startedAt = Date.now();
+	const config = await getRuntimeConfig(env);
+	const shardIndex = getShardIndex(env);
+
+	await logInfo(env, 'worker.translation.backlog_started', 'Worker translation backlog run started', {
+		shardIndex,
+		runSource: options.runSource,
+		requestId: options.requestId ?? null,
+		enabledSummaryLanguages: config.enabledSummaryLanguages,
+		summaryTranslationLimit: config.summaryTranslationLimit,
+		summaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		translationProviderOrder: getSummaryTranslationProviderOrder(config),
+		holdArticlesForTranslations: shouldHoldAcceptedArticlesForTranslations(config),
+	});
+
+	const articleSummaryBuildResult = await buildArticleSummaryTranslations(env, config, []);
+	const articleSummaryRows = articleSummaryBuildResult.summaries;
+	const articleSummarySaveResult = await saveArticleSummariesBatch(env, config, articleSummaryRows);
+	const articleSummarySaveOk = articleSummarySaveResult.ok;
+	const articleUrlsWithNewOrRecoveredTranslations = Array.from(new Set(articleSummaryRows.map((summary) => summary.original_url)));
+	const summaryLanguageCodesByUrlAfterSave = articleSummarySaveOk
+		? await loadExistingSummaryLanguageCodes(env, config, articleUrlsWithNewOrRecoveredTranslations)
+		: new Map<string, Set<SummaryLanguageCode>>();
+	const fullyTranslatedArticleUrls = getFullyTranslatedOriginalUrls(
+		articleUrlsWithNewOrRecoveredTranslations,
+		summaryLanguageCodesByUrlAfterSave,
+		config.enabledSummaryLanguages,
+	);
+	const articleSummaryPublishOk = articleSummarySaveOk ? await publishArticlesBatch(env, config, fullyTranslatedArticleUrls) : false;
+	const publicFeedSnapshotRefreshOk = articleSummarySaveOk && fullyTranslatedArticleUrls.length > 0 ? await refreshPublicFeedSnapshot(env, config) : true;
+
+	const result: TranslationBacklogResult = {
+		message: 'NutsNews translation backlog run complete',
+		shardIndex,
+		enabledSummaryLanguages: config.enabledSummaryLanguages,
+		summaryTranslationLimit: config.summaryTranslationLimit,
+		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		articleSummaryTranslationCount: articleSummaryRows.length,
+		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
+		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		translationProviderOrder: getSummaryTranslationProviderOrder(config),
+		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
+		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
+		articleSummaryFailureSamples: articleSummaryBuildResult.failureSamples,
+		articleSummaryRecoveryCandidateCount: articleSummaryBuildResult.recoveryCandidateCount,
+		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
+		articleSummarySaveOk,
+		articleSummarySaveErrorSamples: articleSummarySaveResult.errorSamples,
+		articleSummaryPublishCount: fullyTranslatedArticleUrls.length,
+		articleSummaryPublishOk,
+		publicFeedSnapshotRefreshOk,
+		durationMs: Date.now() - startedAt,
+	};
+
+	await logInfo(env, 'worker.translation.backlog_completed', 'Worker translation backlog run completed', result);
+
+	return result;
+}
+
 function parseManualLimit(url: URL): number | undefined {
 	const limitParam = url.searchParams.get('limit');
 
@@ -5809,6 +5899,17 @@ function parseManualImageLookupLimit(url: URL): number | undefined {
 	}
 
 	return Math.floor(lookupLimit);
+}
+
+
+function parseWorkerRequestMode(url: URL): WorkerRequestMode {
+	const mode = (url.searchParams.get('mode') ?? '').trim().toLowerCase();
+
+	if (url.pathname === '/translate-backlog' || mode === 'translate-backlog' || mode === 'translation-backlog') {
+		return 'translate-backlog';
+	}
+
+	return 'refresh';
 }
 
 function createRequestId() {
@@ -5874,8 +5975,9 @@ export default {
 			shardIndex: getShardIndex(env),
 		});
 
-		const maxAiReviews = parseManualLimit(url);
-		const imageLookupLimit = parseManualImageLookupLimit(url);
+		const requestMode = parseWorkerRequestMode(url);
+		const maxAiReviews = requestMode === 'refresh' ? parseManualLimit(url) : undefined;
+		const imageLookupLimit = requestMode === 'refresh' ? parseManualImageLookupLimit(url) : undefined;
 		const rateLimit = await checkManualRefreshRateLimit(env, request);
 
 		if (!rateLimit.allowed) {
@@ -5926,9 +6028,9 @@ export default {
 			});
 
 			return Response.json({
-				message: 'NutsNews refresh skipped because this shard is already running.',
+				message: 'NutsNews Worker request skipped because this shard is already running.',
 				requestId,
-				mode: 'manual',
+				mode: requestMode,
 				skipped: true,
 				redisEnabled: true,
 				shardIndex: getShardIndex(env),
@@ -5936,16 +6038,23 @@ export default {
 		}
 
 		try {
-			const result = await refreshArticles(env, {
-				maxAiReviews,
-				imageLookupLimit,
-				runSource: 'manual',
-				requestId,
-			});
+			const result =
+				requestMode === 'translate-backlog'
+					? await translateSummaryBacklog(env, {
+						runSource: 'manual',
+						requestId,
+					})
+					: await refreshArticles(env, {
+						maxAiReviews,
+						imageLookupLimit,
+						runSource: 'manual',
+						requestId,
+					});
 
 			await logInfo(env, 'worker.request.completed', 'Worker manual request completed', {
 				requestId,
 				status: 200,
+				mode: requestMode,
 				shardIndex: getShardIndex(env),
 				durationMs: Date.now() - requestStartedAt,
 				result,
@@ -5953,7 +6062,7 @@ export default {
 
 			return Response.json({
 				...result,
-				mode: 'manual',
+				mode: requestMode,
 				requestId,
 			});
 		} catch (error) {
@@ -5969,14 +6078,16 @@ export default {
 			await logError(env, 'worker.request.failed', 'Worker manual request failed', error, {
 				requestId,
 				status: 500,
+				mode: requestMode,
 				shardIndex: getShardIndex(env),
 				durationMs: Date.now() - requestStartedAt,
 			});
 
 			return Response.json(
 				{
-					message: 'NutsNews refresh failed',
+					message: 'NutsNews Worker request failed',
 					requestId,
+					mode: requestMode,
 					error:
 						error instanceof Error
 							? {
