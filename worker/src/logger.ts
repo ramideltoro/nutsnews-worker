@@ -21,6 +21,7 @@ type BetterStackConfig = {
 
 const SERVICE_NAME = "nutsnews-worker";
 const DEFAULT_ENVIRONMENT = "production";
+const MAX_BUFFERED_BETTER_STACK_EVENTS = 250;
 
 const BETTER_STACK_DELIVERY_EVENTS = new Set([
 	"worker.openai.review_attempting",
@@ -43,6 +44,32 @@ const BETTER_STACK_DELIVERY_EVENTS = new Set([
 	"worker.local_ai.invalid_api_key_header",
 	"worker.local_ai.review_skipped_missing_config",
 	"worker.local_ai.review_attempting",
+	"worker.local_ai.diagnostics.config",
+	"worker.local_ai.diagnostics.review_provider_selected",
+	"worker.local_ai.diagnostics.review_skipped_missing_config",
+	"worker.local_ai.diagnostics.review_start",
+	"worker.local_ai.diagnostics.review_fetch_start",
+	"worker.local_ai.diagnostics.review_fetch_response",
+	"worker.local_ai.diagnostics.review_fetch_exception",
+	"worker.local_ai.diagnostics.review_fetch_failed_status",
+	"worker.local_ai.diagnostics.review_response_json_failed",
+	"worker.local_ai.diagnostics.review_success",
+	"worker.local_ai.diagnostics.review_fallback_to_openai",
+	"worker.local_ai.diagnostics.review_failed_no_fallback",
+	"worker.local_ai.diagnostics.review_invalid_api_key",
+	"worker.local_ai.diagnostics.translation_provider_selected",
+	"worker.local_ai.diagnostics.translation_start",
+	"worker.local_ai.diagnostics.translation_fetch_start",
+	"worker.local_ai.diagnostics.translation_fetch_response",
+	"worker.local_ai.diagnostics.translation_fetch_exception",
+	"worker.local_ai.diagnostics.translation_fetch_failed_status",
+	"worker.local_ai.diagnostics.translation_response_json_failed",
+	"worker.local_ai.diagnostics.translation_invalid_payload",
+	"worker.local_ai.diagnostics.translation_success",
+	"worker.local_ai.diagnostics.translation_fallback_to_openai",
+	"worker.local_ai.diagnostics.translation_skipped_missing_config",
+	"worker.local_ai.diagnostics.translation_invalid_api_key",
+	"worker.logs.flushed",
 	"worker.log_test.completed",
 	"worker.refresh.completed",
 	"worker.request.completed",
@@ -92,6 +119,8 @@ const BETTER_STACK_DELIVERY_EVENTS = new Set([
 ]);
 
 let cachedBetterStackConfigPromise: Promise<BetterStackConfig | null> | null = null;
+let pendingBetterStackLogs: LogFields[] = [];
+let pendingBetterStackDroppedCount = 0;
 
 async function resolveValue(value: MaybeSecretBinding) {
 	if (!value) {
@@ -150,6 +179,15 @@ function writeLocalConsole(level: LogLevel, payload: LogFields) {
 
 function shouldSendToBetterStack(event: string) {
 	return BETTER_STACK_DELIVERY_EVENTS.has(event);
+}
+
+function bufferBetterStackPayload(payload: LogFields) {
+	if (pendingBetterStackLogs.length >= MAX_BUFFERED_BETTER_STACK_EVENTS) {
+		pendingBetterStackDroppedCount += 1;
+		return;
+	}
+
+	pendingBetterStackLogs.push(payload);
 }
 
 async function getBetterStackConfig(
@@ -225,6 +263,42 @@ async function sendToBetterStack(env: LoggerEnv, payload: LogFields) {
 	}
 }
 
+export async function flushBetterStackLogs(
+	env: LoggerEnv,
+	fields: LogFields = {},
+) {
+	if (pendingBetterStackLogs.length === 0 && pendingBetterStackDroppedCount === 0) {
+		return;
+	}
+
+	const entries = pendingBetterStackLogs;
+	const droppedEntryCount = pendingBetterStackDroppedCount;
+	pendingBetterStackLogs = [];
+	pendingBetterStackDroppedCount = 0;
+
+	const payload = {
+		dt: new Date().toISOString(),
+		level: "info",
+		service: SERVICE_NAME,
+		environment: DEFAULT_ENVIRONMENT,
+		event: "worker.logs.flushed",
+		message: "Buffered Worker logs flushed to Better Stack in one request",
+		shardIndex: env.FEED_SHARD_INDEX ?? "0",
+		entryCount: entries.length,
+		droppedEntryCount,
+		bufferedEventNames: entries.map((entry) => entry.event).slice(0, 80),
+		...fields,
+		entries,
+	};
+
+	writeLocalConsole("info", {
+		...payload,
+		entries: `[${entries.length} buffered entries omitted from console flush line]`,
+	});
+
+	await sendToBetterStack(env, payload);
+}
+
 export async function logEvent(
 	env: LoggerEnv,
 	level: LogLevel,
@@ -245,7 +319,9 @@ export async function logEvent(
 
 	writeLocalConsole(level, payload);
 
-	await sendToBetterStack(env, payload);
+	if (shouldSendToBetterStack(event)) {
+		bufferBetterStackPayload(payload);
+	}
 }
 
 export async function logInfo(

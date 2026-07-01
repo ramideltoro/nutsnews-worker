@@ -1,4 +1,4 @@
-import { logError, logInfo, logWarn } from './logger';
+import { flushBetterStackLogs, logError, logInfo, logWarn } from './logger';
 
 type SecretBinding = {
 	get: () => Promise<string>;
@@ -1477,6 +1477,29 @@ function getSafeHeaderValue(value: string) {
 	}
 
 	return trimmed;
+}
+
+function describeLocalAiEndpoint(localAiUrl: string) {
+	if (!localAiUrl) {
+		return null;
+	}
+
+	try {
+		const url = new URL(localAiUrl);
+
+		return {
+			parseable: true,
+			origin: url.origin,
+			pathname: url.pathname || '/',
+			protocol: url.protocol,
+			host: url.host,
+		};
+	} catch {
+		return {
+			parseable: false,
+			length: localAiUrl.length,
+		};
+	}
 }
 
 function normalizeOpenAiUsage(value: unknown): OpenAiUsage {
@@ -3321,7 +3344,27 @@ async function classifyAndSummarizeArticleWithLocalAi(
 ): Promise<AiClassificationResult> {
 	const localAiApiKey = getSafeHeaderValue(config.localAiApiKey);
 
+	await logInfo(env, 'worker.local_ai.diagnostics.review_start', 'Local AI review diagnostic started', {
+		source: article.source,
+		title: article.title,
+		articleUrl: article.url,
+		localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+		localAiReviewUrl: getLocalAiReviewUrl(config),
+		localAiModel: config.localAiModel,
+		hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		localAiApiKeyHeaderUsable: Boolean(localAiApiKey),
+		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+	});
+
 	if (!localAiApiKey) {
+		await logWarn(env, 'worker.local_ai.diagnostics.review_invalid_api_key', 'Local AI review diagnostic found an unusable API key header', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+			openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+		});
+
 		await logWarn(env, 'worker.local_ai.invalid_api_key_header', 'Local AI review key is blank or contains invalid header characters', {
 			source: article.source,
 			title: article.title,
@@ -3342,6 +3385,16 @@ async function classifyAndSummarizeArticleWithLocalAi(
 		const startedAt = Date.now();
 		let response: Response;
 
+		await logInfo(env, 'worker.local_ai.diagnostics.review_fetch_start', 'Local AI review fetch attempt started', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			localAiReviewUrl: getLocalAiReviewUrl(config),
+			localAiModel: config.localAiModel,
+			attempt,
+			maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+		});
+
 		try {
 			response = await fetch(getLocalAiReviewUrl(config), {
 				method: 'POST',
@@ -3360,6 +3413,17 @@ async function classifyAndSummarizeArticleWithLocalAi(
 		} catch (error) {
 			lastDurationMs = Date.now() - startedAt;
 			lastFailureReason = `Local AI request exception: ${getErrorMessage(error)}`;
+
+			await logWarn(env, 'worker.local_ai.diagnostics.review_fetch_exception', 'Local AI review fetch attempt threw before receiving a response', {
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				localAiReviewUrl: getLocalAiReviewUrl(config),
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				errorMessage: getErrorMessage(error),
+				durationMs: lastDurationMs,
+			});
 
 			await logError(env, 'worker.local_ai.request_exception', 'Local AI request threw an exception', error, {
 				source: article.source,
@@ -3380,6 +3444,18 @@ async function classifyAndSummarizeArticleWithLocalAi(
 			lastDurationMs = Date.now() - startedAt;
 			lastFailureReason = `Local AI request failed: ${response.status}`;
 
+			await logWarn(env, 'worker.local_ai.diagnostics.review_fetch_failed_status', 'Local AI review fetch returned a non-OK response', {
+				status: response.status,
+				statusText: response.statusText,
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				errorText,
+				durationMs: lastDurationMs,
+			});
+
 			await logWarn(env, 'worker.local_ai.request_failed', 'Local AI request failed', {
 				status: response.status,
 				source: article.source,
@@ -3395,11 +3471,32 @@ async function classifyAndSummarizeArticleWithLocalAi(
 			continue;
 		}
 
+		await logInfo(env, 'worker.local_ai.diagnostics.review_fetch_response', 'Local AI review fetch returned OK', {
+			status: response.status,
+			statusText: response.statusText,
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			attempt,
+			maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+			durationMs: Date.now() - startedAt,
+		});
+
 		const jsonResult = await readResponseJsonSafely<LocalAiReviewResponse>(response);
 
 		if (!jsonResult.ok) {
 			lastDurationMs = Date.now() - startedAt;
 			lastFailureReason = 'Local AI response JSON parse failed';
+
+			await logWarn(env, 'worker.local_ai.diagnostics.review_response_json_failed', 'Local AI review response was not parseable JSON', {
+				source: article.source,
+				title: article.title,
+				articleUrl: article.url,
+				attempt,
+				maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+				errorMessage: getErrorMessage(jsonResult.error),
+				durationMs: lastDurationMs,
+			});
 
 			await logError(env, 'worker.local_ai.response_json_failed', 'Failed to parse local AI response JSON', jsonResult.error, {
 				source: article.source,
@@ -3428,6 +3525,21 @@ async function classifyAndSummarizeArticleWithLocalAi(
 		const durationMs = typeof data.duration_ms === 'number' ? data.duration_ms : Date.now() - startedAt;
 		const aiModel = data.ai_model || data.model || config.localAiModel;
 
+		await logInfo(env, 'worker.local_ai.diagnostics.review_success', 'Local AI review returned a usable decision', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			decision: aiDecision.decision,
+			category: aiDecision.category,
+			positivityScore: aiDecision.positivity_score,
+			localAiModel: aiModel,
+			attempt,
+			promptTokens: usage.promptTokens,
+			completionTokens: usage.completionTokens,
+			totalTokens: usage.totalTokens,
+			durationMs,
+		});
+
 		await logInfo(env, 'worker.local_ai.article_reviewed', 'Local AI reviewed article', {
 			source: article.source,
 			title: article.title,
@@ -3447,6 +3559,14 @@ async function classifyAndSummarizeArticleWithLocalAi(
 	}
 
 	if (config.aiProviderFallbackToOpenAi) {
+		await logWarn(env, 'worker.local_ai.diagnostics.review_fallback_to_openai', 'Local AI review diagnostics show fallback to OpenAI after local attempts failed', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+			lastFailureReason,
+		});
+
 		await logWarn(env, 'worker.local_ai.fallback_to_openai', 'Falling back to OpenAI after local AI review retries failed', {
 			source: article.source,
 			title: article.title,
@@ -3458,6 +3578,15 @@ async function classifyAndSummarizeArticleWithLocalAi(
 		return classifyAndSummarizeArticle(env, config, article);
 	}
 
+	await logWarn(env, 'worker.local_ai.diagnostics.review_failed_no_fallback', 'Local AI review diagnostics show no fallback was available after local attempts failed', {
+		source: article.source,
+		title: article.title,
+		articleUrl: article.url,
+		maxAttempts: AI_REVIEW_RETRY_ATTEMPTS,
+		lastFailureReason,
+		lastDurationMs,
+	});
+
 	return buildRejectedAiClassificationResult(config, lastFailureReason, emptyOpenAiUsage(), 'local', config.localAiModel, lastDurationMs);
 }
 
@@ -3467,6 +3596,18 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 	article: RssArticle,
 ): Promise<AiClassificationResult> {
 	if (hasLocalAiReviewConfig(config)) {
+		await logInfo(env, 'worker.local_ai.diagnostics.review_provider_selected', 'Local AI review provider selected', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			aiProvider: config.aiProvider,
+			providerOrder: getAiReviewProviderOrder(config),
+			localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+			localAiReviewUrl: getLocalAiReviewUrl(config),
+			localAiModel: config.localAiModel,
+			openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+		});
+
 		await logInfo(env, 'worker.local_ai.review_attempting', 'Trying local AI article review before OpenAI fallback', {
 			source: article.source,
 			title: article.title,
@@ -3480,6 +3621,18 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 	}
 
 	if (config.localAiUrl || config.localAiApiKey) {
+		await logWarn(env, 'worker.local_ai.diagnostics.review_skipped_missing_config', 'Local AI review provider was not selected because config is incomplete', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			aiProvider: config.aiProvider,
+			providerOrder: getAiReviewProviderOrder(config),
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+			localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+			openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+		});
+
 		await logWarn(env, 'worker.local_ai.review_skipped_missing_config', 'Skipped local AI article review because LOCAL_AI_URL or LOCAL_AI_API_KEY is missing', {
 			source: article.source,
 			title: article.title,
@@ -3557,7 +3710,25 @@ async function translateArticleSummaryWithLocalAi(
 
 	const localAiApiKey = getSafeHeaderValue(config.localAiApiKey);
 
+	await logInfo(env, 'worker.local_ai.diagnostics.translation_start', 'Local AI translation diagnostic started', {
+		articleUrl: article.original_url,
+		title: article.title,
+		languageCode,
+		localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+		localAiTranslateUrl: getLocalAiTranslateUrl(config),
+		localAiModel: config.localAiModel,
+		hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		localAiApiKeyHeaderUsable: Boolean(localAiApiKey),
+	});
+
 	if (!localAiApiKey) {
+		await logWarn(env, 'worker.local_ai.diagnostics.translation_invalid_api_key', 'Local AI translation diagnostic found an unusable API key header', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		});
+
 		await logWarn(env, 'worker.translation.local.invalid_api_key_header', 'Skipped local summary translation because LOCAL_AI_API_KEY is blank or contains invalid header characters', {
 			articleUrl: article.original_url,
 			languageCode,
@@ -3570,6 +3741,16 @@ async function translateArticleSummaryWithLocalAi(
 
 	for (let attempt = 1; attempt <= SUMMARY_TRANSLATION_RETRY_ATTEMPTS; attempt += 1) {
 		let response: Response;
+
+		await logInfo(env, 'worker.local_ai.diagnostics.translation_fetch_start', 'Local AI translation fetch attempt started', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			localAiTranslateUrl: getLocalAiTranslateUrl(config),
+			localAiModel: config.localAiModel,
+			attempt,
+			maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+		});
 
 		try {
 			response = await fetch(getLocalAiTranslateUrl(config), {
@@ -3590,6 +3771,17 @@ async function translateArticleSummaryWithLocalAi(
 				}),
 			});
 		} catch (error) {
+			await logWarn(env, 'worker.local_ai.diagnostics.translation_fetch_exception', 'Local AI translation fetch attempt threw before receiving a response', {
+				articleUrl: article.original_url,
+				title: article.title,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				localAiTranslateUrl: getLocalAiTranslateUrl(config),
+				errorMessage: getErrorMessage(error),
+				durationMs: Date.now() - startedAt,
+			});
+
 			await logWarn(env, 'worker.translation.local.request_exception', 'Local summary translation request threw an exception', {
 				articleUrl: article.original_url,
 				languageCode,
@@ -3607,6 +3799,18 @@ async function translateArticleSummaryWithLocalAi(
 		if (!response.ok) {
 			const errorText = await readResponseTextSafely(response);
 
+			await logWarn(env, 'worker.local_ai.diagnostics.translation_fetch_failed_status', 'Local AI translation fetch returned a non-OK response', {
+				status: response.status,
+				statusText: response.statusText,
+				articleUrl: article.original_url,
+				title: article.title,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			});
+
 			await logWarn(env, 'worker.translation.local.request_failed', 'Local summary translation request failed', {
 				status: response.status,
 				articleUrl: article.original_url,
@@ -3621,9 +3825,30 @@ async function translateArticleSummaryWithLocalAi(
 			continue;
 		}
 
+		await logInfo(env, 'worker.local_ai.diagnostics.translation_fetch_response', 'Local AI translation fetch returned OK', {
+			status: response.status,
+			statusText: response.statusText,
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			attempt,
+			maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+			durationMs: Date.now() - startedAt,
+		});
+
 		const jsonResult = await readResponseJsonSafely<LocalAiTranslationResponse>(response);
 
 		if (!jsonResult.ok) {
+			await logWarn(env, 'worker.local_ai.diagnostics.translation_response_json_failed', 'Local AI translation response was not parseable JSON', {
+				articleUrl: article.original_url,
+				title: article.title,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				errorMessage: getErrorMessage(jsonResult.error),
+				durationMs: Date.now() - startedAt,
+			});
+
 			await logWarn(env, 'worker.translation.local.response_json_failed', 'Failed to parse local translation response JSON', {
 				articleUrl: article.original_url,
 				languageCode,
@@ -3642,6 +3867,17 @@ async function translateArticleSummaryWithLocalAi(
 		const rawSummary = typeof data.summary === 'string' ? data.summary : '';
 
 		if (!normalizeTextWhitespace(rawTitle) || !normalizeTextWhitespace(rawSummary)) {
+			await logWarn(env, 'worker.local_ai.diagnostics.translation_invalid_payload', 'Local AI translation response was JSON but missed title or summary', {
+				articleUrl: article.original_url,
+				title: article.title,
+				languageCode,
+				attempt,
+				maxAttempts: SUMMARY_TRANSLATION_RETRY_ATTEMPTS,
+				hasTitle: Boolean(normalizeTextWhitespace(rawTitle)),
+				hasSummary: Boolean(normalizeTextWhitespace(rawSummary)),
+				durationMs: Date.now() - startedAt,
+			});
+
 			await logWarn(env, 'worker.translation.local.invalid_payload', 'Local summary translation response missed title or summary', {
 				articleUrl: article.original_url,
 				languageCode,
@@ -3656,6 +3892,18 @@ async function translateArticleSummaryWithLocalAi(
 
 		const parsedSummary = normalizeLocalizedSummaryDecision(data, languageCode, article.title, article.ai_summary);
 		const model = data.ai_model || data.model || config.localAiModel;
+
+		await logInfo(env, 'worker.local_ai.diagnostics.translation_success', 'Local AI translation returned a usable summary', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			model,
+			attempt,
+			promptTokens: typeof data.prompt_tokens === 'number' ? data.prompt_tokens : 0,
+			completionTokens: typeof data.completion_tokens === 'number' ? data.completion_tokens : 0,
+			totalTokens: typeof data.total_tokens === 'number' ? data.total_tokens : 0,
+			durationMs: Date.now() - startedAt,
+		});
 
 		await logInfo(env, 'worker.translation.local.article_summary_translated', 'Translated article summary with local AI', {
 			articleUrl: article.original_url,
@@ -3864,6 +4112,16 @@ async function translateArticleSummary(
 	languageCode: SummaryLanguageCode,
 ): Promise<ArticleSummaryInsert | null> {
 	if (hasLocalAiTranslationConfig(config)) {
+		await logInfo(env, 'worker.local_ai.diagnostics.translation_provider_selected', 'Local AI translation provider selected', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			providerOrder: getSummaryTranslationProviderOrder(config),
+			localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+			localAiTranslateUrl: getLocalAiTranslateUrl(config),
+			localAiModel: config.localAiModel,
+		});
+
 		await logInfo(env, 'worker.translation.local.attempting', 'Trying local AI summary translation before OpenAI fallback', {
 			articleUrl: article.original_url,
 			title: article.title,
@@ -3883,7 +4141,24 @@ async function translateArticleSummary(
 			title: article.title,
 			languageCode,
 		});
+
+		await logWarn(env, 'worker.local_ai.diagnostics.translation_fallback_to_openai', 'Local AI translation diagnostics show fallback to OpenAI', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			providerOrder: getSummaryTranslationProviderOrder(config),
+		});
 	} else {
+		await logWarn(env, 'worker.local_ai.diagnostics.translation_skipped_missing_config', 'Local AI translation provider was not selected because config is incomplete', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			providerOrder: getSummaryTranslationProviderOrder(config),
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+			localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+		});
+
 		await logWarn(env, 'worker.translation.local.skipped_missing_config', 'Skipped local AI summary translation because LOCAL_AI_URL or LOCAL_AI_API_KEY is missing', {
 			articleUrl: article.original_url,
 			title: article.title,
@@ -5065,6 +5340,29 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const shardIndex = getShardIndex(env);
 	const feedsPerShard = getFeedsPerShard(env);
 
+	await logInfo(env, 'worker.local_ai.diagnostics.config', 'Local AI diagnostic config snapshot for this Worker invocation', {
+		shardIndex,
+		feedsPerShard,
+		maxAiReviews,
+		runSource: options.runSource ?? 'unknown',
+		requestId: options.requestId ?? null,
+		aiProvider: config.aiProvider,
+		aiProviderRaw: env.AI_PROVIDER ?? null,
+		aiReviewProviderOrder: getAiReviewProviderOrder(config),
+		translationProviderOrder: getSummaryTranslationProviderOrder(config),
+		localAiEndpoint: describeLocalAiEndpoint(config.localAiUrl),
+		hasLocalAiUrl: Boolean(config.localAiUrl),
+		hasLocalAiApiKey: Boolean(config.localAiApiKey),
+		localAiApiKeyHeaderUsable: Boolean(getSafeHeaderValue(config.localAiApiKey)),
+		localAiReviewConfigured: hasLocalAiReviewConfig(config),
+		localAiTranslationConfigured: hasLocalAiTranslationConfig(config),
+		localAiModel: config.localAiModel,
+		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+		aiReviewConcurrency: config.aiReviewConcurrency,
+		enabledSummaryLanguages: config.enabledSummaryLanguages,
+		summaryTranslationLimit: config.summaryTranslationLimit,
+	});
+
 	await logInfo(env, 'worker.refresh.started', 'NutsNews Worker refresh started', {
 		shardIndex,
 		feedsPerShard,
@@ -5544,12 +5842,20 @@ export default {
 				shardIndex: getShardIndex(env),
 			});
 
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'manual',
+				path: url.pathname,
+				flushReason: 'log_test',
+				durationMs: Date.now() - requestStartedAt,
+			});
+
 			return Response.json({
 				ok: true,
-				message: 'Worker Better Stack test log emitted.',
+				message: 'Worker Better Stack test log buffered and flushed once.',
 				searchInBetterStackFor: {
 					service: 'nutsnews-worker',
-					event: 'worker.log_test.completed',
+					event: 'worker.logs.flushed',
 					level: 'info',
 					shardIndex: getShardIndex(env),
 				},
@@ -5581,6 +5887,14 @@ export default {
 				windowSeconds: rateLimit.windowSeconds,
 			});
 
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'manual',
+				path: url.pathname,
+				flushReason: 'manual_rate_limited',
+				durationMs: Date.now() - requestStartedAt,
+			});
+
 			return Response.json(
 				{
 					message: 'Manual NutsNews refresh rate limit reached. Try again later.',
@@ -5601,6 +5915,14 @@ export default {
 				requestId,
 				shardIndex: getShardIndex(env),
 				lockKey: workerLock.key,
+			});
+
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'manual',
+				path: url.pathname,
+				flushReason: 'manual_lock_skipped',
+				durationMs: Date.now() - requestStartedAt,
 			});
 
 			return Response.json({
@@ -5669,6 +5991,13 @@ export default {
 			);
 		} finally {
 			await releaseRedisLock(env, workerLock);
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'manual',
+				path: url.pathname,
+				flushReason: 'manual_request_finished',
+				durationMs: Date.now() - requestStartedAt,
+			});
 		}
 	},
 
@@ -5688,6 +6017,13 @@ export default {
 				requestId,
 				shardIndex: getShardIndex(env),
 				lockKey: workerLock.key,
+			});
+
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'scheduled',
+				flushReason: 'scheduled_lock_skipped',
+				durationMs: Date.now() - requestStartedAt,
 			});
 
 			return;
@@ -5723,6 +6059,12 @@ export default {
 			throw error;
 		} finally {
 			await releaseRedisLock(env, workerLock);
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'scheduled',
+				flushReason: 'scheduled_finished',
+				durationMs: Date.now() - requestStartedAt,
+			});
 		}
 	},
 };
