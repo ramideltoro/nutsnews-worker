@@ -26,6 +26,8 @@ const optionalShardVars = Object.fromEntries(
 		'AI_PROVIDER_FALLBACK_TO_OPENAI',
 		'AI_REVIEW_CONCURRENCY',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
+		'PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT',
+		'PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS',
 		'UPSTASH_REDIS_ENABLED',
 		'UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS',
 		'UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS',
@@ -129,7 +131,7 @@ for (let index = 0; index < shardCount; index += 1) {
 }
 
 const localAiSummary = process.env.LOCAL_AI_URL ? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? 'true'}.` : (process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '');
-const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
+const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled for Worker state and public feed edge snapshots.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 const translationSummary = ` Summary translations: languages=${defaultTranslationVars.ENABLED_SUMMARY_LANGUAGES}, limit=${defaultTranslationVars.SUMMARY_TRANSLATION_LIMIT}, hold=${defaultTranslationVars.HOLD_ARTICLES_FOR_TRANSLATIONS}.`;
 

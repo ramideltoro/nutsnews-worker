@@ -1,53 +1,75 @@
-# Public Feed Snapshot
+# Public Feed Snapshot and Edge Fallback
 
-Issue #8 adds a stable optimized data source for the public homepage and `/api/articles`.
+NutsNews uses two snapshot layers for the public feed:
 
-The snapshot reduces repeated database work by precomputing the public article card feed in Supabase and letting the web app read that smaller, ordered data source first.
+1. **Supabase materialized snapshot**: the normal fast read path for the homepage and `/api/articles`.
+2. **Cloudflare KV edge snapshot**: a last-known-good fallback served by the Worker if Supabase public feed reads fail.
+
+Issue #104 adds the second layer. Supabase remains the source of truth; KV only stores a compact public copy of recent article cards for outages.
 
 ---
 
-## What Was Added
+## Why This Exists
 
-The migration creates:
+The public feed should stay readable during temporary Supabase or API failures.
+
+The edge fallback also reduces risk during incidents because the public site can still return a small, cached article list instead of failing closed.
+
+---
+
+## Read Path
+
+Normal reader request:
 
 ```text
-public.public_feed_snapshot
-public.refresh_public_feed_snapshot()
+1. /api/articles
+2. public.public_feed_snapshot in Supabase
+3. public.articles fallback in Supabase
 ```
 
-`public.public_feed_snapshot` is a materialized view. It contains only public, published, image-backed article card fields.
+Outage fallback request:
 
-The Worker refreshes the snapshot after each ingestion run by calling:
+```text
+1. /api/articles
+2. Supabase snapshot read fails
+3. Supabase articles fallback fails or returns no rows
+4. Web app fetches Cloudflare Worker /public-feed-snapshot
+5. Worker serves last-known-good snapshot from Cloudflare KV
+```
+
+The homepage uses the same edge-aware helper for its initial article load and category sections.
+
+---
+
+## Write Path
+
+After an ingestion or translation run, the Worker refreshes the Supabase materialized snapshot:
 
 ```text
 /rest/v1/rpc/refresh_public_feed_snapshot
 ```
 
-The web app serves the homepage and `/api/articles` from the snapshot when possible. If the snapshot is missing or temporarily unavailable, the code falls back to the original `public.articles` query.
-
----
-
-## Why a Materialized View
-
-The snapshot belongs in Supabase as a materialized view because it gives NutsNews:
-
-* a stable optimized read source for the homepage
-* a precomputed sort order
-* less repeated filtering on `articles`
-* less repeated sorting by `published_on_site_at`
-* a direct SQL object that can be validated after restore
-* a safe fallback path in application code
-
-This is a good fit for the current architecture because the article feed changes on Worker refresh cadence, not every millisecond.
-
----
-
-## Snapshot Contents
-
-The snapshot includes:
+If `NUTSNEWS_KV` is bound to the Worker, the Worker then reads the newest rows from `public.public_feed_snapshot` and writes one compact JSON document to KV:
 
 ```text
-snapshot_rank
+public-feed:snapshot:v1:latest
+```
+
+The KV snapshot includes:
+
+```text
+version
+updatedAt
+refreshedAt
+shardIndex
+articleCount
+maxArticles
+articles[]
+```
+
+Each article contains only public card fields:
+
+```text
 id
 source
 title
@@ -60,159 +82,198 @@ category
 positivity_score
 ```
 
-It only includes rows where:
-
-```sql
-status = 'published'
-image_url is not null
-btrim(image_url) <> ''
-```
-
 ---
 
-## Freshness Window
+## Worker Endpoints
 
-The snapshot is refreshed by the Worker after article saves.
-
-Current freshness model:
-
-```text
-RSS ingestion cadence + Worker duration + CDN cache window
-```
-
-The public API and homepage already use cache headers with a short public cache window, so new articles should appear within the normal Worker/CDN freshness window.
-
----
-
-## Web Read Path
-
-The web app tries this order:
-
-```text
-1. public.public_feed_snapshot
-2. fallback to public.articles
-```
-
-The response from `/api/articles` includes these headers:
-
-```text
-X-NutsNews-Article-Data-Source: public_feed_snapshot | articles_fallback
-X-NutsNews-Feed-Snapshot: hit | fallback
-```
-
-Use this to confirm whether the optimized path is active.
-
----
-
-## Test the Snapshot
-
-After applying the migration:
+### Public feed fallback
 
 ```bash
-supabase db push
+curl -i "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot?page=0&pageSize=5"
 ```
 
-Run this in Supabase SQL Editor:
+Optional category filter:
 
-```sql
-select
-  snapshot_rank,
-  id,
-  source,
-  title,
-  published_on_site_at
-from public.public_feed_snapshot
-order by snapshot_rank asc
-limit 10;
+```bash
+curl -i "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot?page=0&pageSize=5&category=Science"
 ```
 
-Manually refresh:
+### Snapshot status
 
-```sql
-select public.refresh_public_feed_snapshot();
-```
-
-Check row count:
-
-```sql
-select count(*) as snapshot_articles
-from public.public_feed_snapshot;
+```bash
+curl -i "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status"
 ```
 
 ---
 
-## Test the API
+## Response Headers
 
-Local or production:
+`/api/articles` now exposes the active data source:
 
-```bash
-curl -I "http://localhost:3000/api/articles?page=0"
+```text
+X-NutsNews-Article-Data-Source: public_feed_snapshot | articles_fallback | edge_feed_snapshot
+X-NutsNews-Feed-Snapshot: hit | fallback | edge-fallback
+X-NutsNews-Edge-Snapshot: not-used | hit | miss | error
+X-NutsNews-Edge-Snapshot-Updated-At: 2026-07-01T00:00:00.000Z
+X-NutsNews-Edge-Snapshot-Age-Seconds: 120
+X-NutsNews-Edge-Snapshot-Article-Count: 120
+X-NutsNews-Edge-Snapshot-Version: 1
 ```
 
-Expected optimized headers:
+The Worker fallback endpoint exposes the same edge snapshot age headers.
+
+---
+
+## Admin Visibility
+
+The admin portal includes:
+
+```text
+/admin/edge-snapshot
+```
+
+Use it to check:
+
+- whether the web app has an edge snapshot endpoint configured
+- whether the Worker has a KV snapshot available
+- snapshot age
+- article count
+- snapshot version
+- configured endpoint
+
+---
+
+## Environment Variables
+
+### Web / Vercel
+
+Set this to one deployed Worker endpoint. Shard 0 is enough because the KV namespace is shared across shards.
+
+```bash
+NUTSNEWS_EDGE_FEED_SNAPSHOT_URL="https://nutsnews-worker-0.nutsnews.workers.dev"
+```
+
+The code also accepts the older alias:
+
+```bash
+NUTSNEWS_EDGE_SNAPSHOT_URL="https://nutsnews-worker-0.nutsnews.workers.dev"
+```
+
+### Worker / Cloudflare
+
+Create and bind a KV namespace:
+
+```bash
+cd worker
+npx wrangler kv namespace create NUTSNEWS_KV
+```
+
+Then generate Worker configs with the namespace id:
+
+```bash
+export NUTSNEWS_KV_NAMESPACE_ID="paste_namespace_id_here"
+export PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT=120
+export PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS=604800
+npm run generate:wrangler
+```
+
+Deploy the Workers:
+
+```bash
+npm run deploy:all
+```
+
+---
+
+## Invalidation and Update Rules
+
+The edge snapshot updates after successful Worker refreshes.
+
+Recommended defaults:
+
+```text
+PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT=120
+PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS=604800
+```
+
+Rules:
+
+- Supabase is still the source of truth.
+- KV is overwritten after each successful public snapshot refresh.
+- KV stores a bounded number of article cards, not the whole archive.
+- KV TTL protects against serving very old data forever.
+- The API only uses KV when the normal Supabase paths cannot serve the feed.
+
+---
+
+## Verification
+
+Check the Worker has a snapshot:
+
+```bash
+curl -i "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status"
+```
+
+Check the public API normal path:
+
+```bash
+curl -I "https://nutsnews.com/api/articles?page=0"
+```
+
+Expected normal headers:
 
 ```text
 X-NutsNews-Article-Data-Source: public_feed_snapshot
 X-NutsNews-Feed-Snapshot: hit
+X-NutsNews-Edge-Snapshot: not-used
 ```
 
-If the migration has not been applied yet, the API should still work and show:
+During a Supabase read incident, expected fallback headers:
 
 ```text
-X-NutsNews-Article-Data-Source: articles_fallback
-X-NutsNews-Feed-Snapshot: fallback
+X-NutsNews-Article-Data-Source: edge_feed_snapshot
+X-NutsNews-Feed-Snapshot: edge-fallback
+X-NutsNews-Edge-Snapshot: hit
+X-NutsNews-Edge-Snapshot-Age-Seconds: <number>
 ```
+
+Run the mocked web regression test:
+
+```bash
+cd web
+npm run test:e2e:offline
+```
+
+The test includes a mocked Supabase outage and verifies `/api/articles` can recover from the edge snapshot fallback.
 
 ---
 
-## Test the Worker Refresh
+## Troubleshooting
 
-Run a small Worker check:
+### `/admin/edge-snapshot` says unconfigured
+
+Set this in Vercel:
+
+```bash
+NUTSNEWS_EDGE_FEED_SNAPSHOT_URL="https://nutsnews-worker-0.nutsnews.workers.dev"
+```
+
+Redeploy the web app.
+
+### Worker status returns 503
+
+The Worker probably does not have `NUTSNEWS_KV` bound. Create the namespace, export `NUTSNEWS_KV_NAMESPACE_ID`, regenerate Wrangler configs, and redeploy.
+
+### Worker status returns 404
+
+KV is bound, but no snapshot has been written yet. Run a small Worker refresh:
 
 ```bash
 curl "https://nutsnews-worker-0.nutsnews.workers.dev/?limit=1"
 ```
 
-Expected response field:
+Then check `/public-feed-snapshot/status` again.
 
-```text
-publicFeedSnapshotRefreshOk: true
-```
+### API never uses the edge snapshot
 
-If it is `false`, check that the Supabase migration was applied and that the service role can execute `public.refresh_public_feed_snapshot()`.
-
----
-
-## Restore Validation
-
-The restore validation script now checks that the materialized view exists and that it has rows:
-
-```bash
-RESTORE_DATABASE_URL="postgresql://..." ./scripts/validate_supabase_restore.sh
-```
-
-The validation SQL lives in:
-
-```text
-supabase/restore_validation.sql
-```
-
----
-
-## Operational Notes
-
-If the snapshot becomes stale:
-
-```sql
-select public.refresh_public_feed_snapshot();
-```
-
-If the snapshot is missing, the homepage and API should continue serving from `public.articles` through the fallback path.
-
-If the API is unexpectedly using fallback after migration:
-
-1. Confirm `public.public_feed_snapshot` exists.
-2. Confirm the materialized view has rows.
-3. Run `select public.refresh_public_feed_snapshot();`.
-4. Recheck `/api/articles?page=0` response headers.
-5. Confirm Supabase anon role can select from the materialized view.
+That is normal while Supabase is healthy. The edge snapshot is a fallback, not the primary path.

@@ -74,6 +74,7 @@ Common entry points:
 | Feed health | `/admin/feed-health` |
 | Feed management | `/admin/feeds` |
 | Free-tier guardrails | `/admin/guardrails` |
+| Edge snapshot | `/admin/edge-snapshot` |
 
 ---
 
@@ -88,6 +89,7 @@ NutsNews includes:
 - OpenAI fallback support
 - Cloudflare Worker shard processing
 - Supabase public feed snapshots
+- Cloudflare KV edge feed snapshot fallback
 - Protected admin dashboards
 - CDN caching and image delivery controls
 - Better Stack, Sentry, UptimeRobot, Grafana, Lighthouse, PageSpeed, and accessibility documentation

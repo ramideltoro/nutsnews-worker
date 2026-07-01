@@ -88,6 +88,7 @@ check_http_ok "Article API" "$trimmed_site_url/api/articles?page=0"
 check_contains "Article API shape" "$trimmed_site_url/api/articles?page=0" "articles"
 check_header_contains "Article API snapshot data source" "$trimmed_site_url/api/articles?page=0" "x-nutsnews-article-data-source"
 check_header_contains "Article API snapshot status" "$trimmed_site_url/api/articles?page=0" "x-nutsnews-feed-snapshot"
+check_header_contains "Article API edge snapshot marker" "$trimmed_site_url/api/articles?page=0" "x-nutsnews-edge-snapshot"
 
 if [[ -n "$ARTICLE_PATH" ]]; then
   if [[ "$ARTICLE_PATH" == http* ]]; then
@@ -123,4 +124,5 @@ echo "Next manual checks:"
 echo "  Better Stack: service:nutsnews-web, service:nutsnews-worker, service:nutsnews-controller"
 echo "  Sentry: latest frontend/server/Worker/controller errors"
 echo "  Admin: /admin/shards, /admin/feed-health, /admin/ai-usage"
-echo "  Article API snapshot headers: X-NutsNews-Article-Data-Source, X-NutsNews-Feed-Snapshot"
+echo "  Article API snapshot headers: X-NutsNews-Article-Data-Source, X-NutsNews-Feed-Snapshot, X-NutsNews-Edge-Snapshot"
+echo "  Edge snapshot admin: /admin/edge-snapshot"

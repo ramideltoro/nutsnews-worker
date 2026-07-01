@@ -253,6 +253,7 @@ Expected optimized headers after the migration is applied and the snapshot is re
 ```text
 X-NutsNews-Article-Data-Source: public_feed_snapshot
 X-NutsNews-Feed-Snapshot: hit
+X-NutsNews-Edge-Snapshot: not-used
 ```
 
 ### Worker shard
@@ -541,6 +542,33 @@ docs/RSS_SOURCE_QUALITY.md
 ```
 
 
+
+
+### Public feed edge snapshot fallback
+
+The Worker can store a compact last-known-good public feed in Cloudflare KV and serve it from:
+
+```bash
+curl -i "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status"
+```
+
+The web app uses this endpoint only when the Supabase snapshot and source-table fallback cannot serve `/api/articles`. Check `/admin/edge-snapshot` for age, article count, version, and endpoint readiness.
+
+Required web environment variable:
+
+```bash
+NUTSNEWS_EDGE_FEED_SNAPSHOT_URL="https://nutsnews-worker-0.nutsnews.workers.dev"
+```
+
+Required Worker setup:
+
+```bash
+cd worker
+npx wrangler kv namespace create NUTSNEWS_KV
+export NUTSNEWS_KV_NAMESPACE_ID="paste_namespace_id_here"
+npm run generate:wrangler
+npm run deploy:all
+```
 
 ### Refresh public feed snapshot
 

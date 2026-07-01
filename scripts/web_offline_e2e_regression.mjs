@@ -84,6 +84,7 @@ const articleSummaries = [
 const emailDeliveries = [];
 const quotaEvents = [];
 let nextQuotaEventId = 1;
+let supabaseOutageMode = false;
 
 function logStep(message) {
   console.log(`▶ ${message}`);
@@ -163,6 +164,14 @@ function createSupabaseMockServer() {
       }
 
       const url = new URL(request.url ?? "/", supabaseUrl);
+
+      if (
+        supabaseOutageMode &&
+        ["/rest/v1/public_feed_snapshot", "/rest/v1/articles", "/rest/v1/article_summaries"].includes(url.pathname)
+      ) {
+        json(response, 503, { error: "Mock Supabase outage for edge snapshot fallback test" });
+        return;
+      }
 
       if (url.pathname === "/rest/v1/public_feed_snapshot" && request.method === "HEAD") {
         response.writeHead(200, { "content-range": `0-0/${articles.length}` });
@@ -295,6 +304,70 @@ function createExternalMockServer() {
 
       const url = new URL(request.url ?? "/", mockExternalUrl);
 
+      if (url.pathname === "/public-feed-snapshot/status" && request.method === "GET") {
+        json(
+          response,
+          200,
+          {
+            enabled: true,
+            status: "hit",
+            updatedAt: "2026-06-28T02:00:00.000Z",
+            refreshedAt: "2026-06-28T01:59:00.000Z",
+            ageSeconds: 120,
+            articleCount: articles.length,
+            maxArticles: articles.length,
+            version: 1,
+            shardIndex: 0,
+          },
+          {
+            "x-nutsnews-edge-snapshot": "hit",
+            "x-nutsnews-edge-snapshot-updated-at": "2026-06-28T02:00:00.000Z",
+            "x-nutsnews-edge-snapshot-age-seconds": "120",
+            "x-nutsnews-edge-snapshot-article-count": String(articles.length),
+            "x-nutsnews-edge-snapshot-version": "1",
+          },
+        );
+        return;
+      }
+
+      if (url.pathname === "/public-feed-snapshot" && request.method === "GET") {
+        const page = Number(url.searchParams.get("page") ?? "0");
+        const pageSize = Number(url.searchParams.get("pageSize") ?? "5");
+        const category = (url.searchParams.get("category") ?? "").toLowerCase();
+        const filteredArticles = category
+          ? articles.filter((article) => article.category.toLowerCase().includes(category))
+          : articles;
+        const from = Math.max(0, page) * Math.max(1, pageSize);
+        const rows = filteredArticles.slice(from, from + Math.max(1, pageSize)).map(stripColumns);
+
+        json(
+          response,
+          200,
+          {
+            articles: rows,
+            nextPage: filteredArticles.length > from + pageSize ? page + 1 : null,
+            nextCursor: null,
+            dataSource: "edge_feed_snapshot",
+            languageCode: "en",
+            edgeSnapshot: {
+              status: "hit",
+              updatedAt: "2026-06-28T02:00:00.000Z",
+              ageSeconds: 120,
+              articleCount: articles.length,
+              version: 1,
+            },
+          },
+          {
+            "x-nutsnews-edge-snapshot": "hit",
+            "x-nutsnews-edge-snapshot-updated-at": "2026-06-28T02:00:00.000Z",
+            "x-nutsnews-edge-snapshot-age-seconds": "120",
+            "x-nutsnews-edge-snapshot-article-count": String(articles.length),
+            "x-nutsnews-edge-snapshot-version": "1",
+          },
+        );
+        return;
+      }
+
       if ((url.pathname === "/images/super-puff.png" || url.pathname === "/images/community-garden.png") && request.method === "GET") {
         const png = Buffer.from(
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -399,6 +472,7 @@ function startNextDev() {
       AUTH_SECRET: "offline-e2e-auth-secret-not-for-production",
       NEXTAUTH_URL: webUrl,
       NEXT_PUBLIC_APP_ENV: "offline-e2e",
+      NUTSNEWS_EDGE_FEED_SNAPSHOT_URL: mockExternalUrl,
     },
   });
 
@@ -595,6 +669,20 @@ async function runBrowserChecks() {
   await expect(page.getByText(articleSummaries[0].title).first()).toBeVisible({ timeout: 10000 });
   await expect(page.locator("html")).toHaveAttribute("lang", "fr");
   logOk("French language change rendered translated articles");
+
+  logStep("Verifying /api/articles falls back to the edge snapshot during a Supabase outage");
+  supabaseOutageMode = true;
+  const fallbackResponse = await page.request.get(`/api/articles?page=0&category=Science&edgeFallbackTest=${runId}`);
+  expect(fallbackResponse.ok()).toBeTruthy();
+  const fallbackHeaders = fallbackResponse.headers();
+  expect(fallbackHeaders["x-nutsnews-article-data-source"]).toBe("edge_feed_snapshot");
+  expect(fallbackHeaders["x-nutsnews-feed-snapshot"]).toBe("edge-fallback");
+  expect(fallbackHeaders["x-nutsnews-edge-snapshot"]).toBe("hit");
+  const fallbackPayload = await fallbackResponse.json();
+  expect(fallbackPayload.articles.length).toBeGreaterThan(0);
+  expect(fallbackPayload.articles[0].title).toContain(runId);
+  supabaseOutageMode = false;
+  logOk("Article API recovered from the mocked edge snapshot fallback");
 
   await browser.close();
 }

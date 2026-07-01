@@ -35,6 +35,8 @@ type Env = {
 	HOLD_ARTICLES_FOR_TRANSLATIONS?: string;
 	NUTSNEWS_KV?: KVNamespace;
 	KV_RECENT_PROCESSED_URL_LIMIT?: string;
+	PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT?: string;
+	PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS?: string;
 	UPSTASH_REDIS_REST_URL?: MaybeSecretBinding;
 	UPSTASH_REDIS_REST_TOKEN?: MaybeSecretBinding;
 	UPSTASH_REDIS_ENABLED?: string;
@@ -133,6 +135,36 @@ type ReviewedUrlRow = {
 
 type PublishedArticleUrlRow = {
 	original_url: string;
+};
+
+type PublicFeedEdgeSnapshotArticle = {
+	id: string;
+	source: string;
+	title: string;
+	original_url: string;
+	image_url: string | null;
+	published_at: string | null;
+	published_on_site_at: string | null;
+	ai_summary: string | null;
+	category: string | null;
+	positivity_score: number | null;
+};
+
+type PublicFeedEdgeSnapshot = {
+	version: number;
+	updatedAt: string;
+	refreshedAt: string | null;
+	shardIndex: number;
+	articleCount: number;
+	maxArticles: number;
+	articles: PublicFeedEdgeSnapshotArticle[];
+};
+
+type PublicFeedSnapshotRefreshResult = {
+	publicFeedSnapshotRefreshOk: boolean;
+	publicFeedEdgeSnapshotPublishOk: boolean;
+	publicFeedEdgeSnapshotArticleCount: number;
+	publicFeedSnapshotRefreshedAt: string | null;
 };
 
 type FeedHealthSnapshotRow = {
@@ -426,6 +458,9 @@ type RefreshResult = {
 	articleSummaryPublishCount: number;
 	articleSummaryPublishOk: boolean;
 	publicFeedSnapshotRefreshOk: boolean;
+	publicFeedEdgeSnapshotPublishOk: boolean;
+	publicFeedEdgeSnapshotArticleCount: number;
+	publicFeedSnapshotRefreshedAt: string | null;
 	feedHealthSaveOk: boolean;
 	aiUsageSaveOk: boolean;
 	workerRunSaveOk: boolean;
@@ -473,6 +508,9 @@ type TranslationBacklogResult = {
 	articleSummaryPublishCount: number;
 	articleSummaryPublishOk: boolean;
 	publicFeedSnapshotRefreshOk: boolean;
+	publicFeedEdgeSnapshotPublishOk: boolean;
+	publicFeedEdgeSnapshotArticleCount: number;
+	publicFeedSnapshotRefreshedAt: string | null;
 	durationMs: number;
 };
 
@@ -515,6 +553,13 @@ const DEFAULT_KV_RECENT_PROCESSED_URL_LIMIT = 2000;
 const HARD_MAX_KV_RECENT_PROCESSED_URL_LIMIT = 5000;
 const KV_RECENT_PROCESSED_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
+const PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION = 1;
+const PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY = `public-feed:snapshot:v${PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION}:latest`;
+const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 120;
+const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 250;
+const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60;
+const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 30 * 24 * 60 * 60;
+const PUBLIC_FEED_EDGE_SNAPSHOT_SELECT = 'id,source,title,original_url,image_url,published_at,published_on_site_at,ai_summary,category,positivity_score';
 const DEFAULT_UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS = 10 * 60;
 const DEFAULT_UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS = 30 * 60;
 const DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX = 20;
@@ -1012,6 +1057,297 @@ async function readKvStatus(env: Env) {
 				}
 			: null,
 	};
+}
+
+function getPublicFeedEdgeSnapshotLimit(env: Env) {
+	return Math.min(
+		Math.max(
+			Math.floor(getOptionalNumber(env.PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT, DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT)),
+			5,
+		),
+		HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT,
+	);
+}
+
+function getPublicFeedEdgeSnapshotTtlSeconds(env: Env) {
+	return Math.min(
+		Math.max(
+			Math.floor(getOptionalNumber(env.PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS, DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS)),
+			60 * 60,
+		),
+		HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS,
+	);
+}
+
+function getPublicFeedEdgeSnapshotAgeSeconds(snapshot: PublicFeedEdgeSnapshot | null) {
+	if (!snapshot?.updatedAt) {
+		return null;
+	}
+
+	const updatedAtMs = Date.parse(snapshot.updatedAt);
+
+	if (!Number.isFinite(updatedAtMs)) {
+		return null;
+	}
+
+	return Math.max(0, Math.floor((Date.now() - updatedAtMs) / 1000));
+}
+
+function buildPublicFeedEdgeSnapshotHeaders(snapshot: PublicFeedEdgeSnapshot | null, status: 'hit' | 'miss' | 'error') {
+	const headers: Record<string, string> = {
+		'Cache-Control': status === 'hit' ? 'public, max-age=60, s-maxage=300, stale-while-revalidate=3600' : 'no-store, max-age=0',
+		'Access-Control-Allow-Origin': '*',
+		'Access-Control-Allow-Methods': 'GET, OPTIONS',
+		'Access-Control-Allow-Headers': 'content-type, accept',
+		'Access-Control-Expose-Headers': 'X-NutsNews-Edge-Snapshot, X-NutsNews-Edge-Snapshot-Age-Seconds, X-NutsNews-Edge-Snapshot-Updated-At, X-NutsNews-Edge-Snapshot-Article-Count, X-NutsNews-Edge-Snapshot-Version',
+		'X-NutsNews-Edge-Snapshot': status,
+	};
+
+	if (snapshot) {
+		const ageSeconds = getPublicFeedEdgeSnapshotAgeSeconds(snapshot);
+		headers['X-NutsNews-Edge-Snapshot-Updated-At'] = snapshot.updatedAt;
+		headers['X-NutsNews-Edge-Snapshot-Article-Count'] = String(snapshot.articleCount);
+		headers['X-NutsNews-Edge-Snapshot-Version'] = String(snapshot.version);
+
+		if (typeof ageSeconds === 'number') {
+			headers['X-NutsNews-Edge-Snapshot-Age-Seconds'] = String(ageSeconds);
+		}
+	}
+
+	return headers;
+}
+
+function parsePublicFeedSnapshotPage(url: URL) {
+	const parsedPage = Number(url.searchParams.get('page') ?? '0');
+	return Number.isFinite(parsedPage) && parsedPage >= 0 ? Math.floor(parsedPage) : 0;
+}
+
+function parsePublicFeedSnapshotPageSize(url: URL) {
+	const parsedPageSize = Number(url.searchParams.get('pageSize') ?? url.searchParams.get('limit') ?? '5');
+	return Number.isFinite(parsedPageSize)
+		? Math.min(Math.max(Math.floor(parsedPageSize), 1), 50)
+		: 5;
+}
+
+function cleanPublicFeedSnapshotCategory(category?: string | null) {
+	const cleanedCategory = category?.trim();
+
+	if (!cleanedCategory || cleanedCategory.toLowerCase() === 'all') {
+		return null;
+	}
+
+	return cleanedCategory.toLowerCase();
+}
+
+function filterPublicFeedEdgeSnapshotArticles(snapshot: PublicFeedEdgeSnapshot, category?: string | null) {
+	const selectedCategory = cleanPublicFeedSnapshotCategory(category);
+
+	if (!selectedCategory) {
+		return snapshot.articles;
+	}
+
+	return snapshot.articles.filter((article) => (article.category ?? '').toLowerCase().includes(selectedCategory));
+}
+
+async function fetchPublicFeedSnapshotRowsForEdge(
+	env: Env,
+	config: RuntimeConfig,
+	limit: number,
+): Promise<PublicFeedEdgeSnapshotArticle[] | null> {
+	const startedAt = Date.now();
+	const requestUrl = new URL(`${config.supabaseUrl}/rest/v1/public_feed_snapshot`);
+	requestUrl.searchParams.set('select', PUBLIC_FEED_EDGE_SNAPSHOT_SELECT);
+	requestUrl.searchParams.set('order', 'snapshot_rank.asc');
+	requestUrl.searchParams.set('limit', String(limit));
+
+	let response: Response;
+
+	try {
+		response = await fetch(requestUrl.toString(), {
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				Accept: 'application/json',
+			},
+		});
+	} catch (error) {
+		await logWarn(env, 'worker.public_feed_edge_snapshot.source_read_exception', 'Failed to read public feed snapshot rows for KV edge snapshot', {
+			errorMessage: getErrorMessage(error),
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	if (!response.ok) {
+		const errorText = await readResponseTextSafely(response);
+		await logWarn(env, 'worker.public_feed_edge_snapshot.source_read_failed', 'Failed to read public feed snapshot rows for KV edge snapshot', {
+			status: response.status,
+			errorText,
+			durationMs: Date.now() - startedAt,
+		});
+		return null;
+	}
+
+	const rows = (await response.json()) as PublicFeedEdgeSnapshotArticle[];
+
+	await logInfo(env, 'worker.public_feed_edge_snapshot.source_read_ok', 'Loaded public feed snapshot rows for KV edge snapshot', {
+		articleCount: rows.length,
+		limit,
+		durationMs: Date.now() - startedAt,
+	});
+
+	return rows;
+}
+
+async function publishPublicFeedEdgeSnapshotToKv(
+	env: Env,
+	config: RuntimeConfig,
+	refreshedAt: string | null,
+): Promise<{ ok: boolean; articleCount: number }> {
+	if (!env.NUTSNEWS_KV) {
+		return { ok: false, articleCount: 0 };
+	}
+
+	const limit = getPublicFeedEdgeSnapshotLimit(env);
+	const articles = await fetchPublicFeedSnapshotRowsForEdge(env, config, limit);
+
+	if (!articles) {
+		return { ok: false, articleCount: 0 };
+	}
+
+	const snapshot: PublicFeedEdgeSnapshot = {
+		version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+		updatedAt: new Date().toISOString(),
+		refreshedAt,
+		shardIndex: getShardIndex(env),
+		articleCount: articles.length,
+		maxArticles: limit,
+		articles,
+	};
+
+	const ok = await writeJsonToKv(
+		env,
+		PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY,
+		snapshot,
+		getPublicFeedEdgeSnapshotTtlSeconds(env),
+	);
+
+	if (ok) {
+		await logInfo(env, 'worker.public_feed_edge_snapshot.published', 'Published public feed edge snapshot to Cloudflare KV', {
+			articleCount: snapshot.articleCount,
+			maxArticles: snapshot.maxArticles,
+			updatedAt: snapshot.updatedAt,
+			refreshedAt: snapshot.refreshedAt,
+		});
+	}
+
+	return { ok, articleCount: snapshot.articleCount };
+}
+
+async function readPublicFeedEdgeSnapshotFromKv(env: Env) {
+	const snapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY);
+
+	if (!snapshot || snapshot.version !== PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION || !Array.isArray(snapshot.articles)) {
+		return null;
+	}
+
+	return snapshot;
+}
+
+async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
+	if (url.pathname === '/public-feed-snapshot/status') {
+		const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);
+
+		if (!snapshot) {
+			return Response.json(
+				{
+					enabled: Boolean(env.NUTSNEWS_KV),
+					status: 'miss',
+					updatedAt: null,
+					ageSeconds: null,
+					articleCount: null,
+					version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+					message: env.NUTSNEWS_KV ? 'No public feed edge snapshot has been written yet.' : 'NUTSNEWS_KV is not bound to this Worker.',
+				},
+				{
+					status: env.NUTSNEWS_KV ? 404 : 503,
+					headers: buildPublicFeedEdgeSnapshotHeaders(null, 'miss'),
+				},
+			);
+		}
+
+		return Response.json(
+			{
+				enabled: true,
+				status: 'hit',
+				updatedAt: snapshot.updatedAt,
+				refreshedAt: snapshot.refreshedAt,
+				ageSeconds: getPublicFeedEdgeSnapshotAgeSeconds(snapshot),
+				articleCount: snapshot.articleCount,
+				maxArticles: snapshot.maxArticles,
+				version: snapshot.version,
+				shardIndex: snapshot.shardIndex,
+			},
+			{
+				headers: buildPublicFeedEdgeSnapshotHeaders(snapshot, 'hit'),
+			},
+		);
+	}
+
+	const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);
+
+	if (!snapshot) {
+		return Response.json(
+			{
+				articles: [],
+				nextPage: null,
+				nextCursor: null,
+				dataSource: 'edge_feed_snapshot',
+				languageCode: 'en',
+				error: env.NUTSNEWS_KV ? 'Public feed edge snapshot is not available yet.' : 'NUTSNEWS_KV is not bound to this Worker.',
+			},
+			{
+				status: env.NUTSNEWS_KV ? 404 : 503,
+				headers: buildPublicFeedEdgeSnapshotHeaders(null, 'miss'),
+			},
+		);
+	}
+
+	const page = parsePublicFeedSnapshotPage(url);
+	const pageSize = parsePublicFeedSnapshotPageSize(url);
+	const filteredArticles = filterPublicFeedEdgeSnapshotArticles(snapshot, url.searchParams.get('category'));
+	const from = page * pageSize;
+	const articles = filteredArticles.slice(from, from + pageSize);
+	const nextPage = filteredArticles.length > from + pageSize ? page + 1 : null;
+	const ageSeconds = getPublicFeedEdgeSnapshotAgeSeconds(snapshot);
+
+	return Response.json(
+		{
+			articles,
+			nextPage,
+			nextCursor: null,
+			dataSource: 'edge_feed_snapshot',
+			languageCode: 'en',
+			edgeSnapshot: {
+				status: 'hit',
+				updatedAt: snapshot.updatedAt,
+				ageSeconds,
+				articleCount: snapshot.articleCount,
+				version: snapshot.version,
+			},
+			snapshot: {
+				version: snapshot.version,
+				updatedAt: snapshot.updatedAt,
+				refreshedAt: snapshot.refreshedAt,
+				ageSeconds,
+				articleCount: snapshot.articleCount,
+				maxArticles: snapshot.maxArticles,
+			},
+		},
+		{
+			headers: buildPublicFeedEdgeSnapshotHeaders(snapshot, 'hit'),
+		},
+	);
 }
 
 function isUpstashRedisExplicitlyDisabled(env: Env) {
@@ -4959,7 +5295,7 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 	return true;
 }
 
-async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<boolean> {
+async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<PublicFeedSnapshotRefreshResult> {
 	const startedAt = Date.now();
 	let response: Response;
 
@@ -4985,7 +5321,12 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 			},
 		);
 
-		return false;
+		return {
+			publicFeedSnapshotRefreshOk: false,
+			publicFeedEdgeSnapshotPublishOk: false,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		};
 	}
 
 	if (!response.ok) {
@@ -4997,14 +5338,43 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 			durationMs: Date.now() - startedAt,
 		});
 
-		return false;
+		return {
+			publicFeedSnapshotRefreshOk: false,
+			publicFeedEdgeSnapshotPublishOk: false,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		};
+	}
+
+	let refreshedAt: string | null = null;
+
+	try {
+		const payload = (await response.clone().json()) as Array<Record<string, unknown>> | Record<string, unknown> | string | null;
+		const value = Array.isArray(payload)
+			? payload[0]?.refresh_public_feed_snapshot
+			: typeof payload === 'object' && payload
+				? payload.refresh_public_feed_snapshot
+				: typeof payload === 'string'
+					? payload
+					: null;
+		refreshedAt = typeof value === 'string' ? value : null;
+	} catch {
+		refreshedAt = null;
 	}
 
 	await logInfo(env, 'worker.supabase.public_feed_snapshot_refreshed', 'Refreshed public feed snapshot', {
+		refreshedAt,
 		durationMs: Date.now() - startedAt,
 	});
 
-	return true;
+	const edgeSnapshotPublishResult = await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt);
+
+	return {
+		publicFeedSnapshotRefreshOk: true,
+		publicFeedEdgeSnapshotPublishOk: edgeSnapshotPublishResult.ok,
+		publicFeedEdgeSnapshotArticleCount: edgeSnapshotPublishResult.articleCount,
+		publicFeedSnapshotRefreshedAt: refreshedAt,
+	};
 }
 
 async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunInsert): Promise<boolean> {
@@ -5561,7 +5931,20 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const articleSummaryPublishCount = shouldHoldAcceptedArticlesForTranslations(config)
 		? fullyTranslatedArticleUrls.length
 		: acceptedArticleRows.length;
-	const publicFeedSnapshotRefreshOk = articleSaveOk ? await refreshPublicFeedSnapshot(env, config) : false;
+	const publicFeedSnapshotRefreshResult = articleSaveOk
+		? await refreshPublicFeedSnapshot(env, config)
+		: {
+			publicFeedSnapshotRefreshOk: false,
+			publicFeedEdgeSnapshotPublishOk: false,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		};
+	const {
+		publicFeedSnapshotRefreshOk,
+		publicFeedEdgeSnapshotPublishOk,
+		publicFeedEdgeSnapshotArticleCount,
+		publicFeedSnapshotRefreshedAt,
+	} = publicFeedSnapshotRefreshResult;
 
 	await logInfo(env, 'worker.translation.summary_completed', 'Article summary translation step completed', {
 		shardIndex,
@@ -5584,6 +5967,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummaryRecoveryAttemptedTaskCount: articleSummaryBuildResult.recoveryAttemptedTaskCount,
 		articleSummaryPublishCount,
 		articleSummaryPublishOk,
+		publicFeedSnapshotRefreshOk,
+		publicFeedEdgeSnapshotPublishOk,
+		publicFeedEdgeSnapshotArticleCount,
+		publicFeedSnapshotRefreshedAt,
 	});
 
 	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
@@ -5742,6 +6129,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummaryPublishCount,
 		articleSummaryPublishOk,
 		publicFeedSnapshotRefreshOk,
+		publicFeedEdgeSnapshotPublishOk,
+		publicFeedEdgeSnapshotArticleCount,
+		publicFeedSnapshotRefreshedAt,
 		feedHealthSaveOk,
 		aiUsageSaveOk,
 		openAiModel: OPENAI_MODEL,
@@ -5839,7 +6229,20 @@ async function translateSummaryBacklog(
 		config.enabledSummaryLanguages,
 	);
 	const articleSummaryPublishOk = articleSummarySaveOk ? await publishArticlesBatch(env, config, fullyTranslatedArticleUrls) : false;
-	const publicFeedSnapshotRefreshOk = articleSummarySaveOk && fullyTranslatedArticleUrls.length > 0 ? await refreshPublicFeedSnapshot(env, config) : true;
+	const publicFeedSnapshotRefreshResult = articleSummarySaveOk && fullyTranslatedArticleUrls.length > 0
+		? await refreshPublicFeedSnapshot(env, config)
+		: {
+			publicFeedSnapshotRefreshOk: true,
+			publicFeedEdgeSnapshotPublishOk: true,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		};
+	const {
+		publicFeedSnapshotRefreshOk,
+		publicFeedEdgeSnapshotPublishOk,
+		publicFeedEdgeSnapshotArticleCount,
+		publicFeedSnapshotRefreshedAt,
+	} = publicFeedSnapshotRefreshResult;
 
 	const result: TranslationBacklogResult = {
 		message: 'NutsNews translation backlog run complete',
@@ -5861,6 +6264,9 @@ async function translateSummaryBacklog(
 		articleSummaryPublishCount: fullyTranslatedArticleUrls.length,
 		articleSummaryPublishOk,
 		publicFeedSnapshotRefreshOk,
+		publicFeedEdgeSnapshotPublishOk,
+		publicFeedEdgeSnapshotArticleCount,
+		publicFeedSnapshotRefreshedAt,
 		durationMs: Date.now() - startedAt,
 	};
 
@@ -5926,6 +6332,27 @@ export default {
 			return new Response(null, {
 				status: 204,
 			});
+		}
+
+		if (url.pathname === '/public-feed-snapshot' || url.pathname === '/public-feed-snapshot/status') {
+			if (request.method === 'OPTIONS') {
+				return new Response(null, {
+					status: 204,
+					headers: buildPublicFeedEdgeSnapshotHeaders(null, 'hit'),
+				});
+			}
+
+			if (request.method !== 'GET') {
+				return Response.json(
+					{ error: 'Method not allowed' },
+					{
+						status: 405,
+						headers: buildPublicFeedEdgeSnapshotHeaders(null, 'error'),
+					},
+				);
+			}
+
+			return servePublicFeedEdgeSnapshot(env, url);
 		}
 
 		if (url.pathname === '/kv-status') {

@@ -139,7 +139,7 @@ It triggers Worker shards in a controlled way so every shard does not need to ru
 
 The data layer.
 
-It stores articles, RSS feeds, AI review history, AI usage runs, Worker run records, feed health, admin dashboard data, and the materialized public feed snapshot.
+It stores articles, RSS feeds, AI review history, AI usage runs, Worker run records, feed health, admin dashboard data, and the materialized public feed snapshot. Cloudflare KV can also hold a bounded last-known-good public feed snapshot for outage fallback.
 
 ### `docs`
 
@@ -261,7 +261,7 @@ The Worker refreshes it by calling:
 public.refresh_public_feed_snapshot()
 ```
 
-The web app falls back to `public.articles` if the snapshot is unavailable.
+The web app falls back to `public.articles` if the Supabase snapshot is unavailable. If both Supabase read paths fail, `/api/articles` can serve the Cloudflare KV edge snapshot through the Worker fallback endpoint.
 
 ### `articles`
 
