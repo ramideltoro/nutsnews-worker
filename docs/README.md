@@ -16,7 +16,7 @@ This folder is organized by what you are trying to do: understand the product, c
 | Ship a change | [Deployment Checklist](DEPLOYMENT_CHECKLIST.md) |
 | Fix a production issue | [Troubleshooting](TROUBLESHOOTING.md) |
 | Check cost and quota risk | [Free-Tier Guardrails](FREE_TIER_GUARDRAILS.md) |
-| Work on translations | [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md) |
+| Work on translations | [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md); [Multilingual Quality and Fallbacks](MULTILINGUAL_QUALITY_AND_FALLBACKS.md) |
 | Work on local AI | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) |
 | Run regression tests | [Web Offline E2E](WEB_OFFLINE_E2E_REGRESSION_TEST.md) and [Worker Offline E2E](WORKER_OFFLINE_E2E_REGRESSION_TEST.md) |
 
@@ -42,7 +42,8 @@ These docs explain the product and the system at a high level.
 | Doc | Use it for |
 | --- | --- |
 | [Full Archive Search](FULL_ARCHIVE_SEARCH.md) | Search behavior and archive lookup flow |
-| [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md) | French/Japanese summaries, recovery, and validation |
+| [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md) | Supported languages, storage, Worker generation, and API display behavior |
+| [Multilingual Quality and Fallbacks](MULTILINGUAL_QUALITY_AND_FALLBACKS.md) | Translation coverage checks, English-leak detection, admin visibility, and fallback policy |
 | [Public Page Translations](NUTSNEWS_PUBLIC_PAGE_TRANSLATIONS.md) | About, Contact, Privacy, and settings language behavior |
 | [Public Pages Theme Consistency](NUTSNEWS_PUBLIC_PAGES_THEME_CONSISTENCY.md) | Theme behavior across public pages |
 

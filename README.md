@@ -55,3 +55,8 @@ npm run test:e2e:offline
 ## License
 
 MIT. See LICENSE.
+
+
+## Translation quality
+
+The Worker validates translated summary responses before saving them to `public.article_summaries`. Critical issues are retried/rejected, while missing public rows fall back to English on the web app. See `docs/MULTILINGUAL_QUALITY_AND_FALLBACKS.md`.

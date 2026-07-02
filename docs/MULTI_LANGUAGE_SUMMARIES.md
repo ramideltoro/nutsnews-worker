@@ -178,3 +178,7 @@ service:nutsnews-worker articleUrl:"PASTE_ARTICLE_URL_HERE"
 If the root cause is the limit, increase the Worker `SUMMARY_TRANSLATION_LIMIT` variable to match the largest `maxAiReviews` value you allow, then run `scripts/backfill_article_summaries.mjs` for the missing rows.
 
 If the root cause is provider failure, use the per-article Worker logs. Translation failures are logged with `articleUrl` and `languageCode` for local AI request failures, local invalid payloads, OpenAI fallback, OpenAI request failures, OpenAI invalid JSON, and Supabase article summary save failures.
+
+## Quality checks and fallback policy
+
+NutsNews also maintains a formal translation quality policy. See [Multilingual Quality and Fallbacks](MULTILINGUAL_QUALITY_AND_FALLBACKS.md) for the daily coverage report, `/admin/translations` dashboard, quality rules, English-leak detection, Worker save policy, and public fallback behavior.

@@ -1,4 +1,5 @@
 import { flushBetterStackLogs, logError, logInfo, logWarn } from './logger';
+import { validateLocalizedSummaryCandidate } from './translationQuality';
 
 type SecretBinding = {
 	get: () => Promise<string>;
@@ -4301,6 +4302,39 @@ async function translateArticleSummaryWithLocalAi(
 		}
 
 		const parsedSummary = normalizeLocalizedSummaryDecision(data, languageCode, article.title, article.ai_summary);
+		const quality = validateLocalizedSummaryCandidate(
+			{
+				language_code: parsedSummary.language_code,
+				title: parsedSummary.title,
+				summary: parsedSummary.summary,
+				sourceTitle: article.title,
+				sourceSummary: article.ai_summary,
+			},
+			languageCode,
+		);
+
+		if (!quality.ok) {
+			await logWarn(env, 'worker.translation.local.quality_rejected', 'Local summary translation failed quality checks before save', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				issues: quality.issues.map((issue) => issue.code),
+				durationMs: Date.now() - startedAt,
+			});
+
+			await delayBeforeRetry(attempt);
+			continue;
+		}
+
+		if (quality.issues.length > 0) {
+			await logWarn(env, 'worker.translation.local.quality_warning', 'Local summary translation passed with quality warnings', {
+				articleUrl: article.original_url,
+				languageCode,
+				attempt,
+				issues: quality.issues.map((issue) => issue.code),
+			});
+		}
+
 		const model = data.ai_model || data.model || config.localAiModel;
 
 		await logInfo(env, 'worker.local_ai.diagnostics.translation_success', 'Local AI translation returned a usable summary', {
@@ -4496,6 +4530,38 @@ Return JSON exactly like this:
 			}
 
 			const parsedSummary = normalizeLocalizedSummaryDecision(parsedRawSummary, languageCode, article.title, article.ai_summary);
+			const quality = validateLocalizedSummaryCandidate(
+				{
+					language_code: parsedSummary.language_code,
+					title: parsedSummary.title,
+					summary: parsedSummary.summary,
+					sourceTitle: article.title,
+					sourceSummary: article.ai_summary,
+				},
+				languageCode,
+			);
+
+			if (!quality.ok) {
+				await logWarn(env, 'worker.translation.openai.quality_rejected', 'OpenAI summary translation failed quality checks before save', {
+					articleUrl: article.original_url,
+					languageCode,
+					attempt,
+					issues: quality.issues.map((issue) => issue.code),
+					durationMs: Date.now() - startedAt,
+				});
+
+				await delayBeforeRetry(attempt);
+				continue;
+			}
+
+			if (quality.issues.length > 0) {
+				await logWarn(env, 'worker.translation.openai.quality_warning', 'OpenAI summary translation passed with quality warnings', {
+					articleUrl: article.original_url,
+					languageCode,
+					attempt,
+					issues: quality.issues.map((issue) => issue.code),
+				});
+			}
 
 			await logInfo(env, 'worker.translation.openai.article_summary_translated', 'Translated article summary with OpenAI', {
 				articleUrl: article.original_url,
