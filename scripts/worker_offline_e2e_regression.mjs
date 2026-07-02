@@ -371,12 +371,26 @@ function startMockAiServer(ctx) {
       const summary = String(body.summary ?? '');
       const prefix = languageCode === 'fr' ? '[FR]' : languageCode === 'ja' ? '[JA]' : `[${languageCode}]`;
 
+      const localizedTitleLead =
+        languageCode === 'ja'
+          ? '日本語の翻訳'
+          : languageCode === 'el'
+            ? 'Ελληνική μετάφραση'
+            : '';
+
+      const localizedSummaryLead =
+        languageCode === 'ja'
+          ? '地域の人々が協力し、思いやりのある行動で明るい一日を生み出したことを伝える前向きな要約です。'
+          : languageCode === 'el'
+            ? 'Μια αισιόδοξη περίληψη για ανθρώπους που συνεργάζονται με καλοσύνη και φέρνουν χαρά στην κοινότητα.'
+            : '';
+
       jsonResponse(response, 200, {
         model: 'nutsnews-offline-e2e-mock-ai',
         ai_model: 'nutsnews-offline-e2e-mock-ai',
         language_code: languageCode,
-        title: `${prefix} ${title}`,
-        summary: `${prefix} ${summary}`,
+        title: localizedTitleLead ? `${prefix} ${localizedTitleLead}: ${title}` : `${prefix} ${title}`,
+        summary: localizedSummaryLead ? `${prefix} ${localizedSummaryLead} ${summary}` : `${prefix} ${summary}`,
         prompt_tokens: 10,
         completion_tokens: 20,
         total_tokens: 30,
