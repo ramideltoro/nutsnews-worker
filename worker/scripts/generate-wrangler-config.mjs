@@ -78,6 +78,13 @@ if (!secretsStoreId) {
 	throw new Error('Missing NUTSNEWS_SECRETS_STORE_ID.\nRun: export NUTSNEWS_SECRETS_STORE_ID="your-store-id"');
 }
 
+if (!kvNamespaceId) {
+	throw new Error(
+		'Missing NUTSNEWS_KV_NAMESPACE_ID.\n' +
+			'Run: export NUTSNEWS_KV_NAMESPACE_ID="your-kv-namespace-id" before generating or deploying Workers.',
+	);
+}
+
 if (wantsLocalAiFirst) {
 	const missing = [];
 	if (process.env.AI_PROVIDER !== 'local') {
@@ -150,15 +157,14 @@ for (let index = 0; index < shardCount; index += 1) {
 	};
 
 
-	if (kvNamespaceId) {
-		config.kv_namespaces = [
-			{
-				binding: 'NUTSNEWS_KV',
-				id: kvNamespaceId,
-				preview_id: kvPreviewNamespaceId,
-			},
-		];
-	}
+	config.kv_namespaces = [
+		{
+			binding: 'NUTSNEWS_KV',
+			id: kvNamespaceId,
+			preview_id: kvPreviewNamespaceId,
+		},
+	];
+
 	if (includeLocalAiSecretBinding) {
 		config.secrets_store_secrets.push({
 			binding: 'LOCAL_AI_API_KEY',
@@ -186,7 +192,7 @@ for (let index = 0; index < shardCount; index += 1) {
 }
 
 const localAiSummary = process.env.LOCAL_AI_URL ? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? 'true'}.` : (process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '');
-const kvSummary = kvNamespaceId ? ' Cloudflare KV binding NUTSNEWS_KV enabled for Worker state and public feed edge snapshots.' : ' Cloudflare KV binding skipped because NUTSNEWS_KV_NAMESPACE_ID is not set.';
+const kvSummary = ' Cloudflare KV binding NUTSNEWS_KV enabled for Worker state and public feed edge snapshots.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 const translationSummary = ` Summary translations: languages=${defaultTranslationVars.ENABLED_SUMMARY_LANGUAGES}, limit=${defaultTranslationVars.SUMMARY_TRANSLATION_LIMIT}, hold=${defaultTranslationVars.HOLD_ARTICLES_FOR_TRANSLATIONS}.`;
 

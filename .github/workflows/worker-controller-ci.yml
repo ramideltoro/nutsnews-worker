@@ -40,6 +40,7 @@ jobs:
       - name: Generate Wrangler configs
         env:
           NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID || '00000000000000000000000000000000' }}
+          NUTSNEWS_KV_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_NAMESPACE_ID || '00000000000000000000000000000000' }}
         run: npm run generate:wrangler
 
       - name: TypeScript check

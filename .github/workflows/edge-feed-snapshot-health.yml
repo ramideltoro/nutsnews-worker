@@ -1,0 +1,33 @@
+name: Edge Feed Snapshot Health
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      status_url:
+        description: Worker /public-feed-snapshot/status URL or Worker base URL
+        required: false
+        default: "https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status"
+
+permissions:
+  contents: read
+
+jobs:
+  edge-feed-snapshot-health:
+    name: Live Worker edge snapshot health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NUTSNEWS_EDGE_SNAPSHOT_STATUS_URL: ${{ github.event.inputs.status_url || secrets.NUTSNEWS_EDGE_SNAPSHOT_STATUS_URL || 'https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check live edge snapshot health
+        run: node scripts/edge_snapshot_health_check.mjs
