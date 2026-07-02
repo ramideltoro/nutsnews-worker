@@ -347,12 +347,33 @@ type AiUsageRunInsert = {
 	local_ai_accepted_count: number;
 	local_ai_rejected_count: number;
 	local_ai_duration_ms: number;
+	local_ai_review_count: number;
+	local_ai_review_prompt_tokens: number;
+	local_ai_review_completion_tokens: number;
+	local_ai_review_total_tokens: number;
+	local_ai_review_duration_ms: number;
+	local_ai_translation_count: number;
+	local_ai_translation_prompt_tokens: number;
+	local_ai_translation_completion_tokens: number;
+	local_ai_translation_total_tokens: number;
+	local_ai_translation_duration_ms: number;
 	openai_model: string;
 	openai_call_count: number;
 	openai_prompt_tokens: number;
 	openai_completion_tokens: number;
 	openai_total_tokens: number;
 	estimated_openai_cost_usd: number;
+	openai_review_count: number;
+	openai_review_prompt_tokens: number;
+	openai_review_completion_tokens: number;
+	openai_review_total_tokens: number;
+	estimated_openai_review_cost_usd: number;
+	openai_translation_count: number;
+	openai_translation_prompt_tokens: number;
+	openai_translation_completion_tokens: number;
+	openai_translation_total_tokens: number;
+	estimated_openai_translation_cost_usd: number;
+	estimated_local_ai_savings_usd: number;
 	openai_accepted_count: number;
 	openai_rejected_count: number;
 	published_accepted_count: number;
@@ -445,6 +466,10 @@ type RefreshResult = {
 	articleSummaryTranslationTaskBudget: number;
 	articleSummaryLocalTranslationCount: number;
 	articleSummaryOpenAiTranslationCount: number;
+	articleSummaryLocalTranslationTokens: number;
+	articleSummaryOpenAiTranslationTokens: number;
+	articleSummaryOpenAiTranslationCostUsd: number;
+	estimatedLocalAiSavingsUsd: number;
 	translationProviderOrder: AiProvider[];
 	articleSummaryAttemptedTaskCount: number;
 	articleSummaryFailedTaskCount: number;
@@ -497,6 +522,10 @@ type TranslationBacklogResult = {
 	articleSummaryTranslationCount: number;
 	articleSummaryLocalTranslationCount: number;
 	articleSummaryOpenAiTranslationCount: number;
+	articleSummaryLocalTranslationTokens: number;
+	articleSummaryOpenAiTranslationTokens: number;
+	articleSummaryOpenAiTranslationCostUsd: number;
+	estimatedLocalAiSavingsUsd: number;
 	translationProviderOrder: AiProvider[];
 	articleSummaryAttemptedTaskCount: number;
 	articleSummaryFailedTaskCount: number;
@@ -1829,6 +1858,17 @@ function estimateOpenAiCost(usage: OpenAiUsage, config: RuntimeConfig) {
 	const outputCost = (usage.completionTokens / 1_000_000) * config.openAiOutputCostPer1MTokens;
 
 	return inputCost + outputCost;
+}
+
+function addAiUsage(...usageItems: OpenAiUsage[]): OpenAiUsage {
+	return usageItems.reduce(
+		(total, usage) => ({
+			promptTokens: total.promptTokens + usage.promptTokens,
+			completionTokens: total.completionTokens + usage.completionTokens,
+			totalTokens: total.totalTokens + usage.totalTokens,
+		}),
+		emptyOpenAiUsage(),
+	);
 }
 
 function getSafeHeaderValue(value: string) {
@@ -4060,12 +4100,20 @@ function getLocalAiTranslateUrl(config: RuntimeConfig) {
 	return `${config.localAiUrl}/translate`;
 }
 
+type ArticleSummaryTranslationResult = {
+	summary: ArticleSummaryInsert;
+	provider: AiProvider;
+	usage: OpenAiUsage;
+	durationMs: number;
+	estimatedOpenAiCostUsd: number;
+};
+
 async function translateArticleSummaryWithLocalAi(
 	env: Env,
 	config: RuntimeConfig,
 	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
-): Promise<ArticleSummaryInsert | null> {
+): Promise<ArticleSummaryTranslationResult | null> {
 	if (!hasLocalAiTranslationConfig(config)) {
 		return null;
 	}
@@ -4278,15 +4326,27 @@ async function translateArticleSummaryWithLocalAi(
 			durationMs: Date.now() - startedAt,
 		});
 
+		const usage = normalizeOpenAiUsage({
+			prompt_tokens: data.prompt_tokens,
+			completion_tokens: data.completion_tokens,
+			total_tokens: data.total_tokens,
+		});
+
 		return {
-			original_url: article.original_url,
-			language_code: parsedSummary.language_code,
-			source_language_code: 'en',
-			title: parsedSummary.title,
-			summary: parsedSummary.summary,
-			generated_by: 'local',
-			model,
-			updated_at: new Date().toISOString(),
+			summary: {
+				original_url: article.original_url,
+				language_code: parsedSummary.language_code,
+				source_language_code: 'en',
+				title: parsedSummary.title,
+				summary: parsedSummary.summary,
+				generated_by: 'local',
+				model,
+				updated_at: new Date().toISOString(),
+			},
+			provider: 'local',
+			usage,
+			durationMs: Date.now() - startedAt,
+			estimatedOpenAiCostUsd: estimateOpenAiCost(usage, config),
 		};
 	}
 
@@ -4298,7 +4358,7 @@ async function translateArticleSummaryWithOpenAi(
 	config: RuntimeConfig,
 	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
-): Promise<ArticleSummaryInsert | null> {
+): Promise<ArticleSummaryTranslationResult | null> {
 	const openAiApiKey = getSafeHeaderValue(config.openAiApiKey);
 
 	if (!openAiApiKey) {
@@ -4387,6 +4447,11 @@ Return JSON exactly like this:
 					content?: string;
 				};
 			}>;
+			usage?: {
+				prompt_tokens?: number;
+				completion_tokens?: number;
+				total_tokens?: number;
+			};
 		}>(response);
 
 		if (!jsonResult.ok) {
@@ -4440,15 +4505,23 @@ Return JSON exactly like this:
 				durationMs: Date.now() - startedAt,
 			});
 
+			const usage = normalizeOpenAiUsage(jsonResult.value.usage);
+
 			return {
-				original_url: article.original_url,
-				language_code: parsedSummary.language_code,
-				source_language_code: 'en',
-				title: parsedSummary.title,
-				summary: parsedSummary.summary,
-				generated_by: 'openai',
-				model: OPENAI_MODEL,
-				updated_at: new Date().toISOString(),
+				summary: {
+					original_url: article.original_url,
+					language_code: parsedSummary.language_code,
+					source_language_code: 'en',
+					title: parsedSummary.title,
+					summary: parsedSummary.summary,
+					generated_by: 'openai',
+					model: OPENAI_MODEL,
+					updated_at: new Date().toISOString(),
+				},
+				provider: 'openai',
+				usage,
+				durationMs: Date.now() - startedAt,
+				estimatedOpenAiCostUsd: estimateOpenAiCost(usage, config),
 			};
 		} catch (error) {
 			await logError(env, 'worker.translation.openai.invalid_json', 'OpenAI summary translation returned invalid JSON', error, {
@@ -4472,7 +4545,7 @@ async function translateArticleSummary(
 	config: RuntimeConfig,
 	article: ArticleSummarySourceArticle,
 	languageCode: SummaryLanguageCode,
-): Promise<ArticleSummaryInsert | null> {
+): Promise<ArticleSummaryTranslationResult | null> {
 	if (hasLocalAiTranslationConfig(config)) {
 		await logInfo(env, 'worker.local_ai.diagnostics.translation_provider_selected', 'Local AI translation provider selected', {
 			articleUrl: article.original_url,
@@ -4728,6 +4801,12 @@ type ArticleSummaryTranslationBuildResult = {
 	recoveryAttemptedTaskCount: number;
 	localTranslationCount: number;
 	openAiTranslationCount: number;
+	localTranslationUsage: OpenAiUsage;
+	openAiTranslationUsage: OpenAiUsage;
+	localTranslationDurationMs: number;
+	openAiTranslationDurationMs: number;
+	estimatedOpenAiTranslationCostUsd: number;
+	estimatedLocalAiTranslationSavingsUsd: number;
 };
 
 async function buildArticleSummaryTranslations(
@@ -4746,6 +4825,12 @@ async function buildArticleSummaryTranslations(
 		recoveryAttemptedTaskCount: 0,
 		localTranslationCount: 0,
 		openAiTranslationCount: 0,
+		localTranslationUsage: emptyOpenAiUsage(),
+		openAiTranslationUsage: emptyOpenAiUsage(),
+		localTranslationDurationMs: 0,
+		openAiTranslationDurationMs: 0,
+		estimatedOpenAiTranslationCostUsd: 0,
+		estimatedLocalAiTranslationSavingsUsd: 0,
 	};
 
 	if (config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
@@ -4857,14 +4942,15 @@ async function buildArticleSummaryTranslations(
 	}
 
 	const translationResults = await mapWithConcurrency(translationTasks, 2, async (task) => {
-		const summary = await translateArticleSummary(env, config, task.article, task.languageCode);
-		return { task, summary };
+		const translation = await translateArticleSummary(env, config, task.article, task.languageCode);
+		return { task, translation };
 	});
-	const summaries = translationResults
-		.map((result) => result.summary)
-		.filter((translation): translation is ArticleSummaryInsert => Boolean(translation));
+	const successfulTranslations = translationResults
+		.map((result) => result.translation)
+		.filter((translation): translation is ArticleSummaryTranslationResult => Boolean(translation));
+	const summaries = successfulTranslations.map((translation) => translation.summary);
 	const failureSamples: ArticleSummaryFailureSample[] = translationResults
-		.filter((result) => !result.summary)
+		.filter((result) => !result.translation)
 		.slice(0, 12)
 		.map(({ task }) => ({
 			originalUrl: task.article.original_url,
@@ -4875,8 +4961,16 @@ async function buildArticleSummaryTranslations(
 			errorMessage: 'No translation returned after provider attempts. Check worker.translation.* logs for the exact local/OpenAI error.',
 		}));
 	const recoveryAttemptedTaskCount = translationTasks.filter((task) => task.taskSource === 'recovery').length;
-	const localTranslationCount = summaries.filter((summary) => summary.generated_by === 'local').length;
-	const openAiTranslationCount = summaries.filter((summary) => summary.generated_by === 'openai').length;
+	const localTranslations = successfulTranslations.filter((translation) => translation.provider === 'local');
+	const openAiTranslations = successfulTranslations.filter((translation) => translation.provider === 'openai');
+	const localTranslationCount = localTranslations.length;
+	const openAiTranslationCount = openAiTranslations.length;
+	const localTranslationUsage = addAiUsage(...localTranslations.map((translation) => translation.usage));
+	const openAiTranslationUsage = addAiUsage(...openAiTranslations.map((translation) => translation.usage));
+	const localTranslationDurationMs = localTranslations.reduce((total, translation) => total + translation.durationMs, 0);
+	const openAiTranslationDurationMs = openAiTranslations.reduce((total, translation) => total + translation.durationMs, 0);
+	const estimatedOpenAiTranslationCostUsd = openAiTranslations.reduce((total, translation) => total + translation.estimatedOpenAiCostUsd, 0);
+	const estimatedLocalAiTranslationSavingsUsd = localTranslations.reduce((total, translation) => total + translation.estimatedOpenAiCostUsd, 0);
 
 	return {
 		summaries,
@@ -4889,6 +4983,12 @@ async function buildArticleSummaryTranslations(
 		recoveryAttemptedTaskCount,
 		localTranslationCount,
 		openAiTranslationCount,
+		localTranslationUsage,
+		openAiTranslationUsage,
+		localTranslationDurationMs,
+		openAiTranslationDurationMs,
+		estimatedOpenAiTranslationCostUsd,
+		estimatedLocalAiTranslationSavingsUsd,
 	};
 }
 
@@ -5424,7 +5524,12 @@ async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunIn
 		openAiPromptTokens: run.openai_prompt_tokens,
 		openAiCompletionTokens: run.openai_completion_tokens,
 		openAiTotalTokens: run.openai_total_tokens,
+		openAiReviewCount: run.openai_review_count,
+		openAiTranslationCount: run.openai_translation_count,
+		localAiReviewCount: run.local_ai_review_count,
+		localAiTranslationCount: run.local_ai_translation_count,
 		estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+		estimatedLocalAiSavingsUsd: run.estimated_local_ai_savings_usd,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5887,6 +5992,12 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			recoveryAttemptedTaskCount: 0,
 			localTranslationCount: 0,
 			openAiTranslationCount: 0,
+			localTranslationUsage: emptyOpenAiUsage(),
+			openAiTranslationUsage: emptyOpenAiUsage(),
+			localTranslationDurationMs: 0,
+			openAiTranslationDurationMs: 0,
+			estimatedOpenAiTranslationCostUsd: 0,
+			estimatedLocalAiTranslationSavingsUsd: 0,
 		};
 	const articleSummaryRows = articleSummaryBuildResult.summaries;
 	const articleSummarySaveResult = articleSaveOk
@@ -5955,6 +6066,13 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
 		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
 		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		articleSummaryLocalTranslationTokens: articleSummaryBuildResult.localTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationTokens: articleSummaryBuildResult.openAiTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationCostUsd: articleSummaryBuildResult.estimatedOpenAiTranslationCostUsd,
+		estimatedLocalAiSavingsUsd: estimateOpenAiCost(
+			addAiUsage(sumLocalAiUsage(aiReviewedArticles), articleSummaryBuildResult.localTranslationUsage),
+			config,
+		),
 		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
 		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
@@ -5989,14 +6107,22 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const openAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'openai');
 	const localAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'local');
-	const openAiUsage = sumOpenAiUsage(aiReviewedArticles);
-	const localAiUsage = sumLocalAiUsage(aiReviewedArticles);
-	const estimatedOpenAiCostUsd = estimateOpenAiCost(openAiUsage, config);
+	const openAiReviewUsage = sumOpenAiUsage(aiReviewedArticles);
+	const localAiReviewUsage = sumLocalAiUsage(aiReviewedArticles);
+	const openAiTranslationUsage = articleSummaryBuildResult.openAiTranslationUsage;
+	const localAiTranslationUsage = articleSummaryBuildResult.localTranslationUsage;
+	const openAiUsage = addAiUsage(openAiReviewUsage, openAiTranslationUsage);
+	const localAiUsage = addAiUsage(localAiReviewUsage, localAiTranslationUsage);
+	const estimatedOpenAiReviewCostUsd = estimateOpenAiCost(openAiReviewUsage, config);
+	const estimatedOpenAiTranslationCostUsd = articleSummaryBuildResult.estimatedOpenAiTranslationCostUsd;
+	const estimatedOpenAiCostUsd = estimatedOpenAiReviewCostUsd + estimatedOpenAiTranslationCostUsd;
+	const estimatedLocalAiSavingsUsd = estimateOpenAiCost(localAiUsage, config);
 	const openAiAcceptedCount = openAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
 	const openAiRejectedCount = openAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
 	const localAiAcceptedCount = localAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'accept').length;
 	const localAiRejectedCount = localAiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiDecision.decision === 'reject').length;
-	const localAiDurationMs = sumReviewDuration(aiReviewedArticles, 'local');
+	const localAiReviewDurationMs = sumReviewDuration(aiReviewedArticles, 'local');
+	const localAiDurationMs = localAiReviewDurationMs + articleSummaryBuildResult.localTranslationDurationMs;
 	const costProtectionLimitReached = articlesEligibleForAi.length > articlesForAi.length;
 
 	const runCompletedAt = new Date();
@@ -6019,19 +6145,40 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		ai_reviewed_count: aiReviewedArticles.length,
 		ai_provider: config.aiProvider,
 		local_ai_model: config.localAiModel,
-		local_ai_call_count: localAiReviewedArticles.length,
+		local_ai_call_count: localAiReviewedArticles.length + articleSummaryBuildResult.localTranslationCount,
 		local_ai_prompt_tokens: localAiUsage.promptTokens,
 		local_ai_completion_tokens: localAiUsage.completionTokens,
 		local_ai_total_tokens: localAiUsage.totalTokens,
 		local_ai_accepted_count: localAiAcceptedCount,
 		local_ai_rejected_count: localAiRejectedCount,
 		local_ai_duration_ms: localAiDurationMs,
+		local_ai_review_count: localAiReviewedArticles.length,
+		local_ai_review_prompt_tokens: localAiReviewUsage.promptTokens,
+		local_ai_review_completion_tokens: localAiReviewUsage.completionTokens,
+		local_ai_review_total_tokens: localAiReviewUsage.totalTokens,
+		local_ai_review_duration_ms: localAiReviewDurationMs,
+		local_ai_translation_count: articleSummaryBuildResult.localTranslationCount,
+		local_ai_translation_prompt_tokens: localAiTranslationUsage.promptTokens,
+		local_ai_translation_completion_tokens: localAiTranslationUsage.completionTokens,
+		local_ai_translation_total_tokens: localAiTranslationUsage.totalTokens,
+		local_ai_translation_duration_ms: articleSummaryBuildResult.localTranslationDurationMs,
 		openai_model: OPENAI_MODEL,
-		openai_call_count: openAiReviewedArticles.length,
+		openai_call_count: openAiReviewedArticles.length + articleSummaryBuildResult.openAiTranslationCount,
 		openai_prompt_tokens: openAiUsage.promptTokens,
 		openai_completion_tokens: openAiUsage.completionTokens,
 		openai_total_tokens: openAiUsage.totalTokens,
 		estimated_openai_cost_usd: Number(estimatedOpenAiCostUsd.toFixed(6)),
+		openai_review_count: openAiReviewedArticles.length,
+		openai_review_prompt_tokens: openAiReviewUsage.promptTokens,
+		openai_review_completion_tokens: openAiReviewUsage.completionTokens,
+		openai_review_total_tokens: openAiReviewUsage.totalTokens,
+		estimated_openai_review_cost_usd: Number(estimatedOpenAiReviewCostUsd.toFixed(6)),
+		openai_translation_count: articleSummaryBuildResult.openAiTranslationCount,
+		openai_translation_prompt_tokens: openAiTranslationUsage.promptTokens,
+		openai_translation_completion_tokens: openAiTranslationUsage.completionTokens,
+		openai_translation_total_tokens: openAiTranslationUsage.totalTokens,
+		estimated_openai_translation_cost_usd: Number(estimatedOpenAiTranslationCostUsd.toFixed(6)),
+		estimated_local_ai_savings_usd: Number(estimatedLocalAiSavingsUsd.toFixed(6)),
 		openai_accepted_count: openAiAcceptedCount,
 		openai_rejected_count: openAiRejectedCount,
 		published_accepted_count: acceptedCount,
@@ -6116,6 +6263,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
 		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
 		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		articleSummaryLocalTranslationTokens: articleSummaryBuildResult.localTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationTokens: articleSummaryBuildResult.openAiTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationCostUsd: articleSummaryBuildResult.estimatedOpenAiTranslationCostUsd,
+		estimatedLocalAiSavingsUsd: articleSummaryBuildResult.estimatedLocalAiTranslationSavingsUsd,
 		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
 		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
@@ -6253,6 +6404,10 @@ async function translateSummaryBacklog(
 		articleSummaryTranslationCount: articleSummaryRows.length,
 		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
 		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
+		articleSummaryLocalTranslationTokens: articleSummaryBuildResult.localTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationTokens: articleSummaryBuildResult.openAiTranslationUsage.totalTokens,
+		articleSummaryOpenAiTranslationCostUsd: articleSummaryBuildResult.estimatedOpenAiTranslationCostUsd,
+		estimatedLocalAiSavingsUsd: articleSummaryBuildResult.estimatedLocalAiTranslationSavingsUsd,
 		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		articleSummaryAttemptedTaskCount: articleSummaryBuildResult.attemptedTaskCount,
 		articleSummaryFailedTaskCount: articleSummaryBuildResult.failedTaskCount,
