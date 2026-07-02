@@ -13,12 +13,12 @@
 		"deploy:local-ai": "npm run check:local-ai-config && for i in {0..24}; do echo \"Deploying local-AI shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
 	},
 	"dependencies": {
-		"@sentry/cloudflare": "^10.59.0"
+		"@sentry/cloudflare": "^10.63.0"
 	},
 	"devDependencies": {
-		"@cloudflare/workers-types": "^4.20260621.1",
+		"@cloudflare/workers-types": "^4.20260702.1",
 		"@types/node": "^20.19.43",
 		"typescript": "^5.9.3",
-		"wrangler": "^4.105.0"
+		"wrangler": "^4.106.0"
 	}
 }
