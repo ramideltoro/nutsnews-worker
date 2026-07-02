@@ -1284,44 +1284,72 @@ async function readPublicFeedEdgeSnapshotFromKv(env: Env) {
 	return snapshot;
 }
 
+function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeedEdgeSnapshot | null) {
+	const kvBound = Boolean(env.NUTSNEWS_KV);
+
+	if (!kvBound) {
+		return {
+			configured: false,
+			enabled: false,
+			ready: false,
+			kvBound: false,
+			status: 'unbound',
+			updatedAt: null,
+			refreshedAt: null,
+			ageSeconds: null,
+			articleCount: null,
+			maxArticles: getPublicFeedEdgeSnapshotLimit(env),
+			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+			shardIndex: getShardIndex(env),
+			message: 'NUTSNEWS_KV is not bound to this Worker. Regenerate Wrangler configs with NUTSNEWS_KV_NAMESPACE_ID, deploy the shard, then run one refresh to publish the edge snapshot.',
+		};
+	}
+
+	if (!snapshot) {
+		return {
+			configured: true,
+			enabled: true,
+			ready: false,
+			kvBound: true,
+			status: 'miss',
+			updatedAt: null,
+			refreshedAt: null,
+			ageSeconds: null,
+			articleCount: null,
+			maxArticles: getPublicFeedEdgeSnapshotLimit(env),
+			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+			shardIndex: getShardIndex(env),
+			message: 'NUTSNEWS_KV is bound, but no public feed edge snapshot has been written yet. Run a Worker refresh after Supabase public_feed_snapshot has rows.',
+		};
+	}
+
+	return {
+		configured: true,
+		enabled: true,
+		ready: snapshot.articleCount > 0,
+		kvBound: true,
+		status: snapshot.articleCount > 0 ? 'hit' : 'empty',
+		updatedAt: snapshot.updatedAt,
+		refreshedAt: snapshot.refreshedAt,
+		ageSeconds: getPublicFeedEdgeSnapshotAgeSeconds(snapshot),
+		articleCount: snapshot.articleCount,
+		maxArticles: snapshot.maxArticles,
+		version: snapshot.version,
+		shardIndex: snapshot.shardIndex,
+		message: snapshot.articleCount > 0 ? null : 'The edge snapshot exists, but it contains zero articles.',
+	};
+}
+
 async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
 	if (url.pathname === '/public-feed-snapshot/status') {
 		const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);
+		const payload = buildPublicFeedEdgeSnapshotStatusPayload(env, snapshot);
+		const headerStatus = snapshot ? 'hit' : env.NUTSNEWS_KV ? 'miss' : 'error';
 
-		if (!snapshot) {
-			return Response.json(
-				{
-					enabled: Boolean(env.NUTSNEWS_KV),
-					status: 'miss',
-					updatedAt: null,
-					ageSeconds: null,
-					articleCount: null,
-					version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
-					message: env.NUTSNEWS_KV ? 'No public feed edge snapshot has been written yet.' : 'NUTSNEWS_KV is not bound to this Worker.',
-				},
-				{
-					status: env.NUTSNEWS_KV ? 404 : 503,
-					headers: buildPublicFeedEdgeSnapshotHeaders(null, 'miss'),
-				},
-			);
-		}
-
-		return Response.json(
-			{
-				enabled: true,
-				status: 'hit',
-				updatedAt: snapshot.updatedAt,
-				refreshedAt: snapshot.refreshedAt,
-				ageSeconds: getPublicFeedEdgeSnapshotAgeSeconds(snapshot),
-				articleCount: snapshot.articleCount,
-				maxArticles: snapshot.maxArticles,
-				version: snapshot.version,
-				shardIndex: snapshot.shardIndex,
-			},
-			{
-				headers: buildPublicFeedEdgeSnapshotHeaders(snapshot, 'hit'),
-			},
-		);
+		return Response.json(payload, {
+			status: 200,
+			headers: buildPublicFeedEdgeSnapshotHeaders(snapshot, headerStatus),
+		});
 	}
 
 	const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);

@@ -277,3 +277,36 @@ Then check `/public-feed-snapshot/status` again.
 ### API never uses the edge snapshot
 
 That is normal while Supabase is healthy. The edge snapshot is a fallback, not the primary path.
+
+---
+
+## Edge Snapshot Health Update
+
+The Worker `/public-feed-snapshot/status` route is a diagnostic endpoint. It returns HTTP 200 with a structured payload so the admin dashboard can show the exact reason the fallback is not ready.
+
+Important fields:
+
+```text
+ready
+kvBound
+configured
+enabled
+status
+articleCount
+ageSeconds
+version
+message
+```
+
+Healthy status means:
+
+```text
+ready: true
+kvBound: true
+status: hit
+articleCount: greater than 0
+```
+
+If `status` is `unbound`, the deployed Worker does not have the `NUTSNEWS_KV` binding. Regenerate Wrangler configs with `NUTSNEWS_KV_NAMESPACE_ID` and redeploy.
+
+The GitHub Action `Edge Feed Snapshot Health` checks the live Worker status endpoint and the public fallback feed payload.
