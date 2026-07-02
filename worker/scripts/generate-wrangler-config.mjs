@@ -1,11 +1,46 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+function loadDeployEnvFile(filePath) {
+	if (!fs.existsSync(filePath)) {
+		return;
+	}
+
+	const text = fs.readFileSync(filePath, 'utf8');
+	for (const rawLine of text.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith('#')) {
+			continue;
+		}
+
+		const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+		if (!match) {
+			continue;
+		}
+
+		const [, key, rawValue] = match;
+		if (process.env[key] !== undefined) {
+			continue;
+		}
+
+		let value = rawValue.trim();
+		if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+			value = value.slice(1, -1);
+		}
+
+		process.env[key] = value;
+	}
+}
+
+loadDeployEnvFile(path.resolve(process.cwd(), '..', '.env.deploy.local'));
+loadDeployEnvFile(path.resolve(process.cwd(), '.env.deploy.local'));
+
 const shardCount = Number(process.env.SHARD_COUNT ?? '25');
 const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '20');
 const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
 const includeLocalAiSecretBinding = process.env.ENABLE_LOCAL_AI_SECRET_BINDING === 'true';
 const localAiApiKeySecretName = process.env.LOCAL_AI_API_KEY_SECRET_NAME ?? 'LOCAL_AI_API_KEY';
+const wantsLocalAiFirst = process.env.AI_PROVIDER === 'local' || Boolean(process.env.LOCAL_AI_URL) || includeLocalAiSecretBinding;
 const kvNamespaceId = process.env.NUTSNEWS_KV_NAMESPACE_ID;
 const kvPreviewNamespaceId = process.env.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID ?? kvNamespaceId;
 const includeUpstashRedisSecretBindings = process.env.ENABLE_UPSTASH_REDIS_SECRET_BINDING === 'true';
@@ -41,6 +76,26 @@ const optionalShardVars = Object.fromEntries(
 
 if (!secretsStoreId) {
 	throw new Error('Missing NUTSNEWS_SECRETS_STORE_ID.\nRun: export NUTSNEWS_SECRETS_STORE_ID="your-store-id"');
+}
+
+if (wantsLocalAiFirst) {
+	const missing = [];
+	if (process.env.AI_PROVIDER !== 'local') {
+		missing.push('AI_PROVIDER=local');
+	}
+	if (!process.env.LOCAL_AI_URL) {
+		missing.push('LOCAL_AI_URL');
+	}
+	if (!includeLocalAiSecretBinding) {
+		missing.push('ENABLE_LOCAL_AI_SECRET_BINDING=true');
+	}
+
+	if (missing.length > 0) {
+		throw new Error(
+			`Refusing to generate a partial local-AI deployment. Missing: ${missing.join(', ')}.\n` +
+				'Create worker/.env.deploy.local or export the missing values before deploying.',
+		);
+	}
 }
 
 const generatedDir = path.join('generated-wrangler');

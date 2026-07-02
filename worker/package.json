@@ -8,7 +8,9 @@
 		"dev": "wrangler dev -c generated-wrangler/wrangler.shard0.jsonc",
 		"deploy:shard0": "wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
 		"deploy:all": "npm run generate:wrangler && for i in {0..24}; do echo \"Deploying shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done",
-		"test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs"
+		"test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs",
+		"check:local-ai-config": "npm run generate:wrangler && node scripts/verify-local-ai-wrangler-config.mjs",
+		"deploy:local-ai": "npm run check:local-ai-config && for i in {0..24}; do echo \"Deploying local-AI shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
 	},
 	"dependencies": {
 		"@sentry/cloudflare": "^10.59.0"

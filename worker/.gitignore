@@ -166,3 +166,4 @@ dist
 !.env.example
 .wrangler/
 .vercel
+.env.deploy.local

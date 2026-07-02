@@ -18,10 +18,24 @@ cd worker
 npm install
 npm run test:e2e:offline
 npm run generate:wrangler
+npm run check:local-ai-config
 npm run dev
 npm run deploy:shard0
 npm run deploy:all
+npm run deploy:local-ai
 ```
+
+## Local AI First Deploy Safety
+
+For production local-AI-first deployments, create `worker/.env.deploy.local` from `worker/.env.deploy.example`, then use:
+
+```bash
+cd worker
+npm run check:local-ai-config
+npm run deploy:local-ai
+```
+
+This prevents accidentally deploying OpenAI-only shard configs when `LOCAL_AI_URL` or the `LOCAL_AI_API_KEY` secret binding is missing from the shell environment.
 
 ## Verification
 
