@@ -76,7 +76,7 @@ try {
 	);
 	console.log('✓ Missing LOCAL_AI_URL is blocked');
 
-	console.log('▶ Checking generator writes local-AI-only shard configs by default');
+	console.log('▶ Checking generator writes local-AI-first-with-openai-fallback shard configs by default');
 	runGenerator({
 		LOCAL_AI_URL: 'https://local-ai.example.com',
 	});
@@ -94,7 +94,7 @@ try {
 		assert(vars.AI_REVIEW_CONCURRENCY === '1', `${name} should keep local AI review concurrency at 1.`, vars);
 		assert(secretBindings.has('LOCAL_AI_API_KEY'), `${name} is missing the LOCAL_AI_API_KEY secret binding.`, config.secrets_store_secrets);
 	}
-	console.log('✓ Generated shard configs are locked to local AI first with no OpenAI fallback');
+	console.log('✓ Generated shard configs are locked to local AI first with OpenAI fallback');
 
 	console.log('▶ Checking local-AI verifier accepts the generated configs');
 	execFileSync('node', [verifierPath], {

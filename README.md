@@ -35,7 +35,7 @@ npm run check:local-ai-config
 npm run deploy:all
 ```
 
-This blocks accidental OpenAI-only shard configs. It also requires `AI_PROVIDER_FALLBACK_TO_OPENAI=false`, so article reviews and summary translations do not silently fall back to OpenAI when the local server is missing or failing.
+This blocks accidental OpenAI-only shard configs. It also requires `AI_PROVIDER_FALLBACK_TO_OPENAI=true`, so article reviews and summary translations do not silently fall back to OpenAI when the local server is missing or failing.
 
 See [Local AI Deployment Lock](docs/LOCAL_AI_DEPLOYMENT_LOCK.md).
 

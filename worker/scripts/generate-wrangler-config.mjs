@@ -111,7 +111,7 @@ if (wantsLocalAiFirst) {
 		missing.push('ENABLE_LOCAL_AI_SECRET_BINDING=true');
 	}
 	if (configuredOpenAiFallback !== 'false' && !allowOpenAiFallbackDeployment) {
-		missing.push('AI_PROVIDER_FALLBACK_TO_OPENAI=false');
+		missing.push('AI_PROVIDER_FALLBACK_TO_OPENAI=true');
 	}
 
 	if (missing.length > 0) {

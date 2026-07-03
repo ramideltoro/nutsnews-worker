@@ -858,7 +858,7 @@ worker.openai.article_reviewed
 
 ## Deployment lock
 
-Worker shard deployments are locked to local AI by default. Before deploying shards, confirm `worker/.env.deploy.local` contains `AI_PROVIDER=local`, `LOCAL_AI_URL`, `AI_PROVIDER_FALLBACK_TO_OPENAI=false`, `AI_REVIEW_CONCURRENCY=1`, and `ENABLE_LOCAL_AI_SECRET_BINDING=true`.
+Worker shard deployments are locked to local AI by default. Before deploying shards, confirm `worker/.env.deploy.local` contains `AI_PROVIDER=local`, `LOCAL_AI_URL`, `AI_PROVIDER_FALLBACK_TO_OPENAI=true`, `AI_REVIEW_CONCURRENCY=1`, and `ENABLE_LOCAL_AI_SECRET_BINDING=true`.
 
 Use:
 

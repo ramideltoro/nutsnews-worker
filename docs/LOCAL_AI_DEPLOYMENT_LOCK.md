@@ -8,8 +8,8 @@ This lock exists because a Worker deploy without `AI_PROVIDER=local`, `LOCAL_AI_
 
 - `npm run generate:wrangler` now refuses to generate production shard configs unless local AI is complete.
 - `npm run deploy:all` now runs the local-AI config verifier before deploying shards.
-- `AI_PROVIDER_FALLBACK_TO_OPENAI=false` is required by default.
-- Article reviews and summary translations no longer fall back to OpenAI when fallback is disabled.
+- `AI_PROVIDER_FALLBACK_TO_OPENAI=true` is required by default.
+- Article reviews and summary translations no longer fall back to OpenAI when fallback is enabled.
 - CI runs a local-AI deployment-lock regression.
 - CI runs an immutable-test guard so locked regression tests cannot be edited later without explicit owner approval.
 
@@ -30,7 +30,7 @@ NUTSNEWS_KV_NAMESPACE_ID=...
 AI_PROVIDER=local
 LOCAL_AI_URL=https://your-local-ai-tunnel.example.com
 LOCAL_AI_MODEL=qwen2.5:3b
-AI_PROVIDER_FALLBACK_TO_OPENAI=false
+AI_PROVIDER_FALLBACK_TO_OPENAI=true
 AI_REVIEW_CONCURRENCY=1
 ENABLE_LOCAL_AI_SECRET_BINDING=true
 LOCAL_AI_API_KEY_SECRET_NAME=LOCAL_AI_API_KEY

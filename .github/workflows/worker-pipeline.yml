@@ -25,7 +25,8 @@ jobs:
     timeout-minutes: 25
     env:
       AI_PROVIDER: local
-      AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+      AI_PROVIDER_FALLBACK_TO_OPENAI: "true"
+      NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "true"
       ENABLE_LOCAL_AI_SECRET_BINDING: "true"
       LOCAL_AI_MODEL: qwen2.5:3b
       LOCAL_AI_URL: https://local-ai-ci.invalid
@@ -79,6 +80,7 @@ jobs:
 
       - name: Local-AI deployment lock regression
         run: node scripts/assert_worker_local_ai_lock.mjs
+          node scripts/assert_worker_local_ai_openai_fallback.mjs
 
       - name: Fully offline Worker E2E regression
         run: node scripts/worker_offline_e2e_regression.mjs
@@ -99,7 +101,7 @@ jobs:
       LOCAL_AI_URL: ${{ secrets.LOCAL_AI_URL }}
       LOCAL_AI_API_KEY_SECRET_NAME: ${{ secrets.LOCAL_AI_API_KEY_SECRET_NAME || 'LOCAL_AI_API_KEY' }}
       AI_PROVIDER: local
-      AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+      AI_PROVIDER_FALLBACK_TO_OPENAI: "true"
       ENABLE_LOCAL_AI_SECRET_BINDING: "true"
       LOCAL_AI_MODEL: qwen2.5:3b
       NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "1"

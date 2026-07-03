@@ -47,4 +47,4 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 
-console.log(`Verified ${files.length} shard configs: local AI first is configured, OpenAI fallback is disabled, and LOCAL_AI_API_KEY is bound.`);
+console.log(`Verified ${files.length} shard configs: local AI first is configured, OpenAI fallback is enabled, and LOCAL_AI_API_KEY is bound.`);

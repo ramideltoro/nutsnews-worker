@@ -23,7 +23,7 @@ After a PR merges into `main` or `master`, the same workflow runs the full CI jo
 The deploy job does this:
 
 1. Validates required GitHub secrets are present.
-2. Generates production Wrangler shard configs with local AI first and OpenAI fallback disabled.
+2. Generates production Wrangler shard configs with local AI first and OpenAI fallback enabled.
 3. Deploys all generated Worker shards to Cloudflare, five at a time.
 4. Deploys the controller Worker to Cloudflare.
 

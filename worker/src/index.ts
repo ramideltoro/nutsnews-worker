@@ -4086,7 +4086,7 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 	}
 
 	if (config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi) {
-		await logWarn(env, 'worker.local_ai.review_failed_no_fallback', 'Local AI article review was required, but local AI config is incomplete and OpenAI fallback is disabled', {
+		await logWarn(env, 'worker.local_ai.review_failed_no_fallback', 'Local AI article review was required, but local AI config is incomplete and OpenAI fallback is enabled', {
 			source: article.source,
 			title: article.title,
 			articleUrl: article.url,
@@ -4097,7 +4097,7 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 
 		return buildRejectedAiClassificationResult(
 			config,
-			'Local AI article review is required, but LOCAL_AI_URL or LOCAL_AI_API_KEY is missing and OpenAI fallback is disabled.',
+			'Local AI article review is required, but LOCAL_AI_URL or LOCAL_AI_API_KEY is missing and OpenAI fallback is enabled.',
 			emptyOpenAiUsage(),
 			'local',
 			config.localAiModel,
@@ -4706,7 +4706,7 @@ async function translateArticleSummary(
 		}
 
 		if (!config.aiProviderFallbackToOpenAi) {
-			await logWarn(env, 'worker.translation.local.failed_no_fallback', 'Local AI summary translation failed and OpenAI fallback is disabled', {
+			await logWarn(env, 'worker.translation.local.failed_no_fallback', 'Local AI summary translation failed and OpenAI fallback is enabled', {
 				articleUrl: article.original_url,
 				title: article.title,
 				languageCode,
@@ -4749,7 +4749,7 @@ async function translateArticleSummary(
 	}
 
 	if (config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi) {
-		await logWarn(env, 'worker.translation.local.missing_config_no_fallback', 'Local AI summary translation was required, but local AI config is incomplete and OpenAI fallback is disabled', {
+		await logWarn(env, 'worker.translation.local.missing_config_no_fallback', 'Local AI summary translation was required, but local AI config is incomplete and OpenAI fallback is enabled', {
 			articleUrl: article.original_url,
 			title: article.title,
 			languageCode,

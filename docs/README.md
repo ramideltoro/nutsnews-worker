@@ -92,7 +92,7 @@ These docs explain the product and the system at a high level.
 | Doc | Use it for |
 | --- | --- |
 | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) | Production local AI setup with Ollama/qwen and Cloudflare Tunnel |
-| [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) | Why Worker deploys are locked to local AI and how to verify no OpenAI fallback is active |
+| [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) | Why Worker deploys are locked to local AI and how to verify OpenAI fallback is active |
 | [Oracle Local AI](ORACLE_LOCAL_AI.md) | Older Oracle Free Tier local AI fallback design |
 | [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md) | Translation generation and recovery |
 
