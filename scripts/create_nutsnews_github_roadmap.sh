@@ -260,7 +260,7 @@ TASKS_JSON=$(cat <<'JSON'
     "title": "Create SQL scripts for feed activation and cleanup",
     "labels": ["type:maintenance", "area:rss", "area:supabase", "priority:high"],
     "milestone": "RSS Quality Phase 1",
-    "body": "## Goal\nCreate reusable SQL scripts for managing RSS feeds.\n\n## Tasks\n- [ ] Script to count active feeds\n- [ ] Script to list active feeds\n- [ ] Script to disable Google News RSS feeds\n- [ ] Script to activate direct publisher feeds in batches\n- [ ] Script to deactivate feeds with repeated failures\n\n## Acceptance criteria\n- [ ] Scripts are committed under supabase/ or docs/\n- [ ] README links to the scripts"
+    "body": "## Goal\nCreate reusable SQL scripts for managing RSS feeds.\n\n## Tasks\n- [ ] Script to count active feeds\n- [ ] Script to list active feeds\n- [ ] Script to disable Google News RSS feeds\n- [ ] Script to activate direct publisher feeds in batches\n- [ ] Script to deactivate feeds with repeated failures\n\n## Acceptance criteria\n- [ ] Scripts are committed under supabase/ or another app-owned location\n- [ ] Documentation is linked from ramideltoro/nutsnews-docs when needed"
   },
   {
     "title": "Keep Google News RSS disabled as primary source",

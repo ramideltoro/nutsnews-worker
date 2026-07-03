@@ -13,8 +13,6 @@ required_files=(
   "scripts/diagnose_missing_article_translations.mjs"
   "scripts/audit_article_translations.mjs"
   "scripts/backfill_article_summaries.mjs"
-  "docs/MULTI_LANGUAGE_SUMMARIES.md"
-  "README_TRANSLATION_ALL_IN_ONE_UPDATE.md"
 )
 
 for file in "${required_files[@]}"; do
