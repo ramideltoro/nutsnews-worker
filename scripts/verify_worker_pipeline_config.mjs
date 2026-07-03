@@ -43,7 +43,7 @@ for (const fragment of [
   'NUTSNEWS_SECRETS_STORE_ID',
   'NUTSNEWS_KV_NAMESPACE_ID',
   'LOCAL_AI_URL',
-  'NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "5"',
+  'NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "1"',
   'npm run check:local-ai-config',
   'npx tsc --noEmit',
   'Controller syntax check',
