@@ -1,0 +1,7 @@
+# Worker pipeline tests and deployment guardrails.
+# After this lands, do not modify these files unless Rami explicitly approves it.
+.github/worker-pipeline-immutable.manifest
+.github/workflows/worker-pipeline.yml
+scripts/check_worker_pipeline_immutable.mjs
+scripts/verify_worker_pipeline_config.mjs
+scripts/deploy_worker_shards.mjs

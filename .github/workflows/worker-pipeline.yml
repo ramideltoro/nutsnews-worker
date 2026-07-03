@@ -1,0 +1,152 @@
+name: Worker Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Worker pipeline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      AI_PROVIDER: local
+      AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+      ENABLE_LOCAL_AI_SECRET_BINDING: "true"
+      LOCAL_AI_MODEL: qwen2.5:3b
+      LOCAL_AI_URL: https://local-ai-ci.invalid
+      LOCAL_AI_API_KEY_SECRET_NAME: LOCAL_AI_API_KEY
+      NUTSNEWS_SECRETS_STORE_ID: "00000000000000000000000000000000"
+      NUTSNEWS_KV_NAMESPACE_ID: "11111111111111111111111111111111"
+      NUTSNEWS_KV_PREVIEW_NAMESPACE_ID: "22222222222222222222222222222222"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install Controller dependencies
+        working-directory: controller
+        run: npm ci
+
+      - name: Legacy immutable test guard
+        run: node scripts/check_immutable_tests.mjs
+
+      - name: Worker pipeline immutable guard
+        run: node scripts/check_worker_pipeline_immutable.mjs
+
+      - name: Worker pipeline config regression
+        run: node scripts/verify_worker_pipeline_config.mjs
+
+      - name: Generate and verify local-AI Wrangler configs
+        working-directory: worker
+        run: npm run check:local-ai-config
+
+      - name: Worker TypeScript check
+        working-directory: worker
+        run: npx tsc --noEmit
+
+      - name: Controller syntax check
+        run: |
+          if [ -d controller ]; then
+            find controller -path "*/node_modules/*" -prune -o -type f \( -name "*.js" -o -name "*.mjs" \) -print0 | xargs -0 -r -n1 node --check
+          else
+            echo "No controller directory found; skipping controller syntax check."
+          fi
+
+      - name: Local-AI deployment lock regression
+        run: node scripts/assert_worker_local_ai_lock.mjs
+
+      - name: Fully offline Worker E2E regression
+        run: node scripts/worker_offline_e2e_regression.mjs
+
+  deploy:
+    name: Deploy Workers to Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: ci
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID }}
+      NUTSNEWS_KV_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_NAMESPACE_ID }}
+      NUTSNEWS_KV_PREVIEW_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID }}
+      LOCAL_AI_URL: ${{ secrets.LOCAL_AI_URL }}
+      LOCAL_AI_API_KEY_SECRET_NAME: ${{ secrets.LOCAL_AI_API_KEY_SECRET_NAME || 'LOCAL_AI_API_KEY' }}
+      AI_PROVIDER: local
+      AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+      ENABLE_LOCAL_AI_SECRET_BINDING: "true"
+      LOCAL_AI_MODEL: qwen2.5:3b
+      NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "5"
+      ENABLE_UPSTASH_REDIS_SECRET_BINDING: ${{ vars.ENABLE_UPSTASH_REDIS_SECRET_BINDING || 'false' }}
+      UPSTASH_REDIS_REST_URL_SECRET_NAME: ${{ vars.UPSTASH_REDIS_REST_URL_SECRET_NAME || 'UPSTASH_REDIS_REST_URL' }}
+      UPSTASH_REDIS_REST_TOKEN_SECRET_NAME: ${{ vars.UPSTASH_REDIS_REST_TOKEN_SECRET_NAME || 'UPSTASH_REDIS_REST_TOKEN' }}
+      ENABLED_SUMMARY_LANGUAGES: ${{ vars.ENABLED_SUMMARY_LANGUAGES || 'fr,ja,de-CH,de,el' }}
+      SUMMARY_TRANSLATION_LIMIT: ${{ vars.SUMMARY_TRANSLATION_LIMIT || '5' }}
+      HOLD_ARTICLES_FOR_TRANSLATIONS: ${{ vars.HOLD_ARTICLES_FOR_TRANSLATIONS || 'true' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Install Controller dependencies
+        working-directory: controller
+        run: npm ci
+
+      - name: Validate required deployment secrets
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID NUTSNEWS_SECRETS_STORE_ID NUTSNEWS_KV_NAMESPACE_ID LOCAL_AI_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Generate and verify production Wrangler configs
+        working-directory: worker
+        run: npm run check:local-ai-config
+
+      - name: Deploy Worker shards to Cloudflare
+        run: node scripts/deploy_worker_shards.mjs
+
+      - name: Deploy Controller to Cloudflare
+        working-directory: controller
+        run: npx wrangler deploy
