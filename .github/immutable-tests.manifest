@@ -1,0 +1,8 @@
+# Tests and test guardrails that must not be modified after they land unless the repo owner explicitly approves it.
+.github/immutable-tests.manifest
+.github/workflows/worker-controller-ci.yml
+.github/workflows/worker-offline-e2e.yml
+scripts/assert_worker_local_ai_lock.mjs
+scripts/check_immutable_tests.mjs
+scripts/worker_offline_e2e_regression.mjs
+worker/scripts/verify-local-ai-wrangler-config.mjs

@@ -855,3 +855,17 @@ Expected fallback logs only when the home server fails:
 worker.local_ai.fallback_to_openai
 worker.openai.article_reviewed
 ```
+
+## Deployment lock
+
+Worker shard deployments are locked to local AI by default. Before deploying shards, confirm `worker/.env.deploy.local` contains `AI_PROVIDER=local`, `LOCAL_AI_URL`, `AI_PROVIDER_FALLBACK_TO_OPENAI=false`, `AI_REVIEW_CONCURRENCY=1`, and `ENABLE_LOCAL_AI_SECRET_BINDING=true`.
+
+Use:
+
+```bash
+cd worker
+npm run check:local-ai-config
+npm run deploy:all
+```
+
+See [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) for the full guardrail and post-deploy checks.

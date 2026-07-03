@@ -17,7 +17,7 @@ This folder is organized by what you are trying to do: understand the product, c
 | Fix a production issue | [Troubleshooting](TROUBLESHOOTING.md) |
 | Check cost and quota risk | [Free-Tier Guardrails](FREE_TIER_GUARDRAILS.md) |
 | Work on translations | [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md); [Multilingual Quality and Fallbacks](MULTILINGUAL_QUALITY_AND_FALLBACKS.md) |
-| Work on local AI | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) |
+| Work on local AI | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md); [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) |
 | Run regression tests | [Web Offline E2E](WEB_OFFLINE_E2E_REGRESSION_TEST.md) and [Worker Offline E2E](WORKER_OFFLINE_E2E_REGRESSION_TEST.md) |
 
 ---
@@ -92,6 +92,7 @@ These docs explain the product and the system at a high level.
 | Doc | Use it for |
 | --- | --- |
 | [Home Server Local AI](HOME_SERVER_LOCAL_AI.md) | Production local AI setup with Ollama/qwen and Cloudflare Tunnel |
+| [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) | Why Worker deploys are locked to local AI and how to verify no OpenAI fallback is active |
 | [Oracle Local AI](ORACLE_LOCAL_AI.md) | Older Oracle Free Tier local AI fallback design |
 | [Multi-language Summaries](MULTI_LANGUAGE_SUMMARIES.md) | Translation generation and recovery |
 
@@ -148,6 +149,7 @@ These docs explain the product and the system at a high level.
 | --- | --- |
 | [Web Offline E2E Regression Test](WEB_OFFLINE_E2E_REGRESSION_TEST.md) | Fully mocked public web flow test |
 | [Worker Offline E2E Regression Test](WORKER_OFFLINE_E2E_REGRESSION_TEST.md) | Fully mocked Worker ingestion and translation test |
+| [Local AI Deployment Lock](LOCAL_AI_DEPLOYMENT_LOCK.md) | Local-AI-only deploy regression and immutable test guard |
 
 ### 7. Archive and Update Notes
 
