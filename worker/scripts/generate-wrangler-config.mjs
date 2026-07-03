@@ -38,9 +38,18 @@ loadDeployEnvFile(path.resolve(process.cwd(), '.env.deploy.local'));
 const shardCount = Number(process.env.SHARD_COUNT ?? '25');
 const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '20');
 const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
-const includeLocalAiSecretBinding = process.env.ENABLE_LOCAL_AI_SECRET_BINDING === 'true';
+const allowOpenAiOnlyDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT === 'true';
+const allowOpenAiFallbackDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT === 'true';
+const requireLocalAiFirst = !allowOpenAiOnlyDeployment;
+const includeLocalAiSecretBinding =
+	process.env.ENABLE_LOCAL_AI_SECRET_BINDING === undefined
+		? requireLocalAiFirst
+		: process.env.ENABLE_LOCAL_AI_SECRET_BINDING === 'true';
 const localAiApiKeySecretName = process.env.LOCAL_AI_API_KEY_SECRET_NAME ?? 'LOCAL_AI_API_KEY';
-const wantsLocalAiFirst = process.env.AI_PROVIDER === 'local' || Boolean(process.env.LOCAL_AI_URL) || includeLocalAiSecretBinding;
+const configuredAiProvider = process.env.AI_PROVIDER ?? (requireLocalAiFirst ? 'local' : undefined);
+const configuredLocalAiModel = process.env.LOCAL_AI_MODEL ?? (requireLocalAiFirst ? 'qwen2.5:3b' : undefined);
+const configuredOpenAiFallback = process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? (requireLocalAiFirst ? 'false' : undefined);
+const wantsLocalAiFirst = configuredAiProvider === 'local' || Boolean(process.env.LOCAL_AI_URL) || includeLocalAiSecretBinding;
 const kvNamespaceId = process.env.NUTSNEWS_KV_NAMESPACE_ID;
 const kvPreviewNamespaceId = process.env.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID ?? kvNamespaceId;
 const includeUpstashRedisSecretBindings = process.env.ENABLE_UPSTASH_REDIS_SECRET_BINDING === 'true';
@@ -53,13 +62,18 @@ const defaultTranslationVars = {
 	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? 'true',
 };
 
+const localAiDeploymentVars = Object.fromEntries(
+	[
+		['AI_PROVIDER', configuredAiProvider],
+		['LOCAL_AI_URL', process.env.LOCAL_AI_URL],
+		['LOCAL_AI_MODEL', configuredLocalAiModel],
+		['AI_PROVIDER_FALLBACK_TO_OPENAI', configuredOpenAiFallback],
+		['AI_REVIEW_CONCURRENCY', process.env.AI_REVIEW_CONCURRENCY ?? (requireLocalAiFirst ? '1' : undefined)],
+	].filter(([, value]) => value),
+);
+
 const optionalShardVars = Object.fromEntries(
 	[
-		'AI_PROVIDER',
-		'LOCAL_AI_URL',
-		'LOCAL_AI_MODEL',
-		'AI_PROVIDER_FALLBACK_TO_OPENAI',
-		'AI_REVIEW_CONCURRENCY',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS',
@@ -87,7 +101,7 @@ if (!kvNamespaceId) {
 
 if (wantsLocalAiFirst) {
 	const missing = [];
-	if (process.env.AI_PROVIDER !== 'local') {
+	if (configuredAiProvider !== 'local') {
 		missing.push('AI_PROVIDER=local');
 	}
 	if (!process.env.LOCAL_AI_URL) {
@@ -96,16 +110,20 @@ if (wantsLocalAiFirst) {
 	if (!includeLocalAiSecretBinding) {
 		missing.push('ENABLE_LOCAL_AI_SECRET_BINDING=true');
 	}
+	if (configuredOpenAiFallback !== 'false' && !allowOpenAiFallbackDeployment) {
+		missing.push('AI_PROVIDER_FALLBACK_TO_OPENAI=false');
+	}
 
 	if (missing.length > 0) {
 		throw new Error(
-			`Refusing to generate a partial local-AI deployment. Missing: ${missing.join(', ')}.\n` +
-				'Create worker/.env.deploy.local or export the missing values before deploying.',
+			`Refusing to generate a partial or OpenAI-fallback local-AI deployment. Missing: ${missing.join(', ')}.\n` +
+				'Create worker/.env.deploy.local or export the missing values before deploying. ' +
+				'Only use NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT=true or NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT=true after explicit owner approval.',
 		);
 	}
 }
 
-const generatedDir = path.join('generated-wrangler');
+const generatedDir = process.env.NUTSNEWS_GENERATED_WRANGLER_DIR ?? path.join('generated-wrangler');
 
 fs.mkdirSync(generatedDir, { recursive: true });
 
@@ -125,6 +143,7 @@ for (let index = 0; index < shardCount; index += 1) {
 			FEED_SHARD_INDEX: String(index),
 			FEEDS_PER_SHARD: String(feedsPerShard),
 			...defaultTranslationVars,
+			...localAiDeploymentVars,
 			...optionalShardVars,
 		},
 		secrets_store_secrets: [
@@ -191,7 +210,9 @@ for (let index = 0; index < shardCount; index += 1) {
 	fs.writeFileSync(path.join(generatedDir, `wrangler.shard${index}.jsonc`), JSON.stringify(config, null, 2) + '\n');
 }
 
-const localAiSummary = process.env.LOCAL_AI_URL ? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${process.env.AI_PROVIDER_FALLBACK_TO_OPENAI ?? 'true'}.` : (process.env.AI_PROVIDER ? ` AI_PROVIDER=${process.env.AI_PROVIDER}.` : '');
+const localAiSummary = process.env.LOCAL_AI_URL
+	? ` Local AI first enabled with LOCAL_AI_URL=${process.env.LOCAL_AI_URL}; OpenAI fallback=${configuredOpenAiFallback ?? 'not set'}.`
+	: (configuredAiProvider ? ` AI_PROVIDER=${configuredAiProvider}.` : '');
 const kvSummary = ' Cloudflare KV binding NUTSNEWS_KV enabled for Worker state and public feed edge snapshots.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 const translationSummary = ` Summary translations: languages=${defaultTranslationVars.ENABLED_SUMMARY_LANGUAGES}, limit=${defaultTranslationVars.SUMMARY_TRANSLATION_LIMIT}, hold=${defaultTranslationVars.HOLD_ARTICLES_FOR_TRANSLATIONS}.`;

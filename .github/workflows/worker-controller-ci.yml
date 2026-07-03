@@ -5,6 +5,9 @@ on:
     paths:
       - "worker/**"
       - "controller/**"
+      - "scripts/assert_worker_local_ai_lock.mjs"
+      - "scripts/check_immutable_tests.mjs"
+      - ".github/immutable-tests.manifest"
       - ".github/workflows/worker-controller-ci.yml"
   push:
     branches:
@@ -12,6 +15,9 @@ on:
     paths:
       - "worker/**"
       - "controller/**"
+      - "scripts/assert_worker_local_ai_lock.mjs"
+      - "scripts/check_immutable_tests.mjs"
+      - ".github/immutable-tests.manifest"
       - ".github/workflows/worker-controller-ci.yml"
   workflow_dispatch:
 
@@ -37,14 +43,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Generate Wrangler configs
+      - name: Generate and verify local-AI Wrangler configs
         env:
           NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID || '00000000000000000000000000000000' }}
           NUTSNEWS_KV_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_NAMESPACE_ID || '00000000000000000000000000000000' }}
-        run: npm run generate:wrangler
+          LOCAL_AI_URL: http://127.0.0.1:8890
+          AI_PROVIDER: local
+          AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+          ENABLE_LOCAL_AI_SECRET_BINDING: "true"
+        run: npm run check:local-ai-config
 
       - name: TypeScript check
         run: npx tsc --noEmit
+
+      - name: Local-AI deployment lock regression
+        working-directory: ${{ github.workspace }}
+        run: node scripts/assert_worker_local_ai_lock.mjs
+
+      - name: Immutable test guard
+        working-directory: ${{ github.workspace }}
+        run: node scripts/check_immutable_tests.mjs
 
   controller:
     name: Controller syntax check

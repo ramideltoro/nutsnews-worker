@@ -27,15 +27,17 @@ npm run deploy:local-ai
 
 ## Local AI First Deploy Safety
 
-For production local-AI-first deployments, create `worker/.env.deploy.local` from `worker/.env.deploy.example`, then use:
+Production Worker shard generation is now locked to local AI by default. Create `worker/.env.deploy.local` from `worker/.env.deploy.example`, then use:
 
 ```bash
 cd worker
 npm run check:local-ai-config
-npm run deploy:local-ai
+npm run deploy:all
 ```
 
-This prevents accidentally deploying OpenAI-only shard configs when `LOCAL_AI_URL` or the `LOCAL_AI_API_KEY` secret binding is missing from the shell environment.
+This blocks accidental OpenAI-only shard configs. It also requires `AI_PROVIDER_FALLBACK_TO_OPENAI=false`, so article reviews and summary translations do not silently fall back to OpenAI when the local server is missing or failing.
+
+See [Local AI Deployment Lock](docs/LOCAL_AI_DEPLOYMENT_LOCK.md).
 
 ## Verification
 

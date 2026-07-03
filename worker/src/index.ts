@@ -2010,8 +2010,16 @@ function shouldTriggerOpenAiUsageWarning(run: AiUsageRunInsert, config: RuntimeC
 	);
 }
 
-function getAiProvider(value: string | undefined): AiProvider {
-	return value?.toLowerCase() === 'local' ? 'local' : 'openai';
+function getAiProvider(value: string | undefined, hasAnyLocalAiConfig = false): AiProvider {
+	if (value?.toLowerCase() === 'local') {
+		return 'local';
+	}
+
+	if (value?.toLowerCase() === 'openai') {
+		return 'openai';
+	}
+
+	return hasAnyLocalAiConfig ? 'local' : 'openai';
 }
 
 const SUMMARY_LANGUAGE_NAMES: Record<SummaryLanguageCode, string> = {
@@ -2098,11 +2106,11 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
 	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
 	const openAiApiKey = await resolveValue(env.OPENAI_API_KEY);
-	const aiProvider = getAiProvider(env.AI_PROVIDER);
 	const localAiUrl = await resolveValue(env.LOCAL_AI_URL);
 	const localAiApiKey = await resolveValue(env.LOCAL_AI_API_KEY);
+	const aiProvider = getAiProvider(env.AI_PROVIDER, Boolean(localAiUrl || localAiApiKey));
 	const localAiModel = env.LOCAL_AI_MODEL?.trim() || DEFAULT_LOCAL_AI_MODEL;
-	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, true);
+	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, aiProvider !== 'local');
 
 	if (!supabaseUrl) {
 		throw new Error('Missing SUPABASE_URL secret.');
@@ -2122,6 +2130,10 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 
 	if (!openAiApiKey && (!localAiUrl || !localAiApiKey)) {
 		throw new Error('Missing OPENAI_API_KEY secret and complete local AI config.');
+	}
+
+	if (aiProvider === 'local' && (!localAiUrl || !localAiApiKey) && !aiProviderFallbackToOpenAi) {
+		throw new Error('AI_PROVIDER=local requires LOCAL_AI_URL and LOCAL_AI_API_KEY unless AI_PROVIDER_FALLBACK_TO_OPENAI=true.');
 	}
 
 	return {
@@ -4073,6 +4085,26 @@ async function classifyAndSummarizeArticleWithConfiguredProvider(
 		});
 	}
 
+	if (config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi) {
+		await logWarn(env, 'worker.local_ai.review_failed_no_fallback', 'Local AI article review was required, but local AI config is incomplete and OpenAI fallback is disabled', {
+			source: article.source,
+			title: article.title,
+			articleUrl: article.url,
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+			providerOrder: getAiReviewProviderOrder(config),
+		});
+
+		return buildRejectedAiClassificationResult(
+			config,
+			'Local AI article review is required, but LOCAL_AI_URL or LOCAL_AI_API_KEY is missing and OpenAI fallback is disabled.',
+			emptyOpenAiUsage(),
+			'local',
+			config.localAiModel,
+			0,
+		);
+	}
+
 	await logInfo(env, 'worker.openai.review_attempting', 'Trying OpenAI article review', {
 		source: article.source,
 		title: article.title,
@@ -4118,11 +4150,19 @@ function hasLocalAiReviewConfig(config: RuntimeConfig) {
 }
 
 function getAiReviewProviderOrder(config: RuntimeConfig): AiProvider[] {
-	return hasLocalAiReviewConfig(config) ? ['local', 'openai'] : ['openai'];
+	if (hasLocalAiReviewConfig(config)) {
+		return config.aiProviderFallbackToOpenAi ? ['local', 'openai'] : ['local'];
+	}
+
+	return config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi ? ['local'] : ['openai'];
 }
 
 function getSummaryTranslationProviderOrder(config: RuntimeConfig): AiProvider[] {
-	return hasLocalAiTranslationConfig(config) ? ['local', 'openai'] : ['openai'];
+	if (hasLocalAiTranslationConfig(config)) {
+		return config.aiProviderFallbackToOpenAi ? ['local', 'openai'] : ['local'];
+	}
+
+	return config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi ? ['local'] : ['openai'];
 }
 
 function getLocalAiTranslateUrl(config: RuntimeConfig) {
@@ -4665,6 +4705,17 @@ async function translateArticleSummary(
 			return localTranslation;
 		}
 
+		if (!config.aiProviderFallbackToOpenAi) {
+			await logWarn(env, 'worker.translation.local.failed_no_fallback', 'Local AI summary translation failed and OpenAI fallback is disabled', {
+				articleUrl: article.original_url,
+				title: article.title,
+				languageCode,
+				providerOrder: getSummaryTranslationProviderOrder(config),
+			});
+
+			return null;
+		}
+
 		await logWarn(env, 'worker.translation.fallback_to_openai', 'Falling back to OpenAI after local summary translation failed', {
 			articleUrl: article.original_url,
 			title: article.title,
@@ -4695,6 +4746,19 @@ async function translateArticleSummary(
 			hasLocalAiUrl: Boolean(config.localAiUrl),
 			hasLocalAiApiKey: Boolean(config.localAiApiKey),
 		});
+	}
+
+	if (config.aiProvider === 'local' && !config.aiProviderFallbackToOpenAi) {
+		await logWarn(env, 'worker.translation.local.missing_config_no_fallback', 'Local AI summary translation was required, but local AI config is incomplete and OpenAI fallback is disabled', {
+			articleUrl: article.original_url,
+			title: article.title,
+			languageCode,
+			hasLocalAiUrl: Boolean(config.localAiUrl),
+			hasLocalAiApiKey: Boolean(config.localAiApiKey),
+			providerOrder: getSummaryTranslationProviderOrder(config),
+		});
+
+		return null;
 	}
 
 	await logInfo(env, 'worker.translation.openai.attempting', 'Trying OpenAI summary translation', {

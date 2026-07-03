@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const generatedDir = path.join(process.cwd(), 'generated-wrangler');
+const generatedDir = path.resolve(process.cwd(), process.env.NUTSNEWS_GENERATED_WRANGLER_DIR ?? 'generated-wrangler');
+const allowOpenAiFallback = process.env.NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT === 'true';
+
 const files = fs
 	.readdirSync(generatedDir)
 	.filter((name) => /^wrangler\.shard\d+\.jsonc$/.test(name))
@@ -27,8 +29,13 @@ for (const file of files) {
 	if (!secretBindings.has('LOCAL_AI_API_KEY')) {
 		failures.push(`${file}: LOCAL_AI_API_KEY secret binding is missing`);
 	}
-	if (!vars.AI_PROVIDER_FALLBACK_TO_OPENAI) {
-		failures.push(`${file}: AI_PROVIDER_FALLBACK_TO_OPENAI is missing`);
+	if (vars.AI_PROVIDER_FALLBACK_TO_OPENAI !== 'false' && !allowOpenAiFallback) {
+		failures.push(
+			`${file}: AI_PROVIDER_FALLBACK_TO_OPENAI is ${JSON.stringify(vars.AI_PROVIDER_FALLBACK_TO_OPENAI)}, expected "false" so Worker shards cannot silently fall back to OpenAI`,
+		);
+	}
+	if (vars.AI_REVIEW_CONCURRENCY !== '1') {
+		failures.push(`${file}: AI_REVIEW_CONCURRENCY is ${JSON.stringify(vars.AI_REVIEW_CONCURRENCY)}, expected "1" for home-server local AI safety`);
 	}
 }
 
@@ -40,4 +47,4 @@ if (failures.length > 0) {
 	process.exit(1);
 }
 
-console.log(`Verified ${files.length} shard configs: local AI first is configured and LOCAL_AI_API_KEY is bound.`);
+console.log(`Verified ${files.length} shard configs: local AI first is configured, OpenAI fallback is disabled, and LOCAL_AI_API_KEY is bound.`);
