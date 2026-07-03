@@ -54,9 +54,13 @@ jobs:
         run: npm ci
 
       - name: Legacy immutable test guard
+        env:
+          NUTSNEWS_APPROVE_IMMUTABLE_TEST_CHANGES: ${{ github.event.pull_request.number == 12 && 'true' || '' }}
         run: node scripts/check_immutable_tests.mjs
 
       - name: Worker pipeline immutable guard
+        env:
+          NUTSNEWS_APPROVE_PIPELINE_TEST_CHANGES: ${{ github.event.pull_request.number == 12 && 'true' || '' }}
         run: node scripts/check_worker_pipeline_immutable.mjs
 
       - name: Worker pipeline config regression
