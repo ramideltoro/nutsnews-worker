@@ -168,6 +168,20 @@ type PublicFeedSnapshotRefreshResult = {
 	publicFeedSnapshotRefreshedAt: string | null;
 };
 
+type KvOperationCounts = {
+	reads: number;
+	writes: number;
+	lists: number;
+	deletes: number;
+	readCacheHits: number;
+	writeSkips: number;
+	readFailures: number;
+	writeFailures: number;
+	listFailures: number;
+	deleteFailures: number;
+	rateLimitedFailures: number;
+};
+
 type FeedHealthSnapshotRow = {
 	feed_url: string;
 	consecutive_failure_count: number | null;
@@ -504,6 +518,8 @@ type RefreshResult = {
 	kvProcessedUrlHitCount: number;
 	kvProcessedUrlSaveOk: boolean;
 	kvRunStateSaveOk: boolean;
+	kvRunStateSaveSkipped: boolean;
+	kvOperationCounts: KvOperationCounts;
 	redisEnabled: boolean;
 	redisAiReviewLockAcquiredCount: number;
 	redisAiReviewLockSkippedCount: number;
@@ -541,6 +557,7 @@ type TranslationBacklogResult = {
 	publicFeedEdgeSnapshotPublishOk: boolean;
 	publicFeedEdgeSnapshotArticleCount: number;
 	publicFeedSnapshotRefreshedAt: string | null;
+	kvOperationCounts: KvOperationCounts;
 	durationMs: number;
 };
 
@@ -905,6 +922,65 @@ type RedisAiReviewLockResult = {
 	enabled: boolean;
 };
 
+type KvRuntimeState = {
+	counts: KvOperationCounts;
+	jsonReadCache: Map<string, unknown | null>;
+};
+
+const kvRuntimeStates = new WeakMap<Env, KvRuntimeState>();
+
+function createEmptyKvOperationCounts(): KvOperationCounts {
+	return {
+		reads: 0,
+		writes: 0,
+		lists: 0,
+		deletes: 0,
+		readCacheHits: 0,
+		writeSkips: 0,
+		readFailures: 0,
+		writeFailures: 0,
+		listFailures: 0,
+		deleteFailures: 0,
+		rateLimitedFailures: 0,
+	};
+}
+
+function getKvRuntimeState(env: Env): KvRuntimeState {
+	let state = kvRuntimeStates.get(env);
+
+	if (!state) {
+		state = {
+			counts: createEmptyKvOperationCounts(),
+			jsonReadCache: new Map(),
+		};
+		kvRuntimeStates.set(env, state);
+	}
+
+	return state;
+}
+
+function getKvOperationCounts(env: Env): KvOperationCounts {
+	return { ...getKvRuntimeState(env).counts };
+}
+
+function isKvRateLimitError(error: unknown) {
+	const message = getErrorMessage(error).toLowerCase();
+	return message.includes('429') || message.includes('rate limit') || message.includes('too many requests');
+}
+
+function recordKvFailure(env: Env, operation: 'read' | 'write' | 'list' | 'delete', error: unknown) {
+	const counts = getKvRuntimeState(env).counts;
+
+	if (operation === 'read') counts.readFailures += 1;
+	if (operation === 'write') counts.writeFailures += 1;
+	if (operation === 'list') counts.listFailures += 1;
+	if (operation === 'delete') counts.deleteFailures += 1;
+
+	if (isKvRateLimitError(error)) {
+		counts.rateLimitedFailures += 1;
+	}
+}
+
 function isKvEnabled(env: Env) {
 	return Boolean(env.NUTSNEWS_KV);
 }
@@ -945,12 +1021,25 @@ async function readJsonFromKv<T>(env: Env, key: string): Promise<T | null> {
 		return null;
 	}
 
+	const state = getKvRuntimeState(env);
+
+	if (state.jsonReadCache.has(key)) {
+		state.counts.readCacheHits += 1;
+		return state.jsonReadCache.get(key) as T | null;
+	}
+
 	try {
-		return await env.NUTSNEWS_KV.get<T>(key, 'json');
+		state.counts.reads += 1;
+		const value = await env.NUTSNEWS_KV.get<T>(key, 'json');
+		state.jsonReadCache.set(key, value);
+		return value;
 	} catch (error) {
-		await logWarn(env, 'worker.kv.read_failed', 'Cloudflare KV read failed', {
+		recordKvFailure(env, 'read', error);
+
+		await logWarn(env, isKvRateLimitError(error) ? 'worker.kv.read_rate_limited' : 'worker.kv.read_failed', 'Cloudflare KV read failed', {
 			key,
 			errorMessage: getErrorMessage(error),
+			rateLimited: isKvRateLimitError(error),
 		});
 
 		return null;
@@ -962,13 +1051,26 @@ async function writeJsonToKv(env: Env, key: string, value: unknown, expirationTt
 		return false;
 	}
 
+	const state = getKvRuntimeState(env);
+	const serializedValue = JSON.stringify(value);
+
+	if (state.jsonReadCache.has(key) && JSON.stringify(state.jsonReadCache.get(key)) === serializedValue) {
+		state.counts.writeSkips += 1;
+		return true;
+	}
+
 	try {
-		await env.NUTSNEWS_KV.put(key, JSON.stringify(value), { expirationTtl });
+		state.counts.writes += 1;
+		await env.NUTSNEWS_KV.put(key, serializedValue, { expirationTtl });
+		state.jsonReadCache.set(key, value);
 		return true;
 	} catch (error) {
-		await logWarn(env, 'worker.kv.write_failed', 'Cloudflare KV write failed', {
+		recordKvFailure(env, 'write', error);
+
+		await logWarn(env, isKvRateLimitError(error) ? 'worker.kv.write_rate_limited' : 'worker.kv.write_failed', 'Cloudflare KV write failed', {
 			key,
 			errorMessage: getErrorMessage(error),
+			rateLimited: isKvRateLimitError(error),
 		});
 
 		return false;
@@ -1025,6 +1127,12 @@ async function rememberProcessedUrlsInKv(env: Env, shardIndex: number, urls: str
 
 	const maxHashes = getKvRecentProcessedUrlLimit(env);
 	const compactHashes = Array.from(nextHashes).slice(-maxHashes);
+
+	if (compactHashes.length === existingHashes.length && compactHashes.every((hash, index) => hash === existingHashes[index])) {
+		getKvRuntimeState(env).counts.writeSkips += 1;
+		return true;
+	}
+
 	const nextCache: RecentProcessedUrlCache = {
 		version: KV_RECENT_PROCESSED_URL_KEY_VERSION,
 		shardIndex,
@@ -1033,6 +1141,17 @@ async function rememberProcessedUrlsInKv(env: Env, shardIndex: number, urls: str
 	};
 
 	return writeJsonToKv(env, key, nextCache, KV_RECENT_PROCESSED_URL_TTL_SECONDS);
+}
+
+function shouldSkipKvRunStateSave(result: RefreshResult, runSource: RefreshOptions['runSource']) {
+	return (
+		runSource === 'scheduled' &&
+		result.aiReviewedCount === 0 &&
+		result.noThumbnailRejectedCount === 0 &&
+		result.locallyRejectedCount === 0 &&
+		result.articleSummaryTranslationCount === 0 &&
+		result.articleSummaryRecoveryAttemptedTaskCount === 0
+	);
 }
 
 async function saveRunStateToKv(
@@ -1047,6 +1166,18 @@ async function saveRunStateToKv(
 ): Promise<boolean> {
 	if (!env.NUTSNEWS_KV) {
 		return false;
+	}
+
+	if (shouldSkipKvRunStateSave(result, metadata.runSource)) {
+		getKvRuntimeState(env).counts.writeSkips += 2;
+		await logInfo(env, 'worker.kv.run_state_save_skipped', 'Skipped KV run-state writes for an idle scheduled refresh', {
+			shardIndex: result.shardIndex,
+			runSource: metadata.runSource,
+			requestId: metadata.requestId,
+			candidateCount: result.candidateCount,
+			alreadyReviewedCount: result.alreadyReviewedCount,
+		});
+		return true;
 	}
 
 	const state: KvRunState = {
@@ -1121,6 +1252,19 @@ function getPublicFeedEdgeSnapshotAgeSeconds(snapshot: PublicFeedEdgeSnapshot | 
 	}
 
 	return Math.max(0, Math.floor((Date.now() - updatedAtMs) / 1000));
+}
+
+function getPublicFeedEdgeSnapshotContentFingerprint(snapshot: PublicFeedEdgeSnapshot | null) {
+	if (!snapshot) {
+		return '';
+	}
+
+	return JSON.stringify({
+		version: snapshot.version,
+		articleCount: snapshot.articleCount,
+		maxArticles: snapshot.maxArticles,
+		articles: snapshot.articles,
+	});
 }
 
 function buildPublicFeedEdgeSnapshotHeaders(snapshot: PublicFeedEdgeSnapshot | null, status: 'hit' | 'miss' | 'error') {
@@ -1254,6 +1398,22 @@ async function publishPublicFeedEdgeSnapshotToKv(
 		maxArticles: limit,
 		articles,
 	};
+
+	const existingSnapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY);
+
+	if (
+		existingSnapshot?.version === PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION &&
+		getPublicFeedEdgeSnapshotContentFingerprint(existingSnapshot) === getPublicFeedEdgeSnapshotContentFingerprint(snapshot)
+	) {
+		getKvRuntimeState(env).counts.writeSkips += 1;
+		await logInfo(env, 'worker.public_feed_edge_snapshot.write_skipped_unchanged', 'Skipped unchanged public feed edge snapshot KV write', {
+			articleCount: snapshot.articleCount,
+			maxArticles: snapshot.maxArticles,
+			existingUpdatedAt: existingSnapshot.updatedAt,
+			refreshedAt,
+		});
+		return { ok: true, articleCount: snapshot.articleCount };
+	}
 
 	const ok = await writeJsonToKv(
 		env,
@@ -6457,6 +6617,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
 		kvProcessedUrlSaveOk,
 		kvRunStateSaveOk: false,
+		kvRunStateSaveSkipped: false,
+		kvOperationCounts: getKvOperationCounts(env),
 		redisEnabled,
 		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
 		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
@@ -6486,10 +6648,13 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		runSource: options.runSource ?? 'unknown',
 		requestId: options.requestId ?? null,
 	});
+	const kvRunStateSaveSkipped = shouldSkipKvRunStateSave(resultBeforeKvRunStateSave, options.runSource ?? 'unknown');
 
 	const resultBeforeRedisStatsSave: RefreshResult = {
 		...resultBeforeKvRunStateSave,
 		kvRunStateSaveOk,
+		kvRunStateSaveSkipped,
+		kvOperationCounts: getKvOperationCounts(env),
 	};
 
 	const redisStatsSaveOk = await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown');
@@ -6497,6 +6662,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const result: RefreshResult = {
 		...resultBeforeRedisStatsSave,
 		redisStatsSaveOk,
+		kvOperationCounts: getKvOperationCounts(env),
 	};
 
 	await logInfo(env, 'worker.refresh.completed', 'NutsNews Worker refresh completed', result);
@@ -6580,6 +6746,7 @@ async function translateSummaryBacklog(
 		publicFeedEdgeSnapshotPublishOk,
 		publicFeedEdgeSnapshotArticleCount,
 		publicFeedSnapshotRefreshedAt,
+		kvOperationCounts: getKvOperationCounts(env),
 		durationMs: Date.now() - startedAt,
 	};
 
@@ -6689,6 +6856,7 @@ export default {
 				path: url.pathname,
 				flushReason: 'log_test',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 
 			return Response.json({
@@ -6735,6 +6903,7 @@ export default {
 				path: url.pathname,
 				flushReason: 'manual_rate_limited',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 
 			return Response.json(
@@ -6765,6 +6934,7 @@ export default {
 				path: url.pathname,
 				flushReason: 'manual_lock_skipped',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 
 			return Response.json({
@@ -6848,6 +7018,7 @@ export default {
 				path: url.pathname,
 				flushReason: 'manual_request_finished',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 		}
 	},
@@ -6875,6 +7046,7 @@ export default {
 				runSource: 'scheduled',
 				flushReason: 'scheduled_lock_skipped',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 
 			return;
@@ -6915,6 +7087,7 @@ export default {
 				runSource: 'scheduled',
 				flushReason: 'scheduled_finished',
 				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
 			});
 		}
 	},

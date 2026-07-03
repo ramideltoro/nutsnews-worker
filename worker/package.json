@@ -12,6 +12,7 @@
 		"check:local-ai-config": "npm run generate:wrangler && node scripts/verify-local-ai-wrangler-config.mjs",
 		"deploy:local-ai": "npm run deploy:all",
 		"test:local-ai-lock": "node ../scripts/assert_worker_local_ai_lock.mjs",
+		"test:kv-usage": "node ../scripts/check_worker_kv_usage.mjs",
 		"test:immutable": "node ../scripts/check_immutable_tests.mjs",
 		"deploy:openai-only": "NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT=true npm run generate:wrangler && for i in {0..24}; do echo \"Deploying OpenAI-only shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done"
 	},
