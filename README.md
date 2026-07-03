@@ -39,6 +39,15 @@ This blocks accidental OpenAI-only shard configs. It also requires `AI_PROVIDER_
 
 See [Local AI Deployment Lock](docs/LOCAL_AI_DEPLOYMENT_LOCK.md).
 
+
+## GitHub Actions Worker Pipeline
+
+Pull requests now run the guarded `Worker Pipeline` workflow before merge. After the PR merges into `main` or `master`, the same workflow reruns CI and deploys the Worker shards plus the controller to Cloudflare.
+
+Required production deploy secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NUTSNEWS_SECRETS_STORE_ID`, `NUTSNEWS_KV_NAMESPACE_ID`, and `LOCAL_AI_URL`.
+
+See [Worker GitHub Actions Pipeline](docs/WORKER_GITHUB_ACTIONS_PIPELINE.md).
+
 ## Verification
 
 Run the fully mocked offline Worker test:
