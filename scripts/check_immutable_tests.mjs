@@ -15,33 +15,39 @@ function runGit(args, options = {}) {
 	});
 }
 
+function refExists(ref) {
+	try {
+		runGit(['rev-parse', '--verify', ref], { allowFailure: true });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function getFirstExistingRef(refs) {
+	return refs.find(refExists) ?? null;
+}
+
 function getBaseRef() {
 	const explicit = process.env.NUTSNEWS_IMMUTABLE_TEST_BASE_REF;
-	if (explicit) {
+	if (explicit && refExists(explicit)) {
 		return explicit;
 	}
 
 	const githubBaseRef = process.env.GITHUB_BASE_REF;
 	if (githubBaseRef) {
-		try {
-			runGit(['rev-parse', '--verify', `origin/${githubBaseRef}`], { allowFailure: true });
-			return `origin/${githubBaseRef}`;
-		} catch {
-			return githubBaseRef;
+		const resolvedGithubBaseRef = getFirstExistingRef([`origin/${githubBaseRef}`, githubBaseRef]);
+		if (resolvedGithubBaseRef) {
+			return resolvedGithubBaseRef;
 		}
 	}
 
-	try {
-		runGit(['rev-parse', '--verify', 'origin/main'], { allowFailure: true });
-		return 'origin/main';
-	} catch {
-		try {
-			runGit(['rev-parse', '--verify', 'HEAD~1'], { allowFailure: true });
-			return 'HEAD~1';
-		} catch {
-			return null;
-		}
+	const resolvedDefaultBaseRef = getFirstExistingRef(['origin/main', 'main', 'HEAD^1', 'HEAD~1']);
+	if (resolvedDefaultBaseRef) {
+		return resolvedDefaultBaseRef;
 	}
+
+	return null;
 }
 
 const immutablePaths = new Set(
