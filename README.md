@@ -1,3 +1,5 @@
+[![Edge Feed Snapshot Health](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/edge-feed-snapshot-health.yml/badge.svg)](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/edge-feed-snapshot-health.yml)
+
 # NutsNews Worker
 
 Cloudflare Worker ingestion, AI review, translation, and publishing pipeline for NutsNews.
