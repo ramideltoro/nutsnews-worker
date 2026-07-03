@@ -1,5 +1,9 @@
 [![Edge Feed Snapshot Health](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/edge-feed-snapshot-health.yml/badge.svg)](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/edge-feed-snapshot-health.yml)
 
+[![Worker Smoke Test](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/worker-smoke-test.yml/badge.svg)](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/worker-smoke-test.yml)
+
+[![Worker Offline E2E Regression](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/worker-offline-e2e.yml/badge.svg)](https://github.com/ramideltoro/nutsnews-worker/actions/workflows/worker-offline-e2e.yml)
+
 # NutsNews Worker
 
 Cloudflare Worker ingestion, AI review, translation, and publishing pipeline for NutsNews.
