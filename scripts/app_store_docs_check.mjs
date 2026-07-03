@@ -6,7 +6,6 @@ const requiredFiles = [
   'web/app/privacy/LocalizedPrivacyPolicyPage.tsx',
   'web/app/contact/page.tsx',
   'web/app/contact/ContactForm.tsx',
-  'docs/DEPLOYMENT_CHECKLIST.md',
 ];
 
 const failures = [];

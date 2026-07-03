@@ -15,7 +15,8 @@ Cloudflare Worker ingestion, AI review, translation, and publishing pipeline for
 - local-ai-service: home-server local AI endpoint
 - supabase: database config, migrations, and restore validation
 - scripts: operational and regression-test scripts
-- docs: Worker and operations documentation
+
+Shared product, operations, deployment, and Worker documentation lives in `ramideltoro/nutsnews-docs` so documentation-only updates do not trigger Worker deployments.
 
 ## Main Worker Commands
 
@@ -43,7 +44,7 @@ npm run deploy:all
 
 This blocks accidental OpenAI-only shard configs. It also requires `AI_PROVIDER_FALLBACK_TO_OPENAI=true`, so article reviews and summary translations do not silently fall back to OpenAI when the local server is missing or failing.
 
-See [Local AI Deployment Lock](docs/LOCAL_AI_DEPLOYMENT_LOCK.md).
+See [Local AI Deployment Lock](https://github.com/ramideltoro/nutsnews-docs/blob/main/LOCAL_AI_DEPLOYMENT_LOCK.md).
 
 
 ## GitHub Actions Worker Pipeline
@@ -52,7 +53,7 @@ Pull requests now run the guarded `Worker Pipeline` workflow before merge. After
 
 Required production deploy secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NUTSNEWS_SECRETS_STORE_ID`, `NUTSNEWS_KV_NAMESPACE_ID`, and `LOCAL_AI_URL`.
 
-See [Worker GitHub Actions Pipeline](docs/WORKER_GITHUB_ACTIONS_PIPELINE.md).
+See [Worker GitHub Actions Pipeline](https://github.com/ramideltoro/nutsnews-docs/blob/main/WORKER_GITHUB_ACTIONS_PIPELINE.md).
 
 ## Verification
 
@@ -66,6 +67,7 @@ npm run test:e2e:offline
 ## Related Repositories
 
 - nutsnews: public website and admin app
+- nutsnews-docs: shared documentation for web, Worker, and iOS
 - nutsnews-worker: Worker ingestion, controller, local AI, and backend automation
 - nutsnews-ios: native iOS app
 
@@ -76,4 +78,4 @@ MIT. See LICENSE.
 
 ## Translation quality
 
-The Worker validates translated summary responses before saving them to `public.article_summaries`. Critical issues are retried/rejected, while missing public rows fall back to English on the web app. See `docs/MULTILINGUAL_QUALITY_AND_FALLBACKS.md`.
+The Worker validates translated summary responses before saving them to `public.article_summaries`. Critical issues are retried/rejected, while missing public rows fall back to English on the web app. See [Multilingual Quality and Fallbacks](https://github.com/ramideltoro/nutsnews-docs/blob/main/MULTILINGUAL_QUALITY_AND_FALLBACKS.md).
