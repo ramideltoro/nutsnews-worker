@@ -46,6 +46,8 @@ type Env = {
 	UPSTASH_REDIS_MANUAL_RATE_LIMIT_MAX?: string;
 	UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS?: string;
 	UPSTASH_REDIS_COUNTER_TTL_SECONDS?: string;
+	INGESTION_BACKPRESSURE_QUEUE_LIMIT?: string;
+	INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT?: string;
 };
 
 type RuntimeConfig = {
@@ -305,6 +307,7 @@ type RefreshOptions = {
 	imageLookupLimit?: number;
 	runSource?: 'manual' | 'scheduled' | 'unknown';
 	requestId?: string;
+	workerLock?: RedisLock;
 };
 
 type OpenAiUsage = {
@@ -336,6 +339,31 @@ type ImageHydrationResult = {
 	articles: RssArticle[];
 	lookupCount: number;
 	foundCount: number;
+};
+
+type QueueVisibilitySourceSummary = {
+	source: string;
+	shardIndex: number;
+	queuedCount: number;
+};
+
+type ProcessedUrlLookupResult = {
+	urls: Set<string>;
+	retryableNoThumbnailReviewCount: number;
+};
+
+type BackpressureDbCounts = {
+	articleCount: number | null;
+	error: string | null;
+};
+
+type BackpressureDecision = {
+	deferred: boolean;
+	reasons: string[];
+	queueLimit: number;
+	dbArticleLimit: number;
+	dbArticleCount: number | null;
+	dbArticleCountError: string | null;
 };
 
 type AiUsageRunInsert = {
@@ -455,6 +483,16 @@ type RefreshResult = {
 	candidateCount: number;
 	alreadyReviewedCount: number;
 	unreviewedCount: number;
+	queuedCount: number;
+	queuedBySource: QueueVisibilitySourceSummary[];
+	deferredCount: number;
+	deferredReasons: string[];
+	retriedCount: number;
+	processedCount: number;
+	backpressureQueueLimit: number;
+	backpressureDbArticleLimit: number;
+	backpressureDbArticleCount: number | null;
+	backpressureDbArticleCountError: string | null;
 	imageHydrationLookupCount: number;
 	imageHydrationFoundCount: number;
 	noThumbnailRejectedCount: number;
@@ -521,6 +559,7 @@ type RefreshResult = {
 	kvRunStateSaveSkipped: boolean;
 	kvOperationCounts: KvOperationCounts;
 	redisEnabled: boolean;
+	redisWorkerLockExtended: boolean;
 	redisAiReviewLockAcquiredCount: number;
 	redisAiReviewLockSkippedCount: number;
 	redisStatsSaveOk: boolean;
@@ -614,6 +653,10 @@ const DEFAULT_UPSTASH_REDIS_MANUAL_RATE_LIMIT_WINDOW_SECONDS = 60 * 60;
 const DEFAULT_UPSTASH_REDIS_COUNTER_TTL_SECONDS = 3 * 24 * 60 * 60;
 const HARD_MAX_UPSTASH_REDIS_LOCK_TTL_SECONDS = 60 * 60;
 const HARD_MAX_UPSTASH_REDIS_RATE_LIMIT_WINDOW_SECONDS = 24 * 60 * 60;
+const DEFAULT_INGESTION_BACKPRESSURE_QUEUE_LIMIT = 250;
+const HARD_MAX_INGESTION_BACKPRESSURE_QUEUE_LIMIT = 5000;
+const DEFAULT_INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT = 30000;
+const HARD_MAX_INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT = 1000000;
 
 
 const POSITIVE_KEYWORDS = [
@@ -1610,6 +1653,22 @@ function getUpstashRedisCounterTtlSeconds(env: Env) {
 	return clampPositiveNumber(env.UPSTASH_REDIS_COUNTER_TTL_SECONDS, DEFAULT_UPSTASH_REDIS_COUNTER_TTL_SECONDS, 14 * 24 * 60 * 60);
 }
 
+function getIngestionBackpressureQueueLimit(env: Env) {
+	return clampPositiveNumber(
+		env.INGESTION_BACKPRESSURE_QUEUE_LIMIT,
+		DEFAULT_INGESTION_BACKPRESSURE_QUEUE_LIMIT,
+		HARD_MAX_INGESTION_BACKPRESSURE_QUEUE_LIMIT,
+	);
+}
+
+function getIngestionBackpressureDbArticleLimit(env: Env) {
+	return clampPositiveNumber(
+		env.INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT,
+		DEFAULT_INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT,
+		HARD_MAX_INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT,
+	);
+}
+
 async function getUpstashRedisConfig(env: Env): Promise<UpstashRedisConfig | null> {
 	if (isUpstashRedisExplicitlyDisabled(env)) {
 		return null;
@@ -1792,6 +1851,35 @@ async function releaseRedisLock(env: Env, lock: RedisLock): Promise<boolean> {
 	);
 
 	return response !== null;
+}
+
+async function extendRedisLock(env: Env, lock: RedisLock, ttlSeconds: number): Promise<boolean> {
+	if (!lock.enabled || !lock.acquired) {
+		return true;
+	}
+
+	const response = await runUpstashRedisCommand<number>(
+		env,
+		[
+			'EVAL',
+			"if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+			1,
+			lock.key,
+			lock.value,
+			ttlSeconds,
+		],
+		{ key: lock.key },
+	);
+
+	return response?.result === 1;
+}
+
+async function extendRedisWorkerRunLock(env: Env, lock: RedisLock | undefined): Promise<boolean> {
+	if (!lock) {
+		return true;
+	}
+
+	return extendRedisLock(env, lock, getUpstashRedisWorkerLockTtlSeconds(env));
 }
 
 async function acquireRedisWorkerRunLock(env: Env, requestId: string): Promise<RedisLock> {
@@ -3504,11 +3592,14 @@ function shouldTreatReviewedRowAsProcessed(row: ReviewedUrlRow, nowMs: number): 
 	return nowMs - reviewedAtMs < retryAfterMs;
 }
 
-async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]): Promise<Set<string>> {
+async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]): Promise<ProcessedUrlLookupResult> {
 	const startedAt = Date.now();
 
 	if (urls.length === 0) {
-		return new Set();
+		return {
+			urls: new Set(),
+			retryableNoThumbnailReviewCount: 0,
+		};
 	}
 
 	const candidateUrls = new Set(urls);
@@ -3665,7 +3756,120 @@ async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]):
 		durationMs: Date.now() - startedAt,
 	});
 
-	return reviewedUrls;
+	return {
+		urls: reviewedUrls,
+		retryableNoThumbnailReviewCount,
+	};
+}
+
+function buildQueueVisibilityBySource(articles: RssArticle[], shardIndex: number): QueueVisibilitySourceSummary[] {
+	const counts = new Map<string, number>();
+
+	for (const article of articles) {
+		counts.set(article.source, (counts.get(article.source) ?? 0) + 1);
+	}
+
+	return Array.from(counts.entries())
+		.map(([source, queuedCount]) => ({
+			source,
+			shardIndex,
+			queuedCount,
+		}))
+		.sort((a, b) => b.queuedCount - a.queuedCount || a.source.localeCompare(b.source));
+}
+
+function parseSupabaseContentRangeCount(contentRange: string | null): number | null {
+	if (!contentRange) {
+		return null;
+	}
+
+	const match = contentRange.match(/\/(\d+)$/);
+
+	if (!match) {
+		return null;
+	}
+
+	const parsed = Number.parseInt(match[1], 10);
+
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function loadBackpressureDbCounts(env: Env, config: RuntimeConfig): Promise<BackpressureDbCounts> {
+	const startedAt = Date.now();
+
+	try {
+		const response = await fetch(`${config.supabaseUrl}/rest/v1/articles?select=id`, {
+			method: 'HEAD',
+			headers: {
+				apikey: config.supabaseServiceRoleKey,
+				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
+				Prefer: 'count=exact',
+			},
+		});
+
+		if (!response.ok) {
+			const errorText = await readResponseTextSafely(response);
+
+			await logWarn(env, 'worker.backpressure.db_count_failed', 'Failed to load article count for ingestion backpressure', {
+				status: response.status,
+				errorText,
+				durationMs: Date.now() - startedAt,
+			});
+
+			return {
+				articleCount: null,
+				error: `Supabase article count returned HTTP ${response.status}.`,
+			};
+		}
+
+		const articleCount = parseSupabaseContentRangeCount(response.headers.get('content-range'));
+
+		if (articleCount === null) {
+			await logWarn(env, 'worker.backpressure.db_count_parse_failed', 'Supabase article count response did not include a usable Content-Range count', {
+				contentRange: response.headers.get('content-range'),
+				durationMs: Date.now() - startedAt,
+			});
+		}
+
+		return {
+			articleCount,
+			error: articleCount === null ? 'Supabase article count response did not include a usable Content-Range count.' : null,
+		};
+	} catch (error) {
+		const errorMessage = getErrorMessage(error);
+
+		await logError(env, 'worker.backpressure.db_count_exception', 'Supabase article count check threw an exception', error, {
+			durationMs: Date.now() - startedAt,
+		});
+
+		return {
+			articleCount: null,
+			error: errorMessage,
+		};
+	}
+}
+
+function buildBackpressureDecision(env: Env, queuedCount: number, dbCounts: BackpressureDbCounts): BackpressureDecision {
+	const queueLimit = getIngestionBackpressureQueueLimit(env);
+	const dbArticleLimit = getIngestionBackpressureDbArticleLimit(env);
+	const reasons: string[] = [];
+
+	if (queuedCount > queueLimit) {
+		reasons.push(`queued_unreviewed_articles ${queuedCount} exceeds limit ${queueLimit}`);
+	}
+
+	if (dbCounts.articleCount !== null && dbCounts.articleCount >= dbArticleLimit) {
+		reasons.push(`articles table count ${dbCounts.articleCount} reached limit ${dbArticleLimit}`);
+	}
+
+	return {
+		deferred: reasons.length > 0,
+		reasons,
+		queueLimit,
+		dbArticleLimit,
+		dbArticleCount: dbCounts.articleCount,
+		dbArticleCountError: dbCounts.error,
+	};
 }
 
 function normalizeTextWhitespace(value: string) {
@@ -6223,10 +6427,188 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const kvProcessedUrlLookup = await getProcessedUrlsFromKv(env, shardIndex, candidateUrls);
 	const candidateUrlsNeedingSupabaseLookup = candidateUrls.filter((url) => !kvProcessedUrlLookup.urls.has(url));
-	const supabaseReviewedUrls = await getReviewedUrls(env, config, candidateUrlsNeedingSupabaseLookup);
-	const reviewedUrls = new Set([...kvProcessedUrlLookup.urls, ...supabaseReviewedUrls]);
+	const supabaseProcessedUrlLookup = await getReviewedUrls(env, config, candidateUrlsNeedingSupabaseLookup);
+	const reviewedUrls = new Set([...kvProcessedUrlLookup.urls, ...supabaseProcessedUrlLookup.urls]);
 
 	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter((article) => !reviewedUrls.has(article.url));
+	const queuedBySource = buildQueueVisibilityBySource(unreviewedArticlesBeforeImageHydration, shardIndex);
+	const backpressureDbCounts = await loadBackpressureDbCounts(env, config);
+	const backpressureDecision = buildBackpressureDecision(env, unreviewedArticlesBeforeImageHydration.length, backpressureDbCounts);
+
+	await logInfo(env, 'worker.backpressure.queue_visibility', 'Worker ingestion queue visibility calculated', {
+		shardIndex,
+		queuedCount: unreviewedArticlesBeforeImageHydration.length,
+		queuedBySource,
+		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		processedCount: reviewedUrls.size,
+		backpressureQueueLimit: backpressureDecision.queueLimit,
+		backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
+		backpressureDbArticleCount: backpressureDecision.dbArticleCount,
+		backpressureDbArticleCountError: backpressureDecision.dbArticleCountError,
+		deferred: backpressureDecision.deferred,
+		deferredReasons: backpressureDecision.reasons,
+	});
+
+	if (backpressureDecision.deferred) {
+		const runCompletedAt = new Date();
+		const durationMs = Date.now() - refreshStartedAt;
+		const redisEnabled = await isUpstashRedisEnabled(env);
+
+		await logWarn(env, 'worker.backpressure.expensive_work_deferred', 'Worker refresh deferred expensive work because ingestion backpressure limits were reached', {
+			shardIndex,
+			runSource: options.runSource ?? 'unknown',
+			requestId: options.requestId ?? null,
+			queuedCount: unreviewedArticlesBeforeImageHydration.length,
+			queuedBySource,
+			deferredCount: unreviewedArticlesBeforeImageHydration.length,
+			deferredReasons: backpressureDecision.reasons,
+		});
+
+		const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
+			message: 'NutsNews refresh deferred by ingestion backpressure',
+			shardIndex,
+			feedsPerShard,
+			maxAiReviews,
+			articlePageImageLookupLimit,
+			feedCount: shardFeeds.length,
+			feedFetchSuccessCount: rssFetchResult.feedFetchSuccessCount,
+			feedFetchFailureCount: rssFetchResult.feedFetchFailureCount,
+			failedFeeds: rssFetchResult.failedFeeds,
+			fetchedCount: fetchedArticles.length,
+			candidateCount: candidateArticles.length,
+			alreadyReviewedCount: reviewedUrls.size,
+			unreviewedCount: unreviewedArticlesBeforeImageHydration.length,
+			queuedCount: unreviewedArticlesBeforeImageHydration.length,
+			queuedBySource,
+			deferredCount: unreviewedArticlesBeforeImageHydration.length,
+			deferredReasons: backpressureDecision.reasons,
+			retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+			processedCount: reviewedUrls.size,
+			backpressureQueueLimit: backpressureDecision.queueLimit,
+			backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
+			backpressureDbArticleCount: backpressureDecision.dbArticleCount,
+			backpressureDbArticleCountError: backpressureDecision.dbArticleCountError,
+			imageHydrationLookupCount: 0,
+			imageHydrationFoundCount: 0,
+			noThumbnailRejectedCount: 0,
+			locallyRejectedCount: 0,
+			eligibleForAiCount: 0,
+			aiReviewedCount: 0,
+			aiProvider: config.aiProvider,
+			aiReviewProviderOrder: getAiReviewProviderOrder(config),
+			localAiConfigured: hasLocalAiReviewConfig(config),
+			openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
+			localAiModel: config.localAiModel,
+			localAiCallCount: 0,
+			localAiPromptTokens: 0,
+			localAiCompletionTokens: 0,
+			localAiTotalTokens: 0,
+			localAiAcceptedCount: 0,
+			localAiRejectedCount: 0,
+			localAiDurationMs: 0,
+			acceptedCount: 0,
+			rejectedCount: 0,
+			reviewSaveOk: false,
+			articleSaveOk: false,
+			articleSummaryTranslationCount: 0,
+			articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+			articleSummaryLocalTranslationCount: 0,
+			articleSummaryOpenAiTranslationCount: 0,
+			articleSummaryLocalTranslationTokens: 0,
+			articleSummaryOpenAiTranslationTokens: 0,
+			articleSummaryOpenAiTranslationCostUsd: 0,
+			estimatedLocalAiSavingsUsd: 0,
+			translationProviderOrder: getSummaryTranslationProviderOrder(config),
+			articleSummaryAttemptedTaskCount: 0,
+			articleSummaryFailedTaskCount: 0,
+			articleSummaryFailureSamples: [],
+			articleSummarySkippedByLimitArticleCount: 0,
+			articleSummarySkippedByLimitLanguageTaskCount: 0,
+			articleSummarySaveOk: false,
+			articleSummarySaveErrorSamples: [],
+			articleSummaryRecoveryCandidateCount: 0,
+			articleSummaryRecoveryAttemptedTaskCount: 0,
+			articleSummaryPublishCount: 0,
+			articleSummaryPublishOk: false,
+			publicFeedSnapshotRefreshOk: false,
+			publicFeedEdgeSnapshotPublishOk: false,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+			feedHealthSaveOk: false,
+			aiUsageSaveOk: false,
+			openAiModel: OPENAI_MODEL,
+			openAiCallCount: 0,
+			openAiPromptTokens: 0,
+			openAiCompletionTokens: 0,
+			openAiTotalTokens: 0,
+			estimatedOpenAiCostUsd: 0,
+			openAiAcceptedCount: 0,
+			openAiRejectedCount: 0,
+			costProtectionLimitReached: true,
+			spikeWarningTriggered: false,
+			kvEnabled: isKvEnabled(env),
+			kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
+			kvProcessedUrlSaveOk: false,
+			kvRunStateSaveOk: false,
+			kvRunStateSaveSkipped: false,
+			kvOperationCounts: getKvOperationCounts(env),
+			redisEnabled,
+			redisWorkerLockExtended: false,
+			redisAiReviewLockAcquiredCount: 0,
+			redisAiReviewLockSkippedCount: 0,
+			redisStatsSaveOk: false,
+			durationMs,
+		};
+
+		const workerRunSaveOk = await saveWorkerRun(
+			env,
+			config,
+			buildSuccessfulWorkerRun(resultWithoutWorkerRunSaveStatus, {
+				runStartedAt: refreshStartedAt,
+				runCompletedAt,
+				runSource: options.runSource ?? 'unknown',
+				requestId: options.requestId ?? null,
+			}),
+		);
+		const resultBeforeKvRunStateSave: RefreshResult = {
+			...resultWithoutWorkerRunSaveStatus,
+			workerRunSaveOk,
+		};
+		const kvRunStateSaveOk = await saveRunStateToKv(env, resultBeforeKvRunStateSave, {
+			runStartedAt: refreshStartedAt,
+			runCompletedAt,
+			runSource: options.runSource ?? 'unknown',
+			requestId: options.requestId ?? null,
+		});
+		const kvRunStateSaveSkipped = shouldSkipKvRunStateSave(resultBeforeKvRunStateSave, options.runSource ?? 'unknown');
+		const resultBeforeRedisStatsSave: RefreshResult = {
+			...resultBeforeKvRunStateSave,
+			kvRunStateSaveOk,
+			kvRunStateSaveSkipped,
+			kvOperationCounts: getKvOperationCounts(env),
+		};
+		const redisStatsSaveOk = await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown');
+		const result: RefreshResult = {
+			...resultBeforeRedisStatsSave,
+			redisStatsSaveOk,
+			kvOperationCounts: getKvOperationCounts(env),
+		};
+
+		await logInfo(env, 'worker.refresh.deferred', 'NutsNews Worker refresh deferred by backpressure', result);
+
+		return result;
+	}
+
+	const redisWorkerLockExtended = await extendRedisWorkerRunLock(env, options.workerLock);
+
+	if (options.workerLock?.enabled && options.workerLock.acquired && !redisWorkerLockExtended) {
+		await logWarn(env, 'worker.redis.worker_lock_extend_failed', 'Worker shard lock lease could not be extended before expensive work', {
+			shardIndex,
+			runSource: options.runSource ?? 'unknown',
+			requestId: options.requestId ?? null,
+			lockKey: options.workerLock.key,
+		});
+	}
 
 	const imageHydrationResult = await hydrateMissingArticleImages(env, unreviewedArticlesBeforeImageHydration, articlePageImageLookupLimit);
 
@@ -6255,6 +6637,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		shardIndex,
 		alreadyReviewedCount: reviewedUrls.size,
 		unreviewedCount: unreviewedArticles.length,
+		queuedCount: unreviewedArticlesBeforeImageHydration.length,
+		queuedBySource,
+		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		processedCount: reviewedUrls.size,
 		imageHydrationLookupCount: imageHydrationResult.lookupCount,
 		imageHydrationFoundCount: imageHydrationResult.foundCount,
 		noThumbnailRejectedCount: noThumbnailArticles.length,
@@ -6264,6 +6650,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		aiProvider: config.aiProvider,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 		redisEnabled: aiReviewLockResult.enabled,
+		redisWorkerLockExtended,
 		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
 		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
 		kvEnabled: kvProcessedUrlLookup.cacheAvailable,
@@ -6555,6 +6942,16 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		candidateCount: candidateArticles.length,
 		alreadyReviewedCount: reviewedUrls.size,
 		unreviewedCount: unreviewedArticles.length,
+		queuedCount: unreviewedArticlesBeforeImageHydration.length,
+		queuedBySource,
+		deferredCount: 0,
+		deferredReasons: [],
+		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		processedCount: reviewedArticles.length,
+		backpressureQueueLimit: backpressureDecision.queueLimit,
+		backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
+		backpressureDbArticleCount: backpressureDecision.dbArticleCount,
+		backpressureDbArticleCountError: backpressureDecision.dbArticleCountError,
 		imageHydrationLookupCount: imageHydrationResult.lookupCount,
 		imageHydrationFoundCount: imageHydrationResult.foundCount,
 		noThumbnailRejectedCount: noThumbnailArticles.length,
@@ -6620,6 +7017,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		kvRunStateSaveSkipped: false,
 		kvOperationCounts: getKvOperationCounts(env),
 		redisEnabled,
+		redisWorkerLockExtended,
 		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
 		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
 		redisStatsSaveOk: false,
@@ -6673,7 +7071,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 async function translateSummaryBacklog(
 	env: Env,
-	options: { runSource: 'manual' | 'scheduled' | 'unknown'; requestId?: string | null },
+	options: { runSource: 'manual' | 'scheduled' | 'unknown'; requestId?: string | null; workerLock?: RedisLock },
 ): Promise<TranslationBacklogResult> {
 	const startedAt = Date.now();
 	const config = await getRuntimeConfig(env);
@@ -6689,6 +7087,17 @@ async function translateSummaryBacklog(
 		translationProviderOrder: getSummaryTranslationProviderOrder(config),
 		holdArticlesForTranslations: shouldHoldAcceptedArticlesForTranslations(config),
 	});
+
+	const redisWorkerLockExtended = await extendRedisWorkerRunLock(env, options.workerLock);
+
+	if (options.workerLock?.enabled && options.workerLock.acquired && !redisWorkerLockExtended) {
+		await logWarn(env, 'worker.redis.translation_lock_extend_failed', 'Worker shard lock lease could not be extended before translation backlog work', {
+			shardIndex,
+			runSource: options.runSource,
+			requestId: options.requestId ?? null,
+			lockKey: options.workerLock.key,
+		});
+	}
 
 	const articleSummaryBuildResult = await buildArticleSummaryTranslations(env, config, []);
 	const articleSummaryRows = articleSummaryBuildResult.summaries;
@@ -6926,6 +7335,10 @@ export default {
 				requestId,
 				shardIndex: getShardIndex(env),
 				lockKey: workerLock.key,
+				lockedCount: 1,
+				deferredCount: 1,
+				deferredReasons: ['worker_shard_lock_active'],
+				processedCount: 0,
 			});
 
 			await flushBetterStackLogs(env, {
@@ -6942,6 +7355,10 @@ export default {
 				requestId,
 				mode: requestMode,
 				skipped: true,
+				lockedCount: 1,
+				deferredCount: 1,
+				deferredReasons: ['worker_shard_lock_active'],
+				processedCount: 0,
 				redisEnabled: true,
 				shardIndex: getShardIndex(env),
 			});
@@ -6953,12 +7370,14 @@ export default {
 					? await translateSummaryBacklog(env, {
 						runSource: 'manual',
 						requestId,
+						workerLock,
 					})
 					: await refreshArticles(env, {
 						maxAiReviews,
 						imageLookupLimit,
 						runSource: 'manual',
 						requestId,
+						workerLock,
 					});
 
 			await logInfo(env, 'worker.request.completed', 'Worker manual request completed', {
@@ -7039,6 +7458,10 @@ export default {
 				requestId,
 				shardIndex: getShardIndex(env),
 				lockKey: workerLock.key,
+				lockedCount: 1,
+				deferredCount: 1,
+				deferredReasons: ['worker_shard_lock_active'],
+				processedCount: 0,
 			});
 
 			await flushBetterStackLogs(env, {
@@ -7056,6 +7479,7 @@ export default {
 			const result = await refreshArticles(env, {
 				runSource: 'scheduled',
 				requestId,
+				workerLock,
 			});
 
 			await logInfo(env, 'worker.scheduled.completed', 'Worker scheduled refresh completed', {
