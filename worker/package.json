@@ -9,6 +9,7 @@
 		"deploy:shard0": "npm run check:local-ai-config && wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
 		"deploy:all": "npm run check:local-ai-config && for i in {0..24}; do echo \"Deploying local-AI shard$i\"; npx wrangler deploy -c generated-wrangler/wrangler.shard$i.jsonc; done",
 		"test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs",
+		"test:backpressure-locks": "node ../scripts/assert_worker_backpressure_locks.mjs",
 		"check:local-ai-config": "npm run generate:wrangler && node scripts/verify-local-ai-wrangler-config.mjs",
 		"deploy:local-ai": "npm run deploy:all",
 		"test:local-ai-lock": "node ../scripts/assert_worker_local_ai_lock.mjs",
