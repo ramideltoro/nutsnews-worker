@@ -1,0 +1,37 @@
+name: AI Content Safety Evals
+
+on:
+  pull_request:
+    paths:
+      - "worker/src/index.ts"
+      - "worker/package.json"
+      - "worker/package-lock.json"
+      - "scripts/ai_content_safety_eval.mjs"
+      - ".github/workflows/ai-content-safety-evals.yml"
+  workflow_dispatch:
+
+jobs:
+  ai-content-safety:
+    name: Run AI content safety evals
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: worker
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Use Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run AI safety eval
+        run: npm run test:ai-safety
