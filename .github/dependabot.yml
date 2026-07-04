@@ -1,5 +1,17 @@
 version: 2
 updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:55"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:maintenance"
+      - "area:security"
+
   - package-ecosystem: "npm"
     directory: "/worker"
     schedule:
@@ -30,6 +42,23 @@ updates:
       - "area:security"
     groups:
       controller-safe-updates:
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directory: "/local-ai-service"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:45"
+      timezone: "America/New_York"
+    open-pull-requests-limit: 5
+    labels:
+      - "type:maintenance"
+      - "area:security"
+    groups:
+      local-ai-service-safe-updates:
         update-types:
           - "minor"
           - "patch"
