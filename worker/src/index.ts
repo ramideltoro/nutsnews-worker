@@ -1,4 +1,5 @@
 import { flushBetterStackLogs, logError, logInfo, logWarn } from './logger';
+import { isRuntimeFeatureFlagEnabled } from './runtimeFeatureFlags';
 import { validateLocalizedSummaryCandidate } from './translationQuality';
 
 type SecretBinding = {
@@ -5989,7 +5990,13 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 		durationMs: Date.now() - startedAt,
 	});
 
-	const edgeSnapshotPublishResult = await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt);
+	const edgeSnapshotPublishingEnabled = await isRuntimeFeatureFlagEnabled(
+		'worker_public_feed_edge_snapshot_publish',
+		config,
+	);
+	const edgeSnapshotPublishResult = edgeSnapshotPublishingEnabled
+		? await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt)
+		: { ok: true, articleCount: 0 };
 
 	return {
 		publicFeedSnapshotRefreshOk: true,
