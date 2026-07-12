@@ -32,12 +32,13 @@ export async function isRuntimeFeatureFlagEnabled(
 	}
 
 	const defaultValue = RUNTIME_FEATURE_FLAGS[key].defaultValue;
-	const url = new URL(`${config.supabaseUrl.replace(/\/+$/, '')}/rest/v1/runtime_feature_flags`);
-	url.searchParams.set('select', 'enabled');
-	url.searchParams.set('key', `eq.${key}`);
-	url.searchParams.set('limit', '1');
 
 	try {
+		const url = new URL('/rest/v1/runtime_feature_flags', config.supabaseUrl);
+		url.searchParams.set('select', 'enabled');
+		url.searchParams.set('key', `eq.${key}`);
+		url.searchParams.set('limit', '1');
+
 		const response = await request(url.toString(), {
 			headers: {
 				apikey: config.supabaseServiceRoleKey,
