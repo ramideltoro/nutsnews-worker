@@ -50,7 +50,7 @@ jobs:
           LOCAL_AI_URL: http://127.0.0.1:8890
           AI_PROVIDER: local
           AI_PROVIDER_FALLBACK_TO_OPENAI: "true"
-      NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "true"
+          NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "true"
           ENABLE_LOCAL_AI_SECRET_BINDING: "true"
         run: npm run check:local-ai-config
 
