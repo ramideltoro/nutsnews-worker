@@ -67,7 +67,7 @@ const fallbackHotPathVars = allowOpenAiFallbackDeployment
 	? {
 			RSS_FEED_FETCH_TIMEOUT_MS: process.env.RSS_FEED_FETCH_TIMEOUT_MS ?? '15000',
 			ARTICLE_PAGE_FETCH_TIMEOUT_MS: process.env.ARTICLE_PAGE_FETCH_TIMEOUT_MS ?? '10000',
-			LOCAL_AI_TIMEOUT_MS: process.env.LOCAL_AI_TIMEOUT_MS ?? '5000',
+			LOCAL_AI_TIMEOUT_MS: process.env.LOCAL_AI_TIMEOUT_MS ?? '15000',
 			OPENAI_TIMEOUT_MS: process.env.OPENAI_TIMEOUT_MS ?? '30000',
 		}
 	: {};
