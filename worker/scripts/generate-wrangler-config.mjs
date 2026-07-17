@@ -35,11 +35,12 @@ function loadDeployEnvFile(filePath) {
 loadDeployEnvFile(path.resolve(process.cwd(), '..', '.env.deploy.local'));
 loadDeployEnvFile(path.resolve(process.cwd(), '.env.deploy.local'));
 
-const shardCount = Number(process.env.SHARD_COUNT ?? '25');
 const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '20');
 const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
 const allowOpenAiOnlyDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT === 'true';
 const allowOpenAiFallbackDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT === 'true';
+const defaultShardCount = allowOpenAiFallbackDeployment ? '3' : '25';
+const shardCount = Number(process.env.SHARD_COUNT ?? defaultShardCount);
 const requireLocalAiFirst = !allowOpenAiOnlyDeployment;
 const includeLocalAiSecretBinding =
 	process.env.ENABLE_LOCAL_AI_SECRET_BINDING === undefined
@@ -58,9 +59,18 @@ const upstashRedisRestTokenSecretName = process.env.UPSTASH_REDIS_REST_TOKEN_SEC
 
 const defaultTranslationVars = {
 	ENABLED_SUMMARY_LANGUAGES: process.env.ENABLED_SUMMARY_LANGUAGES ?? 'fr,ja,de-CH,de,el',
-	SUMMARY_TRANSLATION_LIMIT: process.env.SUMMARY_TRANSLATION_LIMIT ?? '5',
-	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? 'true',
+	SUMMARY_TRANSLATION_LIMIT: process.env.SUMMARY_TRANSLATION_LIMIT ?? (allowOpenAiFallbackDeployment ? '0' : '5'),
+	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? (allowOpenAiFallbackDeployment ? 'false' : 'true'),
 };
+
+const fallbackHotPathVars = allowOpenAiFallbackDeployment
+	? {
+			RSS_FEED_FETCH_TIMEOUT_MS: process.env.RSS_FEED_FETCH_TIMEOUT_MS ?? '15000',
+			ARTICLE_PAGE_FETCH_TIMEOUT_MS: process.env.ARTICLE_PAGE_FETCH_TIMEOUT_MS ?? '10000',
+			LOCAL_AI_TIMEOUT_MS: process.env.LOCAL_AI_TIMEOUT_MS ?? '5000',
+			OPENAI_TIMEOUT_MS: process.env.OPENAI_TIMEOUT_MS ?? '30000',
+		}
+	: {};
 
 const localAiDeploymentVars = Object.fromEntries(
 	[
@@ -77,6 +87,10 @@ const optionalShardVars = Object.fromEntries(
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS',
+		'RSS_FEED_FETCH_TIMEOUT_MS',
+		'ARTICLE_PAGE_FETCH_TIMEOUT_MS',
+		'LOCAL_AI_TIMEOUT_MS',
+		'OPENAI_TIMEOUT_MS',
 		'UPSTASH_REDIS_ENABLED',
 		'UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS',
 		'UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS',
@@ -127,6 +141,12 @@ const generatedDir = process.env.NUTSNEWS_GENERATED_WRANGLER_DIR ?? path.join('g
 
 fs.mkdirSync(generatedDir, { recursive: true });
 
+for (const name of fs.readdirSync(generatedDir)) {
+	if (/^wrangler\.shard\d+\.jsonc$/.test(name)) {
+		fs.unlinkSync(path.join(generatedDir, name));
+	}
+}
+
 for (let index = 0; index < shardCount; index += 1) {
 	const config = {
 		$schema: '../node_modules/wrangler/config-schema.json',
@@ -143,6 +163,7 @@ for (let index = 0; index < shardCount; index += 1) {
 			FEED_SHARD_INDEX: String(index),
 			FEEDS_PER_SHARD: String(feedsPerShard),
 			...defaultTranslationVars,
+			...fallbackHotPathVars,
 			...localAiDeploymentVars,
 			...optionalShardVars,
 		},

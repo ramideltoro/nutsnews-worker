@@ -13,11 +13,11 @@
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "SHARD_COUNT": "25",
+    "SHARD_COUNT": "3",
     "SHARD_RUN_INTERVAL_MINUTES": "5",
     "SHARD_WORKER_PREFIX": "nutsnews-worker",
     "SHARD_WORKER_SUBDOMAIN": "nutsnews",
-    "MAX_AI_REVIEWS_PER_SHARD": "12",
+    "MAX_AI_REVIEWS_PER_SHARD": "3",
     "TRANSLATION_BACKLOG_ENABLED": "true"
   }
 }

@@ -20,10 +20,13 @@ type Env = {
 	LOCAL_AI_URL?: MaybeSecretBinding;
 	LOCAL_AI_API_KEY?: MaybeSecretBinding;
 	LOCAL_AI_MODEL?: string;
+	LOCAL_AI_TIMEOUT_MS?: string;
 	AI_PROVIDER_FALLBACK_TO_OPENAI?: string;
 	AI_REVIEW_CONCURRENCY?: string;
+	OPENAI_TIMEOUT_MS?: string;
 	FEED_SHARD_INDEX?: string;
 	FEEDS_PER_SHARD?: string;
+	RSS_FEED_FETCH_TIMEOUT_MS?: string;
 	BETTER_STACK_SOURCE_TOKEN?: MaybeSecretBinding;
 	BETTER_STACK_INGESTING_HOST?: MaybeSecretBinding;
 	OPENAI_INPUT_COST_PER_1M_TOKENS?: string;
@@ -32,6 +35,7 @@ type Env = {
 	AI_REVIEW_ALERT_RUN_LIMIT?: string;
 	AI_TOKEN_ALERT_RUN_LIMIT?: string;
 	ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT?: string;
+	ARTICLE_PAGE_FETCH_TIMEOUT_MS?: string;
 	ENABLED_SUMMARY_LANGUAGES?: string;
 	SUMMARY_TRANSLATION_LIMIT?: string;
 	HOLD_ARTICLES_FOR_TRANSLATIONS?: string;
@@ -59,8 +63,12 @@ type RuntimeConfig = {
 	localAiUrl: string;
 	localAiApiKey: string;
 	localAiModel: string;
+	localAiTimeoutMs: number;
 	aiProviderFallbackToOpenAi: boolean;
 	aiReviewConcurrency: number;
+	openAiTimeoutMs: number;
+	rssFeedFetchTimeoutMs: number;
+	articlePageFetchTimeoutMs: number;
 	openAiInputCostPer1MTokens: number;
 	openAiOutputCostPer1MTokens: number;
 	aiCostAlertRunUsd: number;
@@ -620,7 +628,12 @@ const TRUNCATED_TEXT_SUFFIX = '... [truncated]';
 
 const OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_LOCAL_AI_MODEL = 'qwen2.5:3b';
-const DEFAULT_LOCAL_AI_TIMEOUT_MS = 120000;
+const DEFAULT_LOCAL_AI_TIMEOUT_MS = 15000;
+const DEFAULT_OPENAI_TIMEOUT_MS = 30000;
+const DEFAULT_RSS_FEED_FETCH_TIMEOUT_MS = 15000;
+const DEFAULT_ARTICLE_PAGE_FETCH_TIMEOUT_MS = 10000;
+const MIN_EXTERNAL_FETCH_TIMEOUT_MS = 1000;
+const HARD_MAX_EXTERNAL_FETCH_TIMEOUT_MS = 120000;
 const DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS = 0.15;
 const DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS = 0.6;
 const DEFAULT_AI_COST_ALERT_RUN_USD = 0.05;
@@ -2107,8 +2120,42 @@ function getOptionalNumber(value: string | undefined, fallback: number) {
 	return parsed;
 }
 
+function getTimeoutMs(value: string | undefined, fallback: number) {
+	const parsed = Number(value ?? '');
+
+	if (!Number.isFinite(parsed) || parsed < MIN_EXTERNAL_FETCH_TIMEOUT_MS) {
+		return fallback;
+	}
+
+	return Math.min(Math.floor(parsed), HARD_MAX_EXTERNAL_FETCH_TIMEOUT_MS);
+}
+
 function sleep(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit, timeoutMs: number, label: string): Promise<Response> {
+	const controller = new AbortController();
+	let timedOut = false;
+	const timeout = setTimeout(() => {
+		timedOut = true;
+		controller.abort();
+	}, timeoutMs);
+
+	try {
+		return await fetch(input, {
+			...init,
+			signal: controller.signal,
+		});
+	} catch (error) {
+		if (timedOut) {
+			throw new Error(`${label} timed out after ${timeoutMs}ms`);
+		}
+
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 async function delayBeforeRetry(attempt: number) {
@@ -2393,8 +2440,12 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 		localAiUrl: localAiUrl.replace(/\/+$/, ''),
 		localAiApiKey,
 		localAiModel,
+		localAiTimeoutMs: getTimeoutMs(env.LOCAL_AI_TIMEOUT_MS, DEFAULT_LOCAL_AI_TIMEOUT_MS),
 		aiProviderFallbackToOpenAi: aiProviderFallbackToOpenAi && Boolean(openAiApiKey),
 		aiReviewConcurrency: getAiReviewConcurrency(env.AI_REVIEW_CONCURRENCY, aiProvider),
+		openAiTimeoutMs: getTimeoutMs(env.OPENAI_TIMEOUT_MS, DEFAULT_OPENAI_TIMEOUT_MS),
+		rssFeedFetchTimeoutMs: getTimeoutMs(env.RSS_FEED_FETCH_TIMEOUT_MS, DEFAULT_RSS_FEED_FETCH_TIMEOUT_MS),
+		articlePageFetchTimeoutMs: getTimeoutMs(env.ARTICLE_PAGE_FETCH_TIMEOUT_MS, DEFAULT_ARTICLE_PAGE_FETCH_TIMEOUT_MS),
 		openAiInputCostPer1MTokens: getOptionalNumber(env.OPENAI_INPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_INPUT_COST_PER_1M_TOKENS),
 		openAiOutputCostPer1MTokens: getOptionalNumber(env.OPENAI_OUTPUT_COST_PER_1M_TOKENS, DEFAULT_OPENAI_OUTPUT_COST_PER_1M_TOKENS),
 		aiCostAlertRunUsd: getOptionalNumber(env.AI_COST_ALERT_RUN_USD, DEFAULT_AI_COST_ALERT_RUN_USD),
@@ -3119,18 +3170,18 @@ function extractRssImageUrl(itemXml: string, articleUrl: string): string | null 
 	return null;
 }
 
-async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
+async function fetchArticlePageImage(article: RssArticle, timeoutMs: number): Promise<RssArticle> {
 	if (hasUsableThumbnail(article)) {
 		return article;
 	}
 
 	try {
-		const response = await fetch(article.url, {
+		const response = await fetchWithTimeout(article.url, {
 			headers: {
 				'User-Agent': 'Mozilla/5.0 (compatible; NutsNewsBot/1.0; +https://www.nutsnews.com)',
 				Accept: 'text/html,application/xhtml+xml',
 			},
-		});
+		}, timeoutMs, 'Article page image lookup');
 
 		if (!response.ok) {
 			return article;
@@ -3158,7 +3209,7 @@ async function fetchArticlePageImage(article: RssArticle): Promise<RssArticle> {
 	}
 }
 
-async function hydrateMissingArticleImages(env: Env, articles: RssArticle[], lookupLimit: number): Promise<ImageHydrationResult> {
+async function hydrateMissingArticleImages(env: Env, articles: RssArticle[], lookupLimit: number, timeoutMs: number): Promise<ImageHydrationResult> {
 	if (lookupLimit <= 0) {
 		return {
 			articles,
@@ -3178,7 +3229,9 @@ async function hydrateMissingArticleImages(env: Env, articles: RssArticle[], loo
 		};
 	}
 
-	const hydratedCandidates = await mapWithConcurrency(lookupCandidates, ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY, fetchArticlePageImage);
+	const hydratedCandidates = await mapWithConcurrency(lookupCandidates, ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY, (article) =>
+		fetchArticlePageImage(article, timeoutMs),
+	);
 
 	const hydratedByUrl = new Map(hydratedCandidates.map((article) => [article.url, article]));
 
@@ -3464,15 +3517,15 @@ async function readResponseJsonSafely<T>(response: Response): Promise<{ ok: true
 	}
 }
 
-async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<FeedFetchResult> {
+async function fetchSingleFeed(env: Env, feed: RssFeed, timeoutMs: number): Promise<FeedFetchResult> {
 	const startedAt = Date.now();
 
 	try {
-		const response = await fetch(feed.url, {
+		const response = await fetchWithTimeout(feed.url, {
 			headers: {
 				'User-Agent': 'NutsNewsBot/1.0',
 			},
-		});
+		}, timeoutMs, 'RSS feed fetch');
 
 		if (!response.ok) {
 			const errorText = await readResponseTextSafely(response);
@@ -3533,8 +3586,13 @@ async function fetchSingleFeed(env: Env, feed: RssFeed): Promise<FeedFetchResult
 	}
 }
 
-async function fetchRssArticles(env: Env, feeds: RssFeed[], positiveSources: Set<string>): Promise<RssFetchResult> {
-	const feedResults = await Promise.all(feeds.map((feed) => fetchSingleFeed(env, feed)));
+async function fetchRssArticles(
+	env: Env,
+	feeds: RssFeed[],
+	positiveSources: Set<string>,
+	timeoutMs: number,
+): Promise<RssFetchResult> {
+	const feedResults = await Promise.all(feeds.map((feed) => fetchSingleFeed(env, feed, timeoutMs)));
 	const failedFeeds = feedResults
 		.filter((result) => !result.ok)
 		.map((result) => ({
@@ -3961,7 +4019,7 @@ async function classifyAndSummarizeArticle(env: Env, config: RuntimeConfig, arti
 
 	let response: Response;
 	try {
-		response = await fetch('https://api.openai.com/v1/chat/completions', {
+		response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
 			method: 'POST',
 			headers: {
 				Authorization: `Bearer ${openAiApiKey}`,
@@ -3996,7 +4054,7 @@ Return JSON exactly like this:
 					},
 				],
 			}),
-		});
+		}, config.openAiTimeoutMs, 'OpenAI article review');
 	} catch (error) {
 		await logError(env, 'worker.openai.request_exception', 'OpenAI request threw an exception', error, {
 			source: article.source,
@@ -4204,7 +4262,7 @@ async function classifyAndSummarizeArticleWithLocalAi(
 		});
 
 		try {
-			response = await fetch(getLocalAiReviewUrl(config), {
+			response = await fetchWithTimeout(getLocalAiReviewUrl(config), {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -4217,7 +4275,7 @@ async function classifyAndSummarizeArticleWithLocalAi(
 					excerpt: article.excerpt,
 					url: article.url,
 				}),
-			});
+			}, config.localAiTimeoutMs, 'Local AI article review');
 		} catch (error) {
 			lastDurationMs = Date.now() - startedAt;
 			lastFailureReason = `Local AI request exception: ${getErrorMessage(error)}`;
@@ -4597,7 +4655,7 @@ async function translateArticleSummaryWithLocalAi(
 		});
 
 		try {
-			response = await fetch(getLocalAiTranslateUrl(config), {
+			response = await fetchWithTimeout(getLocalAiTranslateUrl(config), {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -4613,7 +4671,7 @@ async function translateArticleSummaryWithLocalAi(
 					category: article.category,
 					url: article.original_url,
 				}),
-			});
+			}, config.localAiTimeoutMs, 'Local AI summary translation');
 		} catch (error) {
 			await logWarn(env, 'worker.local_ai.diagnostics.translation_fetch_exception', 'Local AI translation fetch attempt threw before receiving a response', {
 				articleUrl: article.original_url,
@@ -4843,7 +4901,7 @@ async function translateArticleSummaryWithOpenAi(
 		let response: Response;
 
 		try {
-			response = await fetch('https://api.openai.com/v1/chat/completions', {
+			response = await fetchWithTimeout('https://api.openai.com/v1/chat/completions', {
 				method: 'POST',
 				headers: {
 					Authorization: `Bearer ${config.openAiApiKey}`,
@@ -4878,7 +4936,7 @@ Return JSON exactly like this:
 						},
 					],
 				}),
-			});
+			}, config.openAiTimeoutMs, 'OpenAI summary translation');
 		} catch (error) {
 			await logError(env, 'worker.translation.openai.request_exception', 'OpenAI summary translation threw an exception', error, {
 				articleUrl: article.original_url,
@@ -6387,6 +6445,10 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		localAiReviewConfigured: hasLocalAiReviewConfig(config),
 		localAiTranslationConfigured: hasLocalAiTranslationConfig(config),
 		localAiModel: config.localAiModel,
+		localAiTimeoutMs: config.localAiTimeoutMs,
+		openAiTimeoutMs: config.openAiTimeoutMs,
+		rssFeedFetchTimeoutMs: config.rssFeedFetchTimeoutMs,
+		articlePageFetchTimeoutMs: config.articlePageFetchTimeoutMs,
 		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 		enabledSummaryLanguages: config.enabledSummaryLanguages,
@@ -6404,6 +6466,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		localAiConfigured: hasLocalAiReviewConfig(config),
 		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
 		localAiModel: config.localAiModel,
+		localAiTimeoutMs: config.localAiTimeoutMs,
+		openAiTimeoutMs: config.openAiTimeoutMs,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 	});
 
@@ -6413,7 +6477,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 
 	const positiveSources = new Set(shardFeeds.filter((feed) => feed.is_positive_source).map((feed) => feed.source));
 
-	const rssFetchResult = await fetchRssArticles(env, shardFeeds, positiveSources);
+	const rssFetchResult = await fetchRssArticles(env, shardFeeds, positiveSources, config.rssFeedFetchTimeoutMs);
 	const fetchedArticles = rssFetchResult.articles;
 	const candidateArticles = fetchedArticles.slice(0, MAX_CANDIDATES_PER_RUN);
 	const candidateUrls = candidateArticles.map((article) => article.url);
@@ -6617,7 +6681,12 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		});
 	}
 
-	const imageHydrationResult = await hydrateMissingArticleImages(env, unreviewedArticlesBeforeImageHydration, articlePageImageLookupLimit);
+	const imageHydrationResult = await hydrateMissingArticleImages(
+		env,
+		unreviewedArticlesBeforeImageHydration,
+		articlePageImageLookupLimit,
+		config.articlePageFetchTimeoutMs,
+	);
 
 	const unreviewedArticles = imageHydrationResult.articles;
 	const noThumbnailArticles = unreviewedArticles.filter((article) => !hasUsableThumbnail(article));
