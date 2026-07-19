@@ -41,6 +41,18 @@ const allowOpenAiOnlyDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYM
 const allowOpenAiFallbackDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT === 'true';
 const defaultShardCount = allowOpenAiFallbackDeployment ? '3' : '25';
 const shardCount = Number(process.env.SHARD_COUNT ?? defaultShardCount);
+const databaseProviderMode = process.env.NUTSNEWS_DATABASE_PROVIDER_MODE ?? 'supabase_primary';
+const databaseProviderModes = new Set(['supabase_primary', 'backend_postgres_shadow', 'backend_postgres_primary']);
+const backendPostgresPrimaryConfirmation = 'enable-backend-postgres-primary';
+const includeSupabaseSecretBindings =
+	process.env.ENABLE_SUPABASE_SECRET_BINDINGS === undefined
+		? databaseProviderMode !== 'backend_postgres_primary'
+		: process.env.ENABLE_SUPABASE_SECRET_BINDINGS === 'true';
+const includeBackendApiTokenSecretBinding =
+	process.env.ENABLE_NUTSNEWS_BACKEND_API_TOKEN_SECRET_BINDING === undefined
+		? databaseProviderMode !== 'supabase_primary'
+		: process.env.ENABLE_NUTSNEWS_BACKEND_API_TOKEN_SECRET_BINDING === 'true';
+const backendApiTokenSecretName = process.env.NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME ?? 'NUTSNEWS_BACKEND_API_TOKEN';
 const requireLocalAiFirst = !allowOpenAiOnlyDeployment;
 const includeLocalAiSecretBinding =
 	process.env.ENABLE_LOCAL_AI_SECRET_BINDING === undefined
@@ -84,6 +96,8 @@ const localAiDeploymentVars = Object.fromEntries(
 
 const optionalShardVars = Object.fromEntries(
 	[
+		'NUTSNEWS_BACKEND_API_URL',
+		'NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS',
@@ -102,6 +116,13 @@ const optionalShardVars = Object.fromEntries(
 		.map((key) => [key, process.env[key]]),
 );
 
+if (!databaseProviderModes.has(databaseProviderMode)) {
+	throw new Error(
+		`Invalid NUTSNEWS_DATABASE_PROVIDER_MODE=${JSON.stringify(databaseProviderMode)}. ` +
+			`Allowed values: ${Array.from(databaseProviderModes).join(', ')}.`,
+	);
+}
+
 if (!secretsStoreId) {
 	throw new Error('Missing NUTSNEWS_SECRETS_STORE_ID.\nRun: export NUTSNEWS_SECRETS_STORE_ID="your-store-id"');
 }
@@ -110,6 +131,28 @@ if (!kvNamespaceId) {
 	throw new Error(
 		'Missing NUTSNEWS_KV_NAMESPACE_ID.\n' +
 			'Run: export NUTSNEWS_KV_NAMESPACE_ID="your-kv-namespace-id" before generating or deploying Workers.',
+	);
+}
+
+if ((databaseProviderMode === 'supabase_primary' || databaseProviderMode === 'backend_postgres_shadow') && !includeSupabaseSecretBindings) {
+	throw new Error(`${databaseProviderMode} requires Supabase secret bindings. Set ENABLE_SUPABASE_SECRET_BINDINGS=true.`);
+}
+
+if ((databaseProviderMode === 'backend_postgres_shadow' || databaseProviderMode === 'backend_postgres_primary') && !process.env.NUTSNEWS_BACKEND_API_URL) {
+	throw new Error(`${databaseProviderMode} requires NUTSNEWS_BACKEND_API_URL.`);
+}
+
+if ((databaseProviderMode === 'backend_postgres_shadow' || databaseProviderMode === 'backend_postgres_primary') && !includeBackendApiTokenSecretBinding) {
+	throw new Error(`${databaseProviderMode} requires NUTSNEWS_BACKEND_API_TOKEN secret binding.`);
+}
+
+if (
+	databaseProviderMode === 'backend_postgres_primary' &&
+	process.env.NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION !== backendPostgresPrimaryConfirmation
+) {
+	throw new Error(
+		`NUTSNEWS_DATABASE_PROVIDER_MODE=backend_postgres_primary requires ` +
+			`NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION=${backendPostgresPrimaryConfirmation}.`,
 	);
 }
 
@@ -160,6 +203,7 @@ for (let index = 0; index < shardCount; index += 1) {
 			enabled: true,
 		},
 		vars: {
+			NUTSNEWS_DATABASE_PROVIDER_MODE: databaseProviderMode,
 			FEED_SHARD_INDEX: String(index),
 			FEEDS_PER_SHARD: String(feedsPerShard),
 			...defaultTranslationVars,
@@ -168,16 +212,6 @@ for (let index = 0; index < shardCount; index += 1) {
 			...optionalShardVars,
 		},
 		secrets_store_secrets: [
-			{
-				binding: 'SUPABASE_URL',
-				store_id: secretsStoreId,
-				secret_name: 'SUPABASE_URL',
-			},
-			{
-				binding: 'SUPABASE_SERVICE_ROLE_KEY',
-				store_id: secretsStoreId,
-				secret_name: 'SUPABASE_SERVICE_ROLE_KEY',
-			},
 			{
 				binding: 'OPENAI_API_KEY',
 				store_id: secretsStoreId,
@@ -196,6 +230,28 @@ for (let index = 0; index < shardCount; index += 1) {
 		],
 	};
 
+	if (includeSupabaseSecretBindings) {
+		config.secrets_store_secrets.push(
+			{
+				binding: 'SUPABASE_URL',
+				store_id: secretsStoreId,
+				secret_name: 'SUPABASE_URL',
+			},
+			{
+				binding: 'SUPABASE_SERVICE_ROLE_KEY',
+				store_id: secretsStoreId,
+				secret_name: 'SUPABASE_SERVICE_ROLE_KEY',
+			},
+		);
+	}
+
+	if (includeBackendApiTokenSecretBinding) {
+		config.secrets_store_secrets.push({
+			binding: 'NUTSNEWS_BACKEND_API_TOKEN',
+			store_id: secretsStoreId,
+			secret_name: backendApiTokenSecretName,
+		});
+	}
 
 	config.kv_namespaces = [
 		{
@@ -237,7 +293,10 @@ const localAiSummary = process.env.LOCAL_AI_URL
 const kvSummary = ' Cloudflare KV binding NUTSNEWS_KV enabled for Worker state and public feed edge snapshots.';
 const redisSummary = includeUpstashRedisSecretBindings ? ' Upstash Redis secret bindings enabled.' : ' Upstash Redis secret bindings skipped because ENABLE_UPSTASH_REDIS_SECRET_BINDING is not true.';
 const translationSummary = ` Summary translations: languages=${defaultTranslationVars.ENABLED_SUMMARY_LANGUAGES}, limit=${defaultTranslationVars.SUMMARY_TRANSLATION_LIMIT}, hold=${defaultTranslationVars.HOLD_ARTICLES_FOR_TRANSLATIONS}.`;
+const databaseSummary =
+	` Database provider mode=${databaseProviderMode}; Supabase bindings=${includeSupabaseSecretBindings ? 'enabled' : 'skipped'};` +
+	` backend API token binding=${includeBackendApiTokenSecretBinding ? 'enabled' : 'skipped'}.`;
 
 console.log(
-	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${translationSummary}${kvSummary}${redisSummary}`,
+	`Generated ${shardCount} Wrangler config files in ${generatedDir}/ with ${feedsPerShard} feeds per shard, Secrets Store bindings, Better Stack logging bindings, and no cron triggers.${localAiSummary}${translationSummary}${databaseSummary}${kvSummary}${redisSummary}`,
 );

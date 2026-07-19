@@ -120,6 +120,18 @@ const BETTER_STACK_DELIVERY_EVENTS = new Set([
 	"worker.supabase.ai_usage_run_save_exception",
 	"worker.supabase.worker_run_save_failed",
 	"worker.supabase.worker_run_save_exception",
+	"worker.database.review_lookup_failed",
+	"worker.database.published_url_lookup_failed",
+	"worker.database.article_summary_lookup_exception",
+	"worker.database.article_summary_batch_save_exception",
+	"worker.database.feed_health_lookup_exception",
+	"worker.database.feed_health_batch_save_exception",
+	"worker.database.review_batch_save_exception",
+	"worker.database.article_batch_save_exception",
+	"worker.database.article_publish_batch_exception",
+	"worker.database.public_feed_snapshot_refresh_exception",
+	"worker.database.ai_usage_run_save_exception",
+	"worker.database.worker_run_save_exception",
 ]);
 
 let cachedBetterStackConfigPromise: Promise<BetterStackConfig | null> | null = null;
