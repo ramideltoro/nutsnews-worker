@@ -19,6 +19,7 @@ type Env = {
 	NUTSNEWS_BACKEND_API_URL?: MaybeSecretBinding;
 	NUTSNEWS_BACKEND_API_TOKEN?: MaybeSecretBinding;
 	NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION?: string;
+	NUTSNEWS_PRODUCTION_WRITES_PAUSED?: string;
 	ENABLE_BACKEND_SHADOW_SMOKE?: string;
 	NUTSNEWS_SHADOW_SMOKE_TOKEN?: MaybeSecretBinding;
 	OPENAI_API_KEY: MaybeSecretBinding;
@@ -1279,6 +1280,7 @@ class ProviderModeWorkerDatabaseClient implements WorkerDatabaseClient {
 
 const DATABASE_PROVIDER_MODES: DatabaseProviderMode[] = ['supabase_primary', 'backend_postgres_shadow', 'backend_postgres_primary'];
 const BACKEND_POSTGRES_PRIMARY_CONFIRMATION = 'enable-backend-postgres-primary';
+const TRUTHY_CONFIG_VALUES = new Set(['1', 'true', 'yes', 'on']);
 const BACKEND_SHADOW_SMOKE_PATH = '/backend-shadow-smoke';
 
 const MAX_ITEMS_PER_FEED = 35;
@@ -3063,6 +3065,22 @@ function getDatabaseProviderMode(value: string | undefined): DatabaseProviderMod
 		`Invalid NUTSNEWS_DATABASE_PROVIDER_MODE=${JSON.stringify(value)}. ` +
 			`Allowed values: ${DATABASE_PROVIDER_MODES.join(', ')}.`,
 	);
+}
+
+function isProductionWritesPaused(env: Env) {
+	return TRUTHY_CONFIG_VALUES.has((env.NUTSNEWS_PRODUCTION_WRITES_PAUSED ?? '').trim().toLowerCase());
+}
+
+function buildProductionWritesPausedResponse(env: Env, requestId: string, runSource: 'manual' | 'scheduled', mode?: WorkerRequestMode) {
+	return {
+		message: 'NutsNews Worker database writes are paused for a production cutover window.',
+		requestId,
+		paused: true,
+		databaseWritesPaused: true,
+		runSource,
+		mode,
+		shardIndex: getShardIndex(env),
+	};
 }
 
 async function createWorkerDatabaseClient(env: Env): Promise<WorkerDatabaseClient> {
@@ -7980,6 +7998,13 @@ export default {
 		});
 
 		const requestMode = parseWorkerRequestMode(url);
+
+		if (isProductionWritesPaused(env)) {
+			return Response.json(buildProductionWritesPausedResponse(env, requestId, 'manual', requestMode), {
+				status: 423,
+			});
+		}
+
 		const maxAiReviews = requestMode === 'refresh' ? parseManualLimit(url) : undefined;
 		const imageLookupLimit = requestMode === 'refresh' ? parseManualImageLookupLimit(url) : undefined;
 		const rateLimit = await checkManualRefreshRateLimit(env, request);
@@ -8132,6 +8157,25 @@ export default {
 	async scheduled(_event: ScheduledEvent, env: Env) {
 		const requestStartedAt = Date.now();
 		const requestId = createRequestId();
+
+		if (isProductionWritesPaused(env)) {
+			await logWarn(env, 'worker.production_writes_paused', 'Scheduled Worker refresh skipped because production writes are paused', {
+				requestId,
+				shardIndex: getShardIndex(env),
+				paused: true,
+				databaseWritesPaused: true,
+			});
+
+			await flushBetterStackLogs(env, {
+				requestId,
+				runSource: 'scheduled',
+				flushReason: 'scheduled_writer_pause_skipped',
+				durationMs: Date.now() - requestStartedAt,
+				kvOperationCounts: getKvOperationCounts(env),
+			});
+
+			return;
+		}
 
 		await logInfo(env, 'worker.scheduled.started', 'Worker scheduled refresh started', {
 			requestId,
