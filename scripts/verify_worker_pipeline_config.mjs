@@ -44,6 +44,7 @@ for (const fragment of [
   'NUTSNEWS_KV_NAMESPACE_ID',
   'LOCAL_AI_URL',
   'NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "1"',
+  'NUTSNEWS_PRODUCTION_WRITES_PAUSED',
   'npm run check:local-ai-config',
   'npx tsc --noEmit',
   'Controller syntax check',

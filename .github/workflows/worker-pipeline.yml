@@ -60,7 +60,7 @@ jobs:
 
       - name: Worker pipeline immutable guard
         env:
-          NUTSNEWS_APPROVE_PIPELINE_TEST_CHANGES: ${{ github.event.pull_request.number == 12 && 'true' || '' }}
+          NUTSNEWS_APPROVE_PIPELINE_TEST_CHANGES: ${{ vars.NUTSNEWS_APPROVE_PIPELINE_TEST_CHANGES || (github.event.pull_request.number == 12 && 'true' || '') }}
         run: node scripts/check_worker_pipeline_immutable.mjs
 
       - name: Worker pipeline config regression
@@ -116,6 +116,7 @@ jobs:
       ENABLED_SUMMARY_LANGUAGES: ${{ vars.ENABLED_SUMMARY_LANGUAGES || 'fr,ja,de-CH,de,el' }}
       SUMMARY_TRANSLATION_LIMIT: ${{ vars.SUMMARY_TRANSLATION_LIMIT || '5' }}
       HOLD_ARTICLES_FOR_TRANSLATIONS: ${{ vars.HOLD_ARTICLES_FOR_TRANSLATIONS || 'true' }}
+      NUTSNEWS_PRODUCTION_WRITES_PAUSED: ${{ vars.NUTSNEWS_PRODUCTION_WRITES_PAUSED || 'false' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

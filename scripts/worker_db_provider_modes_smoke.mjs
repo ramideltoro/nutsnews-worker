@@ -649,6 +649,7 @@ function writeGeneratedWranglerConfig(ctx) {
       SUMMARY_TRANSLATION_LIMIT: '0',
       HOLD_ARTICLES_FOR_TRANSLATIONS: 'false',
       UPSTASH_REDIS_ENABLED: 'false',
+      ...(ctx.writesPaused ? { NUTSNEWS_PRODUCTION_WRITES_PAUSED: 'true' } : {}),
     },
   };
 
@@ -811,8 +812,66 @@ async function runScenario(scenario) {
   }
 }
 
+async function runWriterPauseScenario() {
+  const ctx = buildContext({
+    name: 'production writer pause skips manual and scheduled refresh',
+    providerMode: 'supabase_primary',
+    writesPaused: true,
+    ports: {
+      worker: 8927,
+      supabase: 8932,
+      backendApi: 8934,
+      ai: 8930,
+      rss: 8931,
+    },
+  });
+  let workerProcess;
+
+  logStep(`Running database provider smoke: ${ctx.name}`);
+
+  try {
+    workerProcess = startWranglerDev(ctx);
+    await waitForWorker(ctx, workerProcess);
+
+    const manualResponse = await fetch(`${ctx.workerUrl}/?limit=1&imageLookups=1&_=${Date.now()}`);
+    const manualPayload = await manualResponse.json();
+    assert(manualResponse.status === 423, 'Writer pause should reject manual refresh with HTTP 423.', manualPayload);
+    assert(manualPayload.paused === true, 'Manual refresh pause payload should report paused=true.', manualPayload);
+    assert(manualPayload.databaseWritesPaused === true, 'Manual refresh pause payload should report databaseWritesPaused=true.', manualPayload);
+    assert(manualPayload.runSource === 'manual', 'Manual refresh pause payload should record runSource=manual.', manualPayload);
+
+    const scheduledResponse = await fetch(`${ctx.workerUrl}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*&time=1745856238`);
+    const scheduledText = await scheduledResponse.text();
+    assert(scheduledResponse.ok, 'Writer pause should let the local scheduled trigger complete cleanly.', {
+      status: scheduledResponse.status,
+      body: scheduledText.slice(0, 500),
+    });
+
+    logOk(`Database provider smoke passed: ${ctx.name}`);
+  } catch (error) {
+    console.error(`\n❌ Database provider smoke failed: ${ctx.name}`);
+    console.error(error?.stack || error?.message || error);
+    if (error?.details) {
+      console.error('\nFailure details:');
+      console.error(JSON.stringify(error.details, null, 2));
+    }
+    if (workerProcess?.getOutput) {
+      console.error('\nWrangler output:');
+      console.error(workerProcess.getOutput().slice(-8000));
+    }
+    throw error;
+  } finally {
+    await stopWranglerDev(workerProcess).catch(() => null);
+    if (ctx.configPath && existsSync(ctx.configPath)) {
+      unlinkSync(ctx.configPath);
+    }
+  }
+}
+
 for (const scenario of scenarios) {
   await runScenario(scenario);
 }
+
+await runWriterPauseScenario();
 
 console.log('\n✅ Database provider mode smoke tests passed.');
