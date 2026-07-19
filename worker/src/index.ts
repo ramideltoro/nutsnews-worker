@@ -19,6 +19,8 @@ type Env = {
 	NUTSNEWS_BACKEND_API_URL?: MaybeSecretBinding;
 	NUTSNEWS_BACKEND_API_TOKEN?: MaybeSecretBinding;
 	NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION?: string;
+	ENABLE_BACKEND_SHADOW_SMOKE?: string;
+	NUTSNEWS_SHADOW_SMOKE_TOKEN?: MaybeSecretBinding;
 	OPENAI_API_KEY: MaybeSecretBinding;
 	AI_PROVIDER?: string;
 	LOCAL_AI_URL?: MaybeSecretBinding;
@@ -1277,6 +1279,7 @@ class ProviderModeWorkerDatabaseClient implements WorkerDatabaseClient {
 
 const DATABASE_PROVIDER_MODES: DatabaseProviderMode[] = ['supabase_primary', 'backend_postgres_shadow', 'backend_postgres_primary'];
 const BACKEND_POSTGRES_PRIMARY_CONFIRMATION = 'enable-backend-postgres-primary';
+const BACKEND_SHADOW_SMOKE_PATH = '/backend-shadow-smoke';
 
 const MAX_ITEMS_PER_FEED = 35;
 const MAX_CANDIDATES_PER_RUN = 300;
@@ -7739,6 +7742,158 @@ function createRequestId() {
 	return crypto.randomUUID();
 }
 
+function getBearerToken(request: Request) {
+	const authorization = request.headers.get('authorization') ?? '';
+	const match = authorization.match(/^Bearer\s+(.+)$/i);
+
+	if (!match?.[1]) {
+		return null;
+	}
+
+	return getSafeHeaderValue(match[1]);
+}
+
+function constantTimeStringEquals(left: string, right: string) {
+	let mismatch = left.length === right.length ? 0 : 1;
+	const maxLength = Math.max(left.length, right.length);
+
+	for (let index = 0; index < maxLength; index += 1) {
+		mismatch |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+	}
+
+	return mismatch === 0;
+}
+
+function smokeJson(body: Record<string, unknown>, status = 200) {
+	return Response.json(body, {
+		status,
+		headers: {
+			'Cache-Control': 'no-store',
+		},
+	});
+}
+
+async function serveBackendShadowSmoke(request: Request, env: Env, requestId: string, requestStartedAt: number) {
+	if (!getBooleanConfig(env.ENABLE_BACKEND_SHADOW_SMOKE)) {
+		return smokeJson({ error: 'Not found' }, 404);
+	}
+
+	if (request.method === 'OPTIONS') {
+		return new Response(null, {
+			status: 204,
+			headers: {
+				'Cache-Control': 'no-store',
+			},
+		});
+	}
+
+	if (request.method !== 'GET') {
+		return smokeJson({ error: 'Method not allowed' }, 405);
+	}
+
+	const expectedToken = await resolveValue(env.NUTSNEWS_SHADOW_SMOKE_TOKEN);
+	if (!expectedToken) {
+		return smokeJson({ ok: false, error: 'NUTSNEWS_SHADOW_SMOKE_TOKEN is not configured.' }, 503);
+	}
+
+	const bearerToken = getBearerToken(request);
+	if (!bearerToken || !constantTimeStringEquals(bearerToken, expectedToken)) {
+		return smokeJson({ ok: false, error: 'Unauthorized' }, 401);
+	}
+
+	const providerMode = getDatabaseProviderMode(env.NUTSNEWS_DATABASE_PROVIDER_MODE);
+	if (providerMode !== 'backend_postgres_shadow') {
+		return smokeJson(
+			{
+				ok: false,
+				error: 'Backend shadow smoke requires NUTSNEWS_DATABASE_PROVIDER_MODE=backend_postgres_shadow.',
+				databaseProviderMode: providerMode,
+			},
+			409,
+		);
+	}
+
+	const backendApiUrl = await resolveValue(env.NUTSNEWS_BACKEND_API_URL);
+	const backendApiToken = await resolveValue(env.NUTSNEWS_BACKEND_API_TOKEN);
+	if (!backendApiUrl || !backendApiToken) {
+		return smokeJson({ ok: false, error: 'Backend API URL/token bindings are not configured.' }, 503);
+	}
+
+	try {
+		const database = new BackendWorkerDatabaseClient(providerMode, backendApiUrl, backendApiToken);
+		const backendReadStartedAt = Date.now();
+		const backpressureCount = await database.loadBackpressureArticleCount();
+		const durationMs = Date.now() - requestStartedAt;
+
+		await logInfo(env, 'worker.database.backend_shadow_smoke_completed', 'Backend PostgreSQL shadow smoke completed without Supabase writes', {
+			requestId,
+			shardIndex: getShardIndex(env),
+			providerMode,
+			backendProvider: database.provider,
+			operation: 'loadBackpressureArticleCount',
+			backendReadDurationMs: Date.now() - backendReadStartedAt,
+			durationMs,
+			runbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PROVIDER_SWITCH.md',
+			parityRunbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PARITY_VALIDATION.md',
+		});
+
+		return smokeJson({
+			ok: true,
+			message: 'Backend PostgreSQL shadow smoke completed without Supabase writes.',
+			requestId,
+			databaseProviderMode: providerMode,
+			databaseProvider: database.provider,
+			supabaseBindingsPresent: Boolean(env.SUPABASE_URL || env.SUPABASE_SERVICE_ROLE_KEY),
+			backendRead: {
+				operation: 'loadBackpressureArticleCount',
+				articleCount: backpressureCount.articleCount,
+				error: backpressureCount.error,
+			},
+			durationMs,
+			runbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PROVIDER_SWITCH.md',
+			parityRunbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PARITY_VALIDATION.md',
+		});
+	} catch (error) {
+		const durationMs = Date.now() - requestStartedAt;
+
+		await logError(env, 'worker.database.backend_shadow_smoke_failed', 'Backend PostgreSQL shadow smoke failed', error, {
+			requestId,
+			shardIndex: getShardIndex(env),
+			providerMode,
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			durationMs,
+		});
+
+		return smokeJson(
+			{
+				ok: false,
+				message: 'Backend PostgreSQL shadow smoke failed.',
+				requestId,
+				databaseProviderMode: providerMode,
+				error:
+					error instanceof Error
+						? {
+								name: error.name,
+								message: error.message,
+							}
+						: String(error),
+				status: getDatabaseOperationErrorStatus(error),
+			},
+			502,
+		);
+	} finally {
+		await flushBetterStackLogs(env, {
+			requestId,
+			runSource: 'manual',
+			path: BACKEND_SHADOW_SMOKE_PATH,
+			flushReason: 'backend_shadow_smoke_finished',
+			durationMs: Date.now() - requestStartedAt,
+			kvOperationCounts: getKvOperationCounts(env),
+		});
+	}
+}
+
 export default {
 	async fetch(request: Request, env: Env) {
 		const requestStartedAt = Date.now();
@@ -7749,6 +7904,10 @@ export default {
 			return new Response(null, {
 				status: 204,
 			});
+		}
+
+		if (url.pathname === BACKEND_SHADOW_SMOKE_PATH) {
+			return serveBackendShadowSmoke(request, env, requestId, requestStartedAt);
 		}
 
 		if (url.pathname === '/public-feed-snapshot' || url.pathname === '/public-feed-snapshot/status') {

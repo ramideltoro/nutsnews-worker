@@ -1,0 +1,150 @@
+name: Worker Backend Shadow Smoke
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/worker-shadow-smoke.yml"
+      - "worker/src/index.ts"
+      - "worker/package.json"
+      - "worker/package-lock.json"
+      - "worker/scripts/generate-shadow-smoke-config.mjs"
+      - "scripts/assert_worker_shadow_smoke_config.mjs"
+      - "scripts/worker_shadow_smoke_route_test.mjs"
+      - "scripts/worker_shadow_smoke_live_check.mjs"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/worker-shadow-smoke.yml"
+      - "worker/src/index.ts"
+      - "worker/package.json"
+      - "worker/package-lock.json"
+      - "worker/scripts/generate-shadow-smoke-config.mjs"
+      - "scripts/assert_worker_shadow_smoke_config.mjs"
+      - "scripts/worker_shadow_smoke_route_test.mjs"
+      - "scripts/worker_shadow_smoke_live_check.mjs"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the non-production shadow smoke Worker and run the live smoke check
+        required: true
+        type: boolean
+        default: false
+      worker_url:
+        description: Non-production shadow smoke Worker base URL or /backend-shadow-smoke URL
+        required: false
+        default: https://nutsnews-worker-shadow-smoke.nutsnews.workers.dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-backend-shadow-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate shadow smoke target
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Validate generated shadow smoke config
+        working-directory: worker
+        run: npm run test:shadow-smoke-config
+
+      - name: Run mock backend shadow smoke route test
+        working-directory: worker
+        run: npm run test:shadow-smoke-route
+
+  deploy-and-smoke:
+    name: Deploy and smoke non-production shadow target
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy }}
+    environment: non-production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID }}
+      NUTSNEWS_KV_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_NAMESPACE_ID }}
+      NUTSNEWS_KV_PREVIEW_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID }}
+      NUTSNEWS_BACKEND_API_URL_SECRET_NAME: ${{ vars.NUTSNEWS_BACKEND_API_URL_SECRET_NAME || 'NUTSNEWS_BACKEND_API_URL' }}
+      NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME: ${{ vars.NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME || 'NUTSNEWS_BACKEND_API_TOKEN' }}
+      NUTSNEWS_SHADOW_SMOKE_TOKEN_SECRET_NAME: ${{ vars.NUTSNEWS_SHADOW_SMOKE_TOKEN_SECRET_NAME || 'NUTSNEWS_SHADOW_SMOKE_TOKEN' }}
+      NUTSNEWS_SHADOW_SMOKE_WORKER_NAME: ${{ vars.NUTSNEWS_SHADOW_SMOKE_WORKER_NAME || 'nutsnews-worker-shadow-smoke' }}
+      NUTSNEWS_SHADOW_SMOKE_WORKER_URL: ${{ github.event.inputs.worker_url || 'https://nutsnews-worker-shadow-smoke.nutsnews.workers.dev' }}
+      NUTSNEWS_SHADOW_SMOKE_TOKEN: ${{ secrets.NUTSNEWS_SHADOW_SMOKE_TOKEN }}
+      NUTSNEWS_GENERATED_WRANGLER_DIR: generated-shadow-smoke
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install Worker dependencies
+        working-directory: worker
+        run: npm ci
+
+      - name: Validate required non-production secrets
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID NUTSNEWS_SECRETS_STORE_ID NUTSNEWS_SHADOW_SMOKE_TOKEN; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required non-production GitHub secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Generate non-production shadow smoke config
+        working-directory: worker
+        run: npm run generate:shadow-smoke
+
+      - name: Deploy non-production shadow smoke Worker
+        working-directory: worker
+        run: npx wrangler deploy -c generated-shadow-smoke/wrangler.shadow-smoke.jsonc
+
+      - name: Run live shadow smoke check
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          npm run smoke:shadow-live | tee ../shadow-smoke-evidence.json
+          {
+            echo "### Backend shadow smoke evidence"
+            echo
+            echo '```json'
+            cat ../shadow-smoke-evidence.json
+            echo '```'
+            echo
+            echo "Cloudflare Secrets Store bindings used:"
+            echo "- NUTSNEWS_BACKEND_API_URL -> ${NUTSNEWS_BACKEND_API_URL_SECRET_NAME}"
+            echo "- NUTSNEWS_BACKEND_API_TOKEN -> ${NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME}"
+            echo "- NUTSNEWS_SHADOW_SMOKE_TOKEN -> ${NUTSNEWS_SHADOW_SMOKE_TOKEN_SECRET_NAME}"
+            echo
+            echo "Supabase bindings are intentionally absent from generated-shadow-smoke/wrangler.shadow-smoke.jsonc."
+          } >> "$GITHUB_STEP_SUMMARY"
