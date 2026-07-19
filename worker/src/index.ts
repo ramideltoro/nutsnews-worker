@@ -1,5 +1,5 @@
 import { flushBetterStackLogs, logError, logInfo, logWarn } from './logger';
-import { isRuntimeFeatureFlagEnabled } from './runtimeFeatureFlags';
+import { RUNTIME_FEATURE_FLAGS, isRuntimeFeatureFlagEnabled } from './runtimeFeatureFlags';
 import { validateLocalizedSummaryCandidate } from './translationQuality';
 
 type SecretBinding = {
@@ -15,6 +15,10 @@ type ReviewProvider = AiProvider | 'prefilter' | 'no_thumbnail';
 type Env = {
 	SUPABASE_URL: MaybeSecretBinding;
 	SUPABASE_SERVICE_ROLE_KEY: MaybeSecretBinding;
+	NUTSNEWS_DATABASE_PROVIDER_MODE?: string;
+	NUTSNEWS_BACKEND_API_URL?: MaybeSecretBinding;
+	NUTSNEWS_BACKEND_API_TOKEN?: MaybeSecretBinding;
+	NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION?: string;
 	OPENAI_API_KEY: MaybeSecretBinding;
 	AI_PROVIDER?: string;
 	LOCAL_AI_URL?: MaybeSecretBinding;
@@ -56,8 +60,8 @@ type Env = {
 };
 
 type RuntimeConfig = {
-	supabaseUrl: string;
-	supabaseServiceRoleKey: string;
+	database: WorkerDatabaseClient;
+	databaseProviderMode: DatabaseProviderMode;
 	openAiApiKey: string;
 	aiProvider: AiProvider;
 	localAiUrl: string;
@@ -78,11 +82,6 @@ type RuntimeConfig = {
 	enabledSummaryLanguages: SummaryLanguageCode[];
 	summaryTranslationLimit: number;
 	holdArticlesForTranslations: boolean;
-};
-
-type WorkerRunSaveConfig = {
-	supabaseUrl: string;
-	supabaseServiceRoleKey: string;
 };
 
 type RssFeed = {
@@ -364,6 +363,7 @@ type ProcessedUrlLookupResult = {
 type BackpressureDbCounts = {
 	articleCount: number | null;
 	error: string | null;
+	contentRange?: string | null;
 };
 
 type BackpressureDecision = {
@@ -475,6 +475,9 @@ type WorkerRunInsert = {
 
 type RefreshResult = {
 	message: string;
+	databaseProviderMode: DatabaseProviderMode;
+	databaseProvider: WorkerDatabaseProvider;
+	databaseShadowProvider?: WorkerDatabaseProvider;
 	shardIndex: number;
 	feedsPerShard: number;
 	maxAiReviews: number;
@@ -580,6 +583,9 @@ type WorkerRequestMode = 'refresh' | 'translate-backlog';
 
 type TranslationBacklogResult = {
 	message: string;
+	databaseProviderMode: DatabaseProviderMode;
+	databaseProvider: WorkerDatabaseProvider;
+	databaseShadowProvider?: WorkerDatabaseProvider;
 	shardIndex: number;
 	enabledSummaryLanguages: SummaryLanguageCode[];
 	summaryTranslationLimit: number;
@@ -608,6 +614,669 @@ type TranslationBacklogResult = {
 	kvOperationCounts: KvOperationCounts;
 	durationMs: number;
 };
+
+type DatabaseProviderMode = 'supabase_primary' | 'backend_postgres_shadow' | 'backend_postgres_primary';
+type WorkerDatabaseProvider = 'supabase' | 'backend_postgres';
+
+type ExistingSummaryLanguageRow = {
+	original_url: string;
+	language_code: string;
+};
+
+type WorkerDatabaseClient = {
+	readonly provider: WorkerDatabaseProvider;
+	readonly providerMode: DatabaseProviderMode;
+	readonly shadowProvider?: WorkerDatabaseProvider;
+	loadFeedsForShard(args: { shardIndex: number; feedsPerShard: number; offset: number }): Promise<RssFeed[]>;
+	loadReviewedUrlRows(args: { candidateUrls: string[] }): Promise<ReviewedUrlRow[]>;
+	loadPublishedArticleUrlRows(args: { candidateUrls: string[] }): Promise<PublishedArticleUrlRow[]>;
+	loadBackpressureArticleCount(): Promise<BackpressureDbCounts>;
+	loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]>;
+	loadExistingSummaryLanguageRows(args: {
+		originalUrls: string[];
+		languageCodes: SummaryLanguageCode[];
+		limit: number;
+	}): Promise<ExistingSummaryLanguageRow[]>;
+	loadSummaryTranslationRecoveryArticles(args: { articleLimit: number; lookbackLimit: number }): Promise<Array<ArticleSummarySourceArticle & { status?: string | null }>>;
+	saveArticleSummariesBatch(summaries: ArticleSummaryInsert[]): Promise<void>;
+	loadFeedHealthSnapshots(): Promise<FeedHealthSnapshotRow[]>;
+	saveFeedHealthBatch(feedHealthRows: FeedHealthUpsert[]): Promise<void>;
+	saveArticleReviewsBatch(reviews: ArticleReviewInsert[]): Promise<void>;
+	saveAcceptedArticlesBatch(articles: ArticleInsert[]): Promise<void>;
+	publishArticlesBatch(originalUrls: string[]): Promise<void>;
+	refreshPublicFeedSnapshot(): Promise<string | null>;
+	saveAiUsageRun(run: AiUsageRunInsert): Promise<void>;
+	saveWorkerRun(run: WorkerRunInsert): Promise<void>;
+	isRuntimeFeatureFlagEnabled(key: string): Promise<boolean>;
+};
+
+class DatabaseOperationError extends Error {
+	readonly provider: WorkerDatabaseProvider;
+	readonly operation: string;
+	readonly status: number | null;
+	readonly errorText: string;
+
+	constructor(provider: WorkerDatabaseProvider, operation: string, status: number | null, errorText: string) {
+		super(`${provider} ${operation} failed${status === null ? '' : ` with HTTP ${status}`}: ${errorText}`);
+		this.name = 'DatabaseOperationError';
+		this.provider = provider;
+		this.operation = operation;
+		this.status = status;
+		this.errorText = errorText;
+	}
+}
+
+class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
+	readonly provider = 'supabase' as const;
+	readonly providerMode: DatabaseProviderMode;
+	private readonly supabaseUrl: string;
+	private readonly supabaseServiceRoleKey: string;
+
+	constructor(providerMode: DatabaseProviderMode, supabaseUrl: string, supabaseServiceRoleKey: string) {
+		this.providerMode = providerMode;
+		this.supabaseUrl = trimTrailingSlashes(supabaseUrl);
+		this.supabaseServiceRoleKey = supabaseServiceRoleKey;
+	}
+
+	private url(path: string) {
+		return `${this.supabaseUrl}/rest/v1/${path}`;
+	}
+
+	private headers(extraHeaders: Record<string, string> = {}) {
+		return {
+			apikey: this.supabaseServiceRoleKey,
+			Authorization: `Bearer ${this.supabaseServiceRoleKey}`,
+			...extraHeaders,
+		};
+	}
+
+	private async readJson<T>(operation: string, path: string, init: RequestInit = {}): Promise<T> {
+		const response = await fetch(this.url(path), {
+			...init,
+			headers: this.headers((init.headers as Record<string, string> | undefined) ?? {}),
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, operation, response);
+		}
+
+		return (await response.json()) as T;
+	}
+
+	private async writeOk(operation: string, path: string, init: RequestInit): Promise<void> {
+		const response = await fetch(this.url(path), {
+			...init,
+			headers: this.headers((init.headers as Record<string, string> | undefined) ?? {}),
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, operation, response);
+		}
+	}
+
+	async loadFeedsForShard(args: { shardIndex: number; feedsPerShard: number; offset: number }): Promise<RssFeed[]> {
+		return this.readJson<RssFeed[]>(
+			'loadFeedsForShard',
+			`rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${args.feedsPerShard}&offset=${args.offset}`,
+			{ method: 'GET' },
+		);
+	}
+
+	async loadReviewedUrlRows(): Promise<ReviewedUrlRow[]> {
+		return this.readJson<ReviewedUrlRow[]>(
+			'loadReviewedUrlRows',
+			`article_ai_reviews?select=original_url,decision,reason,reviewed_at&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
+			{ method: 'GET' },
+		);
+	}
+
+	async loadPublishedArticleUrlRows(): Promise<PublishedArticleUrlRow[]> {
+		return this.readJson<PublishedArticleUrlRow[]>(
+			'loadPublishedArticleUrlRows',
+			`articles?select=original_url&order=published_on_site_at.desc&limit=${PUBLISHED_URL_LOOKBACK_LIMIT}`,
+			{ method: 'GET' },
+		);
+	}
+
+	async loadBackpressureArticleCount(): Promise<BackpressureDbCounts> {
+		const response = await fetch(this.url('articles?select=id'), {
+			method: 'HEAD',
+			headers: this.headers({
+				Prefer: 'count=exact',
+			}),
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, 'loadBackpressureArticleCount', response);
+		}
+
+		const contentRange = response.headers.get('content-range');
+		const articleCount = parseSupabaseContentRangeCount(contentRange);
+
+		return {
+			articleCount,
+			error: articleCount === null ? 'Supabase article count response did not include a usable Content-Range count.' : null,
+			contentRange,
+		};
+	}
+
+	async loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
+		const requestUrl = new URL(this.url('public_feed_snapshot'));
+		requestUrl.searchParams.set('select', PUBLIC_FEED_EDGE_SNAPSHOT_SELECT);
+		requestUrl.searchParams.set('order', 'snapshot_rank.asc');
+		requestUrl.searchParams.set('limit', String(limit));
+
+		const response = await fetch(requestUrl.toString(), {
+			headers: this.headers({
+				Accept: 'application/json',
+			}),
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, 'loadPublicFeedSnapshotRowsForEdge', response);
+		}
+
+		return (await response.json()) as PublicFeedEdgeSnapshotArticle[];
+	}
+
+	async loadExistingSummaryLanguageRows(args: {
+		originalUrls: string[];
+		languageCodes: SummaryLanguageCode[];
+		limit: number;
+	}): Promise<ExistingSummaryLanguageRow[]> {
+		return this.readJson<ExistingSummaryLanguageRow[]>(
+			'loadExistingSummaryLanguageRows',
+			`article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(
+				encodePostgrestInFilter(args.originalUrls),
+			)}&language_code=in.(${args.languageCodes.join(',')})&limit=${args.limit}`,
+			{ method: 'GET' },
+		);
+	}
+
+	async loadSummaryTranslationRecoveryArticles(args: { lookbackLimit: number }): Promise<Array<ArticleSummarySourceArticle & { status?: string | null }>> {
+		return this.readJson<Array<ArticleSummarySourceArticle & { status?: string | null }>>(
+			'loadSummaryTranslationRecoveryArticles',
+			`articles?select=source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc.nullslast,created_at.desc&limit=${args.lookbackLimit}`,
+			{ method: 'GET' },
+		);
+	}
+
+	async saveArticleSummariesBatch(summaries: ArticleSummaryInsert[]): Promise<void> {
+		await this.writeOk('saveArticleSummariesBatch', 'article_summaries?on_conflict=original_url,language_code', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
+			},
+			body: JSON.stringify(summaries),
+		});
+	}
+
+	async loadFeedHealthSnapshots(): Promise<FeedHealthSnapshotRow[]> {
+		return this.readJson<FeedHealthSnapshotRow[]>(
+			'loadFeedHealthSnapshots',
+			'feed_health?select=feed_url,consecutive_failure_count,total_fetch_count,total_success_count,total_failure_count,total_article_count,total_image_count,total_accepted_count,total_rejected_count,last_success_at,last_failure_at&limit=10000',
+			{ method: 'GET' },
+		);
+	}
+
+	async saveFeedHealthBatch(feedHealthRows: FeedHealthUpsert[]): Promise<void> {
+		await this.writeOk('saveFeedHealthBatch', 'feed_health?on_conflict=feed_url', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
+			},
+			body: JSON.stringify(feedHealthRows),
+		});
+	}
+
+	async saveArticleReviewsBatch(reviews: ArticleReviewInsert[]): Promise<void> {
+		await this.writeOk('saveArticleReviewsBatch', 'article_ai_reviews?on_conflict=original_url', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=merge-duplicates,return=minimal',
+			},
+			body: JSON.stringify(reviews),
+		});
+	}
+
+	async saveAcceptedArticlesBatch(articles: ArticleInsert[]): Promise<void> {
+		await this.writeOk('saveAcceptedArticlesBatch', 'articles?on_conflict=original_url', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'resolution=ignore-duplicates,return=minimal',
+			},
+			body: JSON.stringify(articles),
+		});
+	}
+
+	async publishArticlesBatch(originalUrls: string[]): Promise<void> {
+		await this.writeOk(`publishArticlesBatch`, `articles?original_url=${encodeURIComponent(encodePostgrestInFilter(originalUrls))}`, {
+			method: 'PATCH',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'return=minimal',
+			},
+			body: JSON.stringify({ status: 'published' }),
+		});
+	}
+
+	async refreshPublicFeedSnapshot(): Promise<string | null> {
+		const response = await fetch(this.url('rpc/refresh_public_feed_snapshot'), {
+			method: 'POST',
+			headers: this.headers({
+				'Content-Type': 'application/json',
+				Prefer: 'return=representation',
+			}),
+			body: '{}',
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, 'refreshPublicFeedSnapshot', response);
+		}
+
+		return extractPublicFeedSnapshotRefreshedAt(await readJsonPayloadSafely(response));
+	}
+
+	async saveAiUsageRun(run: AiUsageRunInsert): Promise<void> {
+		await this.writeOk('saveAiUsageRun', 'ai_usage_runs', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'return=minimal',
+			},
+			body: JSON.stringify(run),
+		});
+	}
+
+	async saveWorkerRun(run: WorkerRunInsert): Promise<void> {
+		await this.writeOk('saveWorkerRun', 'worker_runs', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Prefer: 'return=minimal',
+			},
+			body: JSON.stringify(run),
+		});
+	}
+
+	async isRuntimeFeatureFlagEnabled(key: string): Promise<boolean> {
+		return isRuntimeFeatureFlagEnabled(key, {
+			supabaseUrl: this.supabaseUrl,
+			supabaseServiceRoleKey: this.supabaseServiceRoleKey,
+		});
+	}
+}
+
+class BackendWorkerDatabaseClient implements WorkerDatabaseClient {
+	readonly provider = 'backend_postgres' as const;
+	readonly providerMode: DatabaseProviderMode;
+	private readonly backendApiUrl: string;
+	private readonly backendApiToken: string;
+
+	constructor(providerMode: DatabaseProviderMode, backendApiUrl: string, backendApiToken: string) {
+		this.providerMode = providerMode;
+		this.backendApiUrl = trimTrailingSlashes(backendApiUrl);
+		this.backendApiToken = backendApiToken;
+	}
+
+	private endpoint(operation: string) {
+		return `${this.backendApiUrl}/api/worker/db/${operation}`;
+	}
+
+	private requestBody(body: Record<string, unknown>) {
+		return {
+			contract: 'backend-api-compatibility-contract',
+			contractIssue: 'ramideltoro/nutsnews-backend#111',
+			providerMode: this.providerMode,
+			...body,
+		};
+	}
+
+	private async postJson<T>(operation: string, body: Record<string, unknown>): Promise<T> {
+		const response = await fetch(this.endpoint(operation), {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${this.backendApiToken}`,
+				'Content-Type': 'application/json',
+				Accept: 'application/json',
+			},
+			body: JSON.stringify(this.requestBody(body)),
+		});
+
+		if (!response.ok) {
+			throw await createDatabaseOperationError(this.provider, operation, response);
+		}
+
+		if (response.status === 204) {
+			return undefined as T;
+		}
+
+		const jsonResult = await readResponseJsonSafely<T>(response);
+
+		if (!jsonResult.ok) {
+			throw new DatabaseOperationError(this.provider, operation, null, getErrorMessage(jsonResult.error));
+		}
+
+		return jsonResult.value;
+	}
+
+	private async postVoid(operation: string, body: Record<string, unknown>): Promise<void> {
+		await this.postJson<unknown>(operation, body);
+	}
+
+	loadFeedsForShard(args: { shardIndex: number; feedsPerShard: number; offset: number }): Promise<RssFeed[]> {
+		return this.postJson<RssFeed[]>('load-feeds-for-shard', args);
+	}
+
+	loadReviewedUrlRows(args: { candidateUrls: string[] }): Promise<ReviewedUrlRow[]> {
+		return this.postJson<ReviewedUrlRow[]>('load-reviewed-url-rows', {
+			candidateUrls: args.candidateUrls,
+			lookbackLimit: REVIEWED_URL_LOOKBACK_LIMIT,
+		});
+	}
+
+	loadPublishedArticleUrlRows(args: { candidateUrls: string[] }): Promise<PublishedArticleUrlRow[]> {
+		return this.postJson<PublishedArticleUrlRow[]>('load-published-article-url-rows', {
+			candidateUrls: args.candidateUrls,
+			lookbackLimit: PUBLISHED_URL_LOOKBACK_LIMIT,
+		});
+	}
+
+	async loadBackpressureArticleCount(): Promise<BackpressureDbCounts> {
+		const payload = await this.postJson<{ articleCount?: unknown; error?: unknown }>('load-article-count-for-backpressure', {});
+		const articleCount = typeof payload.articleCount === 'number' && Number.isFinite(payload.articleCount)
+			? payload.articleCount
+			: null;
+
+		return {
+			articleCount,
+			error: typeof payload.error === 'string' ? payload.error : null,
+		};
+	}
+
+	loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
+		return this.postJson<PublicFeedEdgeSnapshotArticle[]>('load-public-feed-snapshot-rows', {
+			limit,
+			select: PUBLIC_FEED_EDGE_SNAPSHOT_SELECT,
+		});
+	}
+
+	loadExistingSummaryLanguageRows(args: {
+		originalUrls: string[];
+		languageCodes: SummaryLanguageCode[];
+		limit: number;
+	}): Promise<ExistingSummaryLanguageRow[]> {
+		return this.postJson<ExistingSummaryLanguageRow[]>('load-existing-summary-language-rows', args);
+	}
+
+	loadSummaryTranslationRecoveryArticles(args: { articleLimit: number; lookbackLimit: number }): Promise<Array<ArticleSummarySourceArticle & { status?: string | null }>> {
+		return this.postJson<Array<ArticleSummarySourceArticle & { status?: string | null }>>('load-summary-translation-recovery-articles', args);
+	}
+
+	saveArticleSummariesBatch(summaries: ArticleSummaryInsert[]): Promise<void> {
+		return this.postVoid('save-article-summaries-batch', {
+			summaries,
+			onConflict: ['original_url', 'language_code'],
+			conflictResolution: 'merge_duplicates',
+		});
+	}
+
+	loadFeedHealthSnapshots(): Promise<FeedHealthSnapshotRow[]> {
+		return this.postJson<FeedHealthSnapshotRow[]>('load-feed-health-snapshots', {});
+	}
+
+	saveFeedHealthBatch(feedHealthRows: FeedHealthUpsert[]): Promise<void> {
+		return this.postVoid('save-feed-health-batch', {
+			feedHealthRows,
+			onConflict: ['feed_url'],
+			conflictResolution: 'merge_duplicates',
+		});
+	}
+
+	saveArticleReviewsBatch(reviews: ArticleReviewInsert[]): Promise<void> {
+		return this.postVoid('save-article-reviews-batch', {
+			reviews,
+			onConflict: ['original_url'],
+			conflictResolution: 'merge_duplicates',
+		});
+	}
+
+	saveAcceptedArticlesBatch(articles: ArticleInsert[]): Promise<void> {
+		return this.postVoid('save-accepted-articles-batch', {
+			articles,
+			onConflict: ['original_url'],
+			conflictResolution: 'ignore_duplicates',
+		});
+	}
+
+	publishArticlesBatch(originalUrls: string[]): Promise<void> {
+		return this.postVoid('publish-articles-batch', {
+			originalUrls,
+			status: 'published',
+		});
+	}
+
+	async refreshPublicFeedSnapshot(): Promise<string | null> {
+		const payload = await this.postJson<unknown>('refresh-public-feed-snapshot', {});
+		return extractPublicFeedSnapshotRefreshedAt(payload);
+	}
+
+	saveAiUsageRun(run: AiUsageRunInsert): Promise<void> {
+		return this.postVoid('save-ai-usage-run', { run });
+	}
+
+	saveWorkerRun(run: WorkerRunInsert): Promise<void> {
+		return this.postVoid('save-worker-run', { run });
+	}
+
+	async isRuntimeFeatureFlagEnabled(key: string): Promise<boolean> {
+		const payload = await this.postJson<{ enabled?: unknown }>('get-runtime-feature-flag', { key });
+		return typeof payload.enabled === 'boolean' ? payload.enabled : getRuntimeFeatureFlagDefault(key);
+	}
+}
+
+class ProviderModeWorkerDatabaseClient implements WorkerDatabaseClient {
+	readonly providerMode: DatabaseProviderMode;
+	readonly shadowProvider?: WorkerDatabaseProvider;
+	private readonly env: Env;
+	private readonly primary: WorkerDatabaseClient;
+	private readonly shadow?: WorkerDatabaseClient;
+
+	constructor(env: Env, providerMode: DatabaseProviderMode, primary: WorkerDatabaseClient, shadow?: WorkerDatabaseClient) {
+		this.env = env;
+		this.providerMode = providerMode;
+		this.primary = primary;
+		this.shadow = shadow;
+		this.shadowProvider = shadow?.provider;
+	}
+
+	get provider() {
+		return this.primary.provider;
+	}
+
+	private async compareShadowRead<T>(operation: string, primaryValue: T, shadowRead: () => Promise<T>): Promise<void> {
+		if (!this.shadow) {
+			return;
+		}
+
+		const startedAt = Date.now();
+
+		try {
+			const shadowValue = await shadowRead();
+			const primarySummary = await buildShadowComparisonSummary(primaryValue);
+			const shadowSummary = await buildShadowComparisonSummary(shadowValue);
+			const matched = primarySummary.fingerprint === shadowSummary.fingerprint;
+
+			await logInfo(this.env, 'worker.database.shadow_read_compared', 'Compared Supabase primary read with backend PostgreSQL shadow read', {
+				operation,
+				providerMode: this.providerMode,
+				primaryProvider: this.primary.provider,
+				shadowProvider: this.shadow.provider,
+				matched,
+				primaryRowCount: primarySummary.rowCount,
+				shadowRowCount: shadowSummary.rowCount,
+				primaryFingerprint: primarySummary.fingerprint,
+				shadowFingerprint: shadowSummary.fingerprint,
+				durationMs: Date.now() - startedAt,
+				runbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PROVIDER_SWITCH.md',
+				parityRunbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PARITY_VALIDATION.md',
+			});
+		} catch (error) {
+			await logWarn(this.env, 'worker.database.shadow_read_failed', 'Backend PostgreSQL shadow read failed; Supabase primary result was preserved', {
+				operation,
+				providerMode: this.providerMode,
+				primaryProvider: this.primary.provider,
+				shadowProvider: this.shadow.provider,
+				errorName: getErrorName(error),
+				errorMessage: getErrorMessage(error),
+				status: getDatabaseOperationErrorStatus(error),
+				errorText: getDatabaseOperationErrorText(error),
+				durationMs: Date.now() - startedAt,
+			});
+		}
+	}
+
+	async loadFeedsForShard(args: { shardIndex: number; feedsPerShard: number; offset: number }): Promise<RssFeed[]> {
+		const rows = await this.primary.loadFeedsForShard(args);
+		await this.compareShadowRead('loadFeedsForShard', rows, () => this.shadow!.loadFeedsForShard(args));
+		return rows;
+	}
+
+	async loadReviewedUrlRows(args: { candidateUrls: string[] }): Promise<ReviewedUrlRow[]> {
+		const rows = await this.primary.loadReviewedUrlRows(args);
+		await this.compareShadowRead('loadReviewedUrlRows', rows, () => this.shadow!.loadReviewedUrlRows(args));
+		return rows;
+	}
+
+	async loadPublishedArticleUrlRows(args: { candidateUrls: string[] }): Promise<PublishedArticleUrlRow[]> {
+		const rows = await this.primary.loadPublishedArticleUrlRows(args);
+		await this.compareShadowRead('loadPublishedArticleUrlRows', rows, () => this.shadow!.loadPublishedArticleUrlRows(args));
+		return rows;
+	}
+
+	async loadBackpressureArticleCount(): Promise<BackpressureDbCounts> {
+		const counts = await this.primary.loadBackpressureArticleCount();
+		await this.compareShadowRead('loadBackpressureArticleCount', counts, () => this.shadow!.loadBackpressureArticleCount());
+		return counts;
+	}
+
+	async loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
+		const rows = await this.primary.loadPublicFeedSnapshotRowsForEdge(limit);
+		await this.compareShadowRead('loadPublicFeedSnapshotRowsForEdge', rows, () => this.shadow!.loadPublicFeedSnapshotRowsForEdge(limit));
+		return rows;
+	}
+
+	async loadExistingSummaryLanguageRows(args: {
+		originalUrls: string[];
+		languageCodes: SummaryLanguageCode[];
+		limit: number;
+	}): Promise<ExistingSummaryLanguageRow[]> {
+		const rows = await this.primary.loadExistingSummaryLanguageRows(args);
+		await this.compareShadowRead('loadExistingSummaryLanguageRows', rows, () => this.shadow!.loadExistingSummaryLanguageRows(args));
+		return rows;
+	}
+
+	async loadSummaryTranslationRecoveryArticles(args: { articleLimit: number; lookbackLimit: number }): Promise<Array<ArticleSummarySourceArticle & { status?: string | null }>> {
+		const rows = await this.primary.loadSummaryTranslationRecoveryArticles(args);
+		await this.compareShadowRead('loadSummaryTranslationRecoveryArticles', rows, () => this.shadow!.loadSummaryTranslationRecoveryArticles(args));
+		return rows;
+	}
+
+	async saveArticleSummariesBatch(summaries: ArticleSummaryInsert[]): Promise<void> {
+		await this.assertNoShadowWrite('saveArticleSummariesBatch');
+		await this.primary.saveArticleSummariesBatch(summaries);
+	}
+
+	async loadFeedHealthSnapshots(): Promise<FeedHealthSnapshotRow[]> {
+		const rows = await this.primary.loadFeedHealthSnapshots();
+		await this.compareShadowRead('loadFeedHealthSnapshots', rows, () => this.shadow!.loadFeedHealthSnapshots());
+		return rows;
+	}
+
+	async saveFeedHealthBatch(feedHealthRows: FeedHealthUpsert[]): Promise<void> {
+		await this.assertNoShadowWrite('saveFeedHealthBatch');
+		await this.primary.saveFeedHealthBatch(feedHealthRows);
+	}
+
+	async saveArticleReviewsBatch(reviews: ArticleReviewInsert[]): Promise<void> {
+		await this.assertNoShadowWrite('saveArticleReviewsBatch');
+		await this.primary.saveArticleReviewsBatch(reviews);
+	}
+
+	async saveAcceptedArticlesBatch(articles: ArticleInsert[]): Promise<void> {
+		await this.assertNoShadowWrite('saveAcceptedArticlesBatch');
+		await this.primary.saveAcceptedArticlesBatch(articles);
+	}
+
+	async publishArticlesBatch(originalUrls: string[]): Promise<void> {
+		await this.assertNoShadowWrite('publishArticlesBatch');
+		await this.primary.publishArticlesBatch(originalUrls);
+	}
+
+	async refreshPublicFeedSnapshot(): Promise<string | null> {
+		await this.assertNoShadowWrite('refreshPublicFeedSnapshot');
+		return this.primary.refreshPublicFeedSnapshot();
+	}
+
+	async saveAiUsageRun(run: AiUsageRunInsert): Promise<void> {
+		await this.assertNoShadowWrite('saveAiUsageRun');
+		await this.primary.saveAiUsageRun(run);
+	}
+
+	async saveWorkerRun(run: WorkerRunInsert): Promise<void> {
+		await this.assertNoShadowWrite('saveWorkerRun');
+		await this.primary.saveWorkerRun(run);
+	}
+
+	async isRuntimeFeatureFlagEnabled(key: string): Promise<boolean> {
+		let enabled: boolean;
+
+		try {
+			enabled = await this.primary.isRuntimeFeatureFlagEnabled(key);
+		} catch (error) {
+			enabled = getRuntimeFeatureFlagDefault(key);
+
+			await logWarn(this.env, 'worker.database.feature_flag_lookup_failed', 'Runtime feature flag lookup failed; using default value', {
+				key,
+				providerMode: this.providerMode,
+				primaryProvider: this.primary.provider,
+				defaultValue: enabled,
+				errorName: getErrorName(error),
+				errorMessage: getErrorMessage(error),
+				status: getDatabaseOperationErrorStatus(error),
+				errorText: getDatabaseOperationErrorText(error),
+			});
+		}
+
+		await this.compareShadowRead('isRuntimeFeatureFlagEnabled', { key, enabled }, async () => ({
+			key,
+			enabled: await this.shadow!.isRuntimeFeatureFlagEnabled(key),
+		}));
+
+		return enabled;
+	}
+
+	private async assertNoShadowWrite(operation: string) {
+		if (!this.shadow) {
+			return;
+		}
+
+		await logInfo(this.env, 'worker.database.shadow_write_skipped', 'Skipped backend PostgreSQL write in shadow mode; Supabase remains the only writer', {
+			operation,
+			providerMode: this.providerMode,
+			primaryProvider: this.primary.provider,
+			shadowProvider: this.shadow.provider,
+			runbook: 'ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_ROLLBACK_FAILBACK.md',
+		});
+	}
+}
+
+const DATABASE_PROVIDER_MODES: DatabaseProviderMode[] = ['supabase_primary', 'backend_postgres_shadow', 'backend_postgres_primary'];
+const BACKEND_POSTGRES_PRIMARY_CONFIRMATION = 'enable-backend-postgres-primary';
 
 const MAX_ITEMS_PER_FEED = 35;
 const MAX_CANDIDATES_PER_RUN = 300;
@@ -1386,48 +2055,30 @@ async function fetchPublicFeedSnapshotRowsForEdge(
 	limit: number,
 ): Promise<PublicFeedEdgeSnapshotArticle[] | null> {
 	const startedAt = Date.now();
-	const requestUrl = new URL(`${config.supabaseUrl}/rest/v1/public_feed_snapshot`);
-	requestUrl.searchParams.set('select', PUBLIC_FEED_EDGE_SNAPSHOT_SELECT);
-	requestUrl.searchParams.set('order', 'snapshot_rank.asc');
-	requestUrl.searchParams.set('limit', String(limit));
-
-	let response: Response;
 
 	try {
-		response = await fetch(requestUrl.toString(), {
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				Accept: 'application/json',
-			},
+		const rows = await config.database.loadPublicFeedSnapshotRowsForEdge(limit);
+
+		await logInfo(env, 'worker.public_feed_edge_snapshot.source_read_ok', 'Loaded public feed snapshot rows for KV edge snapshot', {
+			articleCount: rows.length,
+			limit,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+			durationMs: Date.now() - startedAt,
 		});
+
+		return rows;
 	} catch (error) {
-		await logWarn(env, 'worker.public_feed_edge_snapshot.source_read_exception', 'Failed to read public feed snapshot rows for KV edge snapshot', {
-			errorMessage: getErrorMessage(error),
-			durationMs: Date.now() - startedAt,
-		});
-		return null;
-	}
-
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
 		await logWarn(env, 'worker.public_feed_edge_snapshot.source_read_failed', 'Failed to read public feed snapshot rows for KV edge snapshot', {
-			status: response.status,
-			errorText,
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			errorMessage: getErrorMessage(error),
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 		return null;
 	}
-
-	const rows = (await response.json()) as PublicFeedEdgeSnapshotArticle[];
-
-	await logInfo(env, 'worker.public_feed_edge_snapshot.source_read_ok', 'Loaded public feed snapshot rows for KV edge snapshot', {
-		articleCount: rows.length,
-		limit,
-		durationMs: Date.now() - startedAt,
-	});
-
-	return rows;
 }
 
 async function publishPublicFeedEdgeSnapshotToKv(
@@ -1536,7 +2187,7 @@ function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeed
 			maxArticles: getPublicFeedEdgeSnapshotLimit(env),
 			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
 			shardIndex: getShardIndex(env),
-			message: 'NUTSNEWS_KV is bound, but no public feed edge snapshot has been written yet. Run a Worker refresh after Supabase public_feed_snapshot has rows.',
+			message: 'NUTSNEWS_KV is bound, but no public feed edge snapshot has been written yet. Run a Worker refresh after the active database public_feed_snapshot has rows.',
 		};
 	}
 
@@ -1688,7 +2339,7 @@ async function getUpstashRedisConfig(env: Env): Promise<UpstashRedisConfig | nul
 		return null;
 	}
 
-	const restUrl = (await resolveValue(env.UPSTASH_REDIS_REST_URL)).trim().replace(/\/+$/, '');
+	const restUrl = trimTrailingSlashes((await resolveValue(env.UPSTASH_REDIS_REST_URL)).trim());
 	const restToken = (await resolveValue(env.UPSTASH_REDIS_REST_TOKEN)).trim();
 
 	if (!restUrl || !restToken) {
@@ -2398,23 +3049,76 @@ function getAiReviewConcurrency(value: string | undefined, provider: AiProvider)
 	return Math.max(1, Math.min(Math.floor(parsed), AI_REVIEW_CONCURRENCY));
 }
 
-async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
+function getDatabaseProviderMode(value: string | undefined): DatabaseProviderMode {
+	const mode = (value?.trim() || 'supabase_primary') as DatabaseProviderMode;
+
+	if (DATABASE_PROVIDER_MODES.includes(mode)) {
+		return mode;
+	}
+
+	throw new Error(
+		`Invalid NUTSNEWS_DATABASE_PROVIDER_MODE=${JSON.stringify(value)}. ` +
+			`Allowed values: ${DATABASE_PROVIDER_MODES.join(', ')}.`,
+	);
+}
+
+async function createWorkerDatabaseClient(env: Env): Promise<WorkerDatabaseClient> {
+	const providerMode = getDatabaseProviderMode(env.NUTSNEWS_DATABASE_PROVIDER_MODE);
 	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
 	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
+	const backendApiUrl = await resolveValue(env.NUTSNEWS_BACKEND_API_URL);
+	const backendApiToken = await resolveValue(env.NUTSNEWS_BACKEND_API_TOKEN);
+
+	const createSupabaseClient = () => {
+		if (!supabaseUrl) {
+			throw new Error('Missing SUPABASE_URL secret for supabase_primary or backend_postgres_shadow mode.');
+		}
+
+		if (!supabaseServiceRoleKey) {
+			throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY secret for supabase_primary or backend_postgres_shadow mode.');
+		}
+
+		return new SupabaseWorkerDatabaseClient(providerMode, supabaseUrl, supabaseServiceRoleKey);
+	};
+
+	const createBackendClient = () => {
+		if (!backendApiUrl) {
+			throw new Error(`Missing NUTSNEWS_BACKEND_API_URL for ${providerMode} mode.`);
+		}
+
+		if (!backendApiToken) {
+			throw new Error(`Missing NUTSNEWS_BACKEND_API_TOKEN for ${providerMode} mode.`);
+		}
+
+		return new BackendWorkerDatabaseClient(providerMode, backendApiUrl, backendApiToken);
+	};
+
+	if (providerMode === 'supabase_primary') {
+		return new ProviderModeWorkerDatabaseClient(env, providerMode, createSupabaseClient());
+	}
+
+	if (providerMode === 'backend_postgres_shadow') {
+		return new ProviderModeWorkerDatabaseClient(env, providerMode, createSupabaseClient(), createBackendClient());
+	}
+
+	if (env.NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION !== BACKEND_POSTGRES_PRIMARY_CONFIRMATION) {
+		throw new Error(
+			`NUTSNEWS_DATABASE_PROVIDER_MODE=backend_postgres_primary requires ` +
+				`NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION=${BACKEND_POSTGRES_PRIMARY_CONFIRMATION}.`,
+		);
+	}
+
+	return new ProviderModeWorkerDatabaseClient(env, providerMode, createBackendClient());
+}
+
+async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
+	const database = await createWorkerDatabaseClient(env);
 	const openAiApiKey = await resolveValue(env.OPENAI_API_KEY);
 	const localAiUrl = await resolveValue(env.LOCAL_AI_URL);
 	const localAiApiKey = await resolveValue(env.LOCAL_AI_API_KEY);
 	const aiProvider = getAiProvider(env.AI_PROVIDER, Boolean(localAiUrl || localAiApiKey));
 	const localAiModel = env.LOCAL_AI_MODEL?.trim() || DEFAULT_LOCAL_AI_MODEL;
 	const aiProviderFallbackToOpenAi = getBooleanConfig(env.AI_PROVIDER_FALLBACK_TO_OPENAI, aiProvider !== 'local');
-
-	if (!supabaseUrl) {
-		throw new Error('Missing SUPABASE_URL secret.');
-	}
-
-	if (!supabaseServiceRoleKey) {
-		throw new Error('Missing SUPABASE_SERVICE_ROLE_KEY secret.');
-	}
 
 	if (!openAiApiKey && !localAiUrl) {
 		throw new Error('Missing AI provider secrets. Set OPENAI_API_KEY, or set LOCAL_AI_URL + LOCAL_AI_API_KEY.');
@@ -2433,11 +3137,11 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	}
 
 	return {
-		supabaseUrl,
-		supabaseServiceRoleKey,
+		database,
+		databaseProviderMode: database.providerMode,
 		openAiApiKey,
 		aiProvider,
-		localAiUrl: localAiUrl.replace(/\/+$/, ''),
+		localAiUrl: trimTrailingSlashes(localAiUrl),
 		localAiApiKey,
 		localAiModel,
 		localAiTimeoutMs: getTimeoutMs(env.LOCAL_AI_TIMEOUT_MS, DEFAULT_LOCAL_AI_TIMEOUT_MS),
@@ -2464,18 +3168,12 @@ async function getRuntimeConfig(env: Env): Promise<RuntimeConfig> {
 	};
 }
 
-async function getWorkerRunSaveConfig(env: Env): Promise<WorkerRunSaveConfig | null> {
-	const supabaseUrl = await resolveValue(env.SUPABASE_URL);
-	const supabaseServiceRoleKey = await resolveValue(env.SUPABASE_SERVICE_ROLE_KEY);
-
-	if (!supabaseUrl || !supabaseServiceRoleKey) {
+async function getWorkerRunSaveDatabase(env: Env): Promise<WorkerDatabaseClient | null> {
+	try {
+		return await createWorkerDatabaseClient(env);
+	} catch {
 		return null;
 	}
-
-	return {
-		supabaseUrl,
-		supabaseServiceRoleKey,
-	};
 }
 
 function getShardIndex(env: Env): number {
@@ -2538,42 +3236,38 @@ async function getFeedsForShard(env: Env, config: RuntimeConfig): Promise<RssFee
 	const feedsPerShard = getFeedsPerShard(env);
 	const offset = shardIndex * feedsPerShard;
 
-	const response = await fetch(
-		`${config.supabaseUrl}/rest/v1/rss_feeds?select=source,url,is_positive_source&is_active=eq.true&order=id.asc&limit=${feedsPerShard}&offset=${offset}`,
-		{
-			method: 'GET',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-			},
-		},
-	);
+	try {
+		const feeds = await config.database.loadFeedsForShard({
+			shardIndex,
+			feedsPerShard,
+			offset,
+		});
 
-	if (!response.ok) {
-		const errorText = await response.text();
+		await logInfo(env, 'worker.feeds.loaded', 'Loaded RSS feeds for shard', {
+			shardIndex,
+			feedsPerShard,
+			offset,
+			feedCount: feeds.length,
+			positiveFeedCount: feeds.filter((feed) => feed.is_positive_source).length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+		});
 
+		return feeds;
+	} catch (error) {
 		await logWarn(env, 'worker.feeds.load_failed', 'Failed to load RSS feeds for shard', {
 			shardIndex,
 			feedsPerShard,
 			offset,
-			status: response.status,
-			errorText,
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			errorMessage: getErrorMessage(error),
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 		});
 
-		throw new Error(`Failed to load RSS feeds for shard ${shardIndex}: ${response.status} ${errorText}`);
+		throw error;
 	}
-
-	const feeds = (await response.json()) as RssFeed[];
-
-	await logInfo(env, 'worker.feeds.loaded', 'Loaded RSS feeds for shard', {
-		shardIndex,
-		feedsPerShard,
-		offset,
-		feedCount: feeds.length,
-		positiveFeedCount: feeds.filter((feed) => feed.is_positive_source).length,
-	});
-
-	return feeds;
 }
 
 function decodeHtml(value: string): string {
@@ -3517,6 +4211,78 @@ async function readResponseJsonSafely<T>(response: Response): Promise<{ ok: true
 	}
 }
 
+async function createDatabaseOperationError(provider: WorkerDatabaseProvider, operation: string, response: Response) {
+	return new DatabaseOperationError(provider, operation, response.status, await readResponseTextSafely(response));
+}
+
+function getDatabaseOperationErrorStatus(error: unknown) {
+	return error instanceof DatabaseOperationError ? error.status : null;
+}
+
+function getDatabaseOperationErrorText(error: unknown) {
+	return error instanceof DatabaseOperationError ? error.errorText : null;
+}
+
+function trimTrailingSlashes(value: string) {
+	let end = value.length;
+
+	while (end > 0 && value.charCodeAt(end - 1) === 47) {
+		end -= 1;
+	}
+
+	return end === value.length ? value : value.slice(0, end);
+}
+
+async function readJsonPayloadSafely(response: Response): Promise<unknown> {
+	try {
+		return await response.json();
+	} catch {
+		return null;
+	}
+}
+
+function extractPublicFeedSnapshotRefreshedAt(payload: unknown) {
+	const value = Array.isArray(payload)
+		? payload[0]?.refresh_public_feed_snapshot
+		: typeof payload === 'object' && payload
+			? (payload as Record<string, unknown>).refresh_public_feed_snapshot ?? (payload as Record<string, unknown>).refreshedAt
+			: typeof payload === 'string'
+				? payload
+				: null;
+
+	return typeof value === 'string' ? value : null;
+}
+
+function getRuntimeFeatureFlagDefault(key: string) {
+	return Object.hasOwn(RUNTIME_FEATURE_FLAGS, key)
+		? RUNTIME_FEATURE_FLAGS[key as keyof typeof RUNTIME_FEATURE_FLAGS].defaultValue
+		: false;
+}
+
+function stableStringify(value: unknown): string {
+	if (value === null || typeof value !== 'object') {
+		const serialized = JSON.stringify(value);
+		return serialized === undefined ? 'undefined' : serialized;
+	}
+
+	if (Array.isArray(value)) {
+		return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+	}
+
+	const record = value as Record<string, unknown>;
+	return `{${Object.keys(record)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+		.join(',')}}`;
+}
+
+async function buildShadowComparisonSummary(value: unknown) {
+	return {
+		rowCount: Array.isArray(value) ? value.length : null,
+		fingerprint: await sha256Hex(stableStringify(value)),
+	};
+}
+
 async function fetchSingleFeed(env: Env, feed: RssFeed, timeoutMs: number): Promise<FeedFetchResult> {
 	const startedAt = Date.now();
 
@@ -3671,139 +4437,65 @@ async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]):
 	const nowMs = Date.now();
 
 	try {
-		const response = await fetch(
-			`${config.supabaseUrl}/rest/v1/article_ai_reviews?select=original_url,decision,reason,reviewed_at&order=reviewed_at.desc&limit=${REVIEWED_URL_LOOKBACK_LIMIT}`,
-			{
-				method: 'GET',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				},
-			},
-		);
+		const rows = await config.database.loadReviewedUrlRows({ candidateUrls: urls });
+		reviewedLookupRowCount = rows.length;
 
-		if (!response.ok) {
-			const errorText = await readResponseTextSafely(response);
-
-			await logWarn(
-				env,
-				'worker.supabase.review_lookup_failed',
-				'Failed to load recent reviewed URLs from Supabase; continuing with published article lookup',
-				{
-					status: response.status,
-					errorText,
-					candidateUrlCount: urls.length,
-					durationMs: Date.now() - startedAt,
-				},
-			);
-		} else {
-			const jsonResult = await readResponseJsonSafely<ReviewedUrlRow[]>(response);
-
-			if (!jsonResult.ok) {
-				await logError(
-					env,
-					'worker.supabase.review_lookup_parse_failed',
-					'Failed to parse Supabase reviewed URL lookup response; continuing with published article lookup',
-					jsonResult.error,
-					{
-						candidateUrlCount: urls.length,
-						durationMs: Date.now() - startedAt,
-					},
-				);
-			} else {
-				reviewedLookupRowCount = jsonResult.value.length;
-
-				for (const row of jsonResult.value) {
-					if (!candidateUrls.has(row.original_url)) {
-						continue;
-					}
-
-					if (!shouldTreatReviewedRowAsProcessed(row, nowMs)) {
-						retryableNoThumbnailReviewCount += 1;
-						continue;
-					}
-
-					reviewedUrls.add(row.original_url);
-					matchedReviewUrlCount += 1;
-				}
+		for (const row of rows) {
+			if (!candidateUrls.has(row.original_url)) {
+				continue;
 			}
+
+			if (!shouldTreatReviewedRowAsProcessed(row, nowMs)) {
+				retryableNoThumbnailReviewCount += 1;
+				continue;
+			}
+
+			reviewedUrls.add(row.original_url);
+			matchedReviewUrlCount += 1;
 		}
 	} catch (error) {
-		await logError(
+		await logWarn(
 			env,
-			'worker.supabase.review_lookup_exception',
-			'Supabase reviewed URL lookup threw an exception; continuing with published article lookup',
-			error,
+			'worker.database.review_lookup_failed',
+			'Failed to load recent reviewed URLs from the active database provider; continuing with published article lookup',
 			{
 				candidateUrlCount: urls.length,
+				status: getDatabaseOperationErrorStatus(error),
+				errorText: getDatabaseOperationErrorText(error),
+				errorMessage: getErrorMessage(error),
+				providerMode: config.databaseProviderMode,
+				databaseProvider: config.database.provider,
 				durationMs: Date.now() - startedAt,
 			},
 		);
 	}
 
 	try {
-		const response = await fetch(
-			`${config.supabaseUrl}/rest/v1/articles?select=original_url&order=published_on_site_at.desc&limit=${PUBLISHED_URL_LOOKBACK_LIMIT}`,
-			{
-				method: 'GET',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				},
-			},
-		);
+		const rows = await config.database.loadPublishedArticleUrlRows({ candidateUrls: urls });
+		publishedLookupRowCount = rows.length;
 
-		if (!response.ok) {
-			const errorText = await readResponseTextSafely(response);
-
-			await logWarn(env, 'worker.supabase.published_url_lookup_failed', 'Failed to load recently published article URLs from Supabase', {
-				status: response.status,
-				errorText,
-				candidateUrlCount: urls.length,
-				durationMs: Date.now() - startedAt,
-			});
-		} else {
-			const jsonResult = await readResponseJsonSafely<PublishedArticleUrlRow[]>(response);
-
-			if (!jsonResult.ok) {
-				await logError(
-					env,
-					'worker.supabase.published_url_lookup_parse_failed',
-					'Failed to parse Supabase published article URL lookup response',
-					jsonResult.error,
-					{
-						candidateUrlCount: urls.length,
-						durationMs: Date.now() - startedAt,
-					},
-				);
-			} else {
-				publishedLookupRowCount = jsonResult.value.length;
-
-				for (const row of jsonResult.value) {
-					if (candidateUrls.has(row.original_url)) {
-						if (!reviewedUrls.has(row.original_url)) {
-							matchedPublishedUrlCount += 1;
-						}
-
-						reviewedUrls.add(row.original_url);
-					}
+		for (const row of rows) {
+			if (candidateUrls.has(row.original_url)) {
+				if (!reviewedUrls.has(row.original_url)) {
+					matchedPublishedUrlCount += 1;
 				}
+
+				reviewedUrls.add(row.original_url);
 			}
 		}
 	} catch (error) {
-		await logError(
-			env,
-			'worker.supabase.published_url_lookup_exception',
-			'Supabase published article URL lookup threw an exception',
-			error,
-			{
-				candidateUrlCount: urls.length,
-				durationMs: Date.now() - startedAt,
-			},
-		);
+		await logWarn(env, 'worker.database.published_url_lookup_failed', 'Failed to load recently published article URLs from the active database provider', {
+			candidateUrlCount: urls.length,
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			errorMessage: getErrorMessage(error),
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+			durationMs: Date.now() - startedAt,
+		});
 	}
 
-	await logInfo(env, 'worker.supabase.processed_url_lookup_completed', 'Loaded previously processed article URLs from Supabase', {
+	await logInfo(env, 'worker.database.processed_url_lookup_completed', 'Loaded previously processed article URLs from the active database provider', {
 		reviewedLookbackCount: reviewedLookupRowCount,
 		publishedLookbackCount: publishedLookupRowCount,
 		candidateUrlCount: urls.length,
@@ -3812,6 +4504,8 @@ async function getReviewedUrls(env: Env, config: RuntimeConfig, urls: string[]):
 		retryableNoThumbnailReviewCount,
 		noThumbnailRetryAfterHours: NO_THUMBNAIL_RETRY_AFTER_HOURS,
 		matchedProcessedUrlCount: reviewedUrls.size,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -3857,47 +4551,30 @@ async function loadBackpressureDbCounts(env: Env, config: RuntimeConfig): Promis
 	const startedAt = Date.now();
 
 	try {
-		const response = await fetch(`${config.supabaseUrl}/rest/v1/articles?select=id`, {
-			method: 'HEAD',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				Prefer: 'count=exact',
-			},
-		});
+		const counts = await config.database.loadBackpressureArticleCount();
 
-		if (!response.ok) {
-			const errorText = await readResponseTextSafely(response);
-
-			await logWarn(env, 'worker.backpressure.db_count_failed', 'Failed to load article count for ingestion backpressure', {
-				status: response.status,
-				errorText,
-				durationMs: Date.now() - startedAt,
-			});
-
-			return {
-				articleCount: null,
-				error: `Supabase article count returned HTTP ${response.status}.`,
-			};
-		}
-
-		const articleCount = parseSupabaseContentRangeCount(response.headers.get('content-range'));
-
-		if (articleCount === null) {
-			await logWarn(env, 'worker.backpressure.db_count_parse_failed', 'Supabase article count response did not include a usable Content-Range count', {
-				contentRange: response.headers.get('content-range'),
+		if (counts.articleCount === null) {
+			await logWarn(env, 'worker.backpressure.db_count_parse_failed', 'Database article count response did not include a usable count', {
+				error: counts.error,
+				contentRange: counts.contentRange ?? null,
+				providerMode: config.databaseProviderMode,
+				databaseProvider: config.database.provider,
 				durationMs: Date.now() - startedAt,
 			});
 		}
 
 		return {
-			articleCount,
-			error: articleCount === null ? 'Supabase article count response did not include a usable Content-Range count.' : null,
+			articleCount: counts.articleCount,
+			error: counts.error,
 		};
 	} catch (error) {
 		const errorMessage = getErrorMessage(error);
 
-		await logError(env, 'worker.backpressure.db_count_exception', 'Supabase article count check threw an exception', error, {
+		await logError(env, 'worker.backpressure.db_count_exception', 'Database article count check threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
@@ -5217,58 +5894,32 @@ async function loadExistingSummaryLanguageCodes(
 	}
 
 	const startedAt = Date.now();
-	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/article_summaries?select=original_url,language_code&original_url=${encodeURIComponent(
-				encodePostgrestInFilter(uniqueOriginalUrls),
-			)}&language_code=in.(${config.enabledSummaryLanguages.join(',')})&limit=500`,
-			{
-				method: 'GET',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				},
-			},
-		);
-	} catch (error) {
-		await logError(env, 'worker.supabase.article_summary_lookup_exception', 'Article summary lookup threw an exception', error, {
-			candidateUrlCount: uniqueOriginalUrls.length,
-			durationMs: Date.now() - startedAt,
+		const rows = await config.database.loadExistingSummaryLanguageRows({
+			originalUrls: uniqueOriginalUrls,
+			languageCodes: config.enabledSummaryLanguages,
+			limit: 500,
 		});
-		return languageCodesByUrl;
-	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-		await logWarn(env, 'worker.supabase.article_summary_lookup_failed', 'Failed to load article summary rows', {
-			status: response.status,
-			errorText,
-			candidateUrlCount: uniqueOriginalUrls.length,
-			durationMs: Date.now() - startedAt,
-		});
-		return languageCodesByUrl;
-	}
+		for (const row of rows) {
+			if (!isSummaryLanguageCode(row.language_code)) {
+				continue;
+			}
 
-	const jsonResult = await readResponseJsonSafely<Array<{ original_url: string; language_code: string }>>(response);
-
-	if (!jsonResult.ok) {
-		await logError(env, 'worker.supabase.article_summary_lookup_parse_failed', 'Failed to parse article summary lookup response', jsonResult.error, {
-			candidateUrlCount: uniqueOriginalUrls.length,
-			durationMs: Date.now() - startedAt,
-		});
-		return languageCodesByUrl;
-	}
-
-	for (const row of jsonResult.value) {
-		if (!isSummaryLanguageCode(row.language_code)) {
-			continue;
+			const current = languageCodesByUrl.get(row.original_url) ?? new Set<SummaryLanguageCode>();
+			current.add(row.language_code);
+			languageCodesByUrl.set(row.original_url, current);
 		}
-
-		const current = languageCodesByUrl.get(row.original_url) ?? new Set<SummaryLanguageCode>();
-		current.add(row.language_code);
-		languageCodesByUrl.set(row.original_url, current);
+	} catch (error) {
+		await logError(env, 'worker.database.article_summary_lookup_exception', 'Article summary lookup threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			candidateUrlCount: uniqueOriginalUrls.length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+			durationMs: Date.now() - startedAt,
+		});
 	}
 
 	return languageCodesByUrl;
@@ -5285,90 +5936,65 @@ async function loadSummaryTranslationRecoveryArticles(
 	}
 
 	const startedAt = Date.now();
-	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/articles?select=source,title,original_url,ai_summary,category,published_on_site_at,status&status=in.(published,translation_pending)&image_url=not.is.null&ai_summary=not.is.null&order=published_on_site_at.desc.nullslast,created_at.desc&limit=${SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT}`,
-			{
-				method: 'GET',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				},
-			},
+		const rows = await config.database.loadSummaryTranslationRecoveryArticles({
+			articleLimit,
+			lookbackLimit: SUMMARY_TRANSLATION_RECOVERY_LOOKBACK_LIMIT,
+		});
+		const candidateRows = rows.filter(
+			(article) => article.original_url && article.title && article.ai_summary && !excludedOriginalUrls.has(article.original_url),
 		);
+		const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
+			env,
+			config,
+			candidateRows.map((article) => article.original_url),
+		);
+		const recoveryArticles: ArticleSummarySourceArticle[] = [];
+
+		for (const article of candidateRows) {
+			const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
+			const hasMissingLanguage = config.enabledSummaryLanguages.some((languageCode) => !existingLanguageCodes.has(languageCode));
+
+			if (!hasMissingLanguage) {
+				continue;
+			}
+
+			recoveryArticles.push({
+				source: article.source,
+				title: article.title,
+				original_url: article.original_url,
+				ai_summary: article.ai_summary,
+				category: article.category || 'Uplifting',
+				published_on_site_at: article.published_on_site_at ?? null,
+			});
+
+			if (recoveryArticles.length >= articleLimit) {
+				break;
+			}
+		}
+
+		if (recoveryArticles.length > 0) {
+			await logInfo(env, 'worker.translation.recovery_candidates_loaded', 'Loaded articles that need translation recovery', {
+				candidateRowCount: candidateRows.length,
+				recoveryCandidateCount: recoveryArticles.length,
+				articleLimit,
+				durationMs: Date.now() - startedAt,
+			});
+		}
+
+		return recoveryArticles;
 	} catch (error) {
 		await logError(env, 'worker.translation.recovery_article_lookup_exception', 'Translation recovery article lookup threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			articleLimit,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 		return [];
 	}
-
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-		await logWarn(env, 'worker.translation.recovery_article_lookup_failed', 'Failed to load translation recovery articles', {
-			status: response.status,
-			errorText,
-			articleLimit,
-			durationMs: Date.now() - startedAt,
-		});
-		return [];
-	}
-
-	const jsonResult = await readResponseJsonSafely<Array<ArticleSummarySourceArticle & { status?: string | null }>>(response);
-
-	if (!jsonResult.ok) {
-		await logError(env, 'worker.translation.recovery_article_lookup_parse_failed', 'Failed to parse translation recovery article lookup response', jsonResult.error, {
-			articleLimit,
-			durationMs: Date.now() - startedAt,
-		});
-		return [];
-	}
-
-	const candidateRows = jsonResult.value.filter(
-		(article) => article.original_url && article.title && article.ai_summary && !excludedOriginalUrls.has(article.original_url),
-	);
-	const existingLanguageCodesByUrl = await loadExistingSummaryLanguageCodes(
-		env,
-		config,
-		candidateRows.map((article) => article.original_url),
-	);
-	const recoveryArticles: ArticleSummarySourceArticle[] = [];
-
-	for (const article of candidateRows) {
-		const existingLanguageCodes = existingLanguageCodesByUrl.get(article.original_url) ?? new Set<SummaryLanguageCode>();
-		const hasMissingLanguage = config.enabledSummaryLanguages.some((languageCode) => !existingLanguageCodes.has(languageCode));
-
-		if (!hasMissingLanguage) {
-			continue;
-		}
-
-		recoveryArticles.push({
-			source: article.source,
-			title: article.title,
-			original_url: article.original_url,
-			ai_summary: article.ai_summary,
-			category: article.category || 'Uplifting',
-			published_on_site_at: article.published_on_site_at ?? null,
-		});
-
-		if (recoveryArticles.length >= articleLimit) {
-			break;
-		}
-	}
-
-	if (recoveryArticles.length > 0) {
-		await logInfo(env, 'worker.translation.recovery_candidates_loaded', 'Loaded articles that need translation recovery', {
-			candidateRowCount: candidateRows.length,
-			recoveryCandidateCount: recoveryArticles.length,
-			articleLimit,
-			durationMs: Date.now() - startedAt,
-		});
-	}
-
-	return recoveryArticles;
 }
 
 type ArticleSummaryTranslationBuildResult = {
@@ -5580,7 +6206,6 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 		return { ok: true, errorSamples: [] };
 	}
 
-	let response: Response;
 	const buildSaveErrorSample = (status: number | null, errorText: string): ArticleSummarySaveErrorSample => ({
 		status,
 		errorText,
@@ -5591,43 +6216,32 @@ async function saveArticleSummariesBatch(env: Env, config: RuntimeConfig, summar
 	});
 
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/article_summaries?on_conflict=original_url,language_code`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'resolution=merge-duplicates,return=minimal',
-			},
-			body: JSON.stringify(summaries),
-		});
+		await config.database.saveArticleSummariesBatch(summaries);
 	} catch (error) {
 		await logError(
 			env,
-			'worker.supabase.article_summary_batch_save_exception',
-			'Supabase article summary batch save threw an exception',
+			'worker.database.article_summary_batch_save_exception',
+			'Article summary batch save threw an exception',
 			error,
 			{
+				status: getDatabaseOperationErrorStatus(error),
+				errorText: getDatabaseOperationErrorText(error),
 				summaryCount: summaries.length,
+				providerMode: config.databaseProviderMode,
+				databaseProvider: config.database.provider,
 				durationMs: Date.now() - startedAt,
 			},
 		);
-		return { ok: false, errorSamples: [buildSaveErrorSample(null, getErrorMessage(error))] };
+		return {
+			ok: false,
+			errorSamples: [buildSaveErrorSample(getDatabaseOperationErrorStatus(error), getDatabaseOperationErrorText(error) ?? getErrorMessage(error))],
+		};
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-		await logWarn(env, 'worker.supabase.article_summary_batch_save_failed', 'Failed to batch-save article summaries', {
-			status: response.status,
-			errorText,
-			summaryCount: summaries.length,
-			durationMs: Date.now() - startedAt,
-		});
-		return { ok: false, errorSamples: [buildSaveErrorSample(response.status, errorText)] };
-	}
-
-	await logInfo(env, 'worker.supabase.article_summary_batch_saved', 'Batch-saved article summaries', {
+	await logInfo(env, 'worker.database.article_summary_batch_saved', 'Batch-saved article summaries', {
 		summaryCount: summaries.length,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5660,50 +6274,21 @@ function buildFeedOutcomeCounts(reviewedArticles: ReviewedArticleResult[]): Map<
 
 async function getFeedHealthSnapshots(env: Env, config: RuntimeConfig): Promise<Map<string, FeedHealthSnapshotRow>> {
 	const startedAt = Date.now();
-	let response: Response;
 
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/feed_health?select=feed_url,consecutive_failure_count,total_fetch_count,total_success_count,total_failure_count,total_article_count,total_image_count,total_accepted_count,total_rejected_count,last_success_at,last_failure_at&limit=10000`,
-			{
-				method: 'GET',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				},
-			},
-		);
+		const rows = await config.database.loadFeedHealthSnapshots();
+		return new Map(rows.map((row) => [row.feed_url, row]));
 	} catch (error) {
-		await logError(env, 'worker.supabase.feed_health_lookup_exception', 'Supabase feed health lookup threw an exception', error, {
+		await logError(env, 'worker.database.feed_health_lookup_exception', 'Feed health lookup threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return new Map();
 	}
-
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.feed_health_lookup_failed', 'Failed to load feed health snapshots', {
-			status: response.status,
-			errorText,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return new Map();
-	}
-
-	const rows = await readResponseJsonSafely<FeedHealthSnapshotRow[]>(response);
-
-	if (!rows.ok) {
-		await logError(env, 'worker.supabase.feed_health_lookup_parse_failed', 'Failed to parse feed health lookup response', rows.error, {
-			durationMs: Date.now() - startedAt,
-		});
-
-		return new Map();
-	}
-
-	return new Map(rows.value.map((row) => [row.feed_url, row]));
 }
 
 function buildFeedHealthRows(
@@ -5765,43 +6350,25 @@ async function saveFeedHealthBatch(env: Env, config: RuntimeConfig, feedHealthRo
 		return true;
 	}
 
-	let response: Response;
-
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/feed_health?on_conflict=feed_url`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'resolution=merge-duplicates,return=minimal',
-			},
-			body: JSON.stringify(feedHealthRows),
-		});
+		await config.database.saveFeedHealthBatch(feedHealthRows);
 	} catch (error) {
-		await logError(env, 'worker.supabase.feed_health_batch_save_exception', 'Supabase feed health batch save threw an exception', error, {
+		await logError(env, 'worker.database.feed_health_batch_save_exception', 'Feed health batch save threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			feedHealthRowCount: feedHealthRows.length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.feed_health_batch_save_failed', 'Failed to batch-save feed health rows', {
-			status: response.status,
-			errorText,
-			feedHealthRowCount: feedHealthRows.length,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.feed_health_batch_saved', 'Batch-saved feed health rows', {
+	await logInfo(env, 'worker.database.feed_health_batch_saved', 'Batch-saved feed health rows', {
 		feedHealthRowCount: feedHealthRows.length,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5815,43 +6382,25 @@ async function saveArticleReviewsBatch(env: Env, config: RuntimeConfig, reviews:
 		return true;
 	}
 
-	let response: Response;
-
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/article_ai_reviews?on_conflict=original_url`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'resolution=merge-duplicates,return=minimal',
-			},
-			body: JSON.stringify(reviews),
-		});
+		await config.database.saveArticleReviewsBatch(reviews);
 	} catch (error) {
-		await logError(env, 'worker.supabase.review_batch_save_exception', 'Supabase article AI review batch save threw an exception', error, {
+		await logError(env, 'worker.database.review_batch_save_exception', 'Article AI review batch save threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			reviewCount: reviews.length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.review_batch_save_failed', 'Failed to batch-save article AI reviews', {
-			status: response.status,
-			errorText,
-			reviewCount: reviews.length,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.review_batch_saved', 'Batch-saved article AI reviews', {
+	await logInfo(env, 'worker.database.review_batch_saved', 'Batch-saved article AI reviews', {
 		reviewCount: reviews.length,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5865,43 +6414,25 @@ async function saveAcceptedArticlesBatch(env: Env, config: RuntimeConfig, articl
 		return true;
 	}
 
-	let response: Response;
-
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/articles?on_conflict=original_url`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'resolution=ignore-duplicates,return=minimal',
-			},
-			body: JSON.stringify(articles),
-		});
+		await config.database.saveAcceptedArticlesBatch(articles);
 	} catch (error) {
-		await logError(env, 'worker.supabase.article_batch_save_exception', 'Supabase accepted article batch save threw an exception', error, {
+		await logError(env, 'worker.database.article_batch_save_exception', 'Accepted article batch save threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			articleCount: articles.length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.article_batch_save_failed', 'Failed to batch-save accepted articles', {
-			status: response.status,
-			errorText,
-			articleCount: articles.length,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.article_batch_saved', 'Batch-saved accepted articles', {
+	await logInfo(env, 'worker.database.article_batch_saved', 'Batch-saved accepted articles', {
 		articleCount: articles.length,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5933,43 +6464,24 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 		return true;
 	}
 
-	let response: Response;
-
 	try {
-		response = await fetch(
-			`${config.supabaseUrl}/rest/v1/articles?original_url=${encodeURIComponent(encodePostgrestInFilter(uniqueOriginalUrls))}`,
-			{
-				method: 'PATCH',
-				headers: {
-					apikey: config.supabaseServiceRoleKey,
-					Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-					'Content-Type': 'application/json',
-					Prefer: 'return=minimal',
-				},
-				body: JSON.stringify({ status: 'published' }),
-			},
-		);
+		await config.database.publishArticlesBatch(uniqueOriginalUrls);
 	} catch (error) {
-		await logError(env, 'worker.supabase.article_publish_batch_exception', 'Publishing translated articles threw an exception', error, {
+		await logError(env, 'worker.database.article_publish_batch_exception', 'Publishing translated articles threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			articleCount: uniqueOriginalUrls.length,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-		await logWarn(env, 'worker.supabase.article_publish_batch_failed', 'Failed to publish translated articles', {
-			status: response.status,
-			errorText,
-			articleCount: uniqueOriginalUrls.length,
-			durationMs: Date.now() - startedAt,
-		});
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.article_publish_batch_saved', 'Published translated articles', {
+	await logInfo(env, 'worker.database.article_publish_batch_saved', 'Published translated articles', {
 		articleCount: uniqueOriginalUrls.length,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -5978,26 +6490,39 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 
 async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<PublicFeedSnapshotRefreshResult> {
 	const startedAt = Date.now();
-	let response: Response;
 
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/rpc/refresh_public_feed_snapshot`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'return=representation',
-			},
-			body: '{}',
+		const refreshedAt = await config.database.refreshPublicFeedSnapshot();
+
+		await logInfo(env, 'worker.database.public_feed_snapshot_refreshed', 'Refreshed public feed snapshot', {
+			refreshedAt,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+			durationMs: Date.now() - startedAt,
 		});
+
+		const edgeSnapshotPublishingEnabled = await config.database.isRuntimeFeatureFlagEnabled('worker_public_feed_edge_snapshot_publish');
+		const edgeSnapshotPublishResult = edgeSnapshotPublishingEnabled
+			? await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt)
+			: { ok: true, articleCount: 0 };
+
+		return {
+			publicFeedSnapshotRefreshOk: true,
+			publicFeedEdgeSnapshotPublishOk: edgeSnapshotPublishResult.ok,
+			publicFeedEdgeSnapshotArticleCount: edgeSnapshotPublishResult.articleCount,
+			publicFeedSnapshotRefreshedAt: refreshedAt,
+		};
 	} catch (error) {
 		await logError(
 			env,
-			'worker.supabase.public_feed_snapshot_refresh_exception',
+			'worker.database.public_feed_snapshot_refresh_exception',
 			'Public feed snapshot refresh threw an exception',
 			error,
 			{
+				status: getDatabaseOperationErrorStatus(error),
+				errorText: getDatabaseOperationErrorText(error),
+				providerMode: config.databaseProviderMode,
+				databaseProvider: config.database.provider,
 				durationMs: Date.now() - startedAt,
 			},
 		);
@@ -6009,103 +6534,29 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 			publicFeedSnapshotRefreshedAt: null,
 		};
 	}
-
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.public_feed_snapshot_refresh_failed', 'Failed to refresh public feed snapshot', {
-			status: response.status,
-			errorText,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return {
-			publicFeedSnapshotRefreshOk: false,
-			publicFeedEdgeSnapshotPublishOk: false,
-			publicFeedEdgeSnapshotArticleCount: 0,
-			publicFeedSnapshotRefreshedAt: null,
-		};
-	}
-
-	let refreshedAt: string | null = null;
-
-	try {
-		const payload = (await response.clone().json()) as Array<Record<string, unknown>> | Record<string, unknown> | string | null;
-		const value = Array.isArray(payload)
-			? payload[0]?.refresh_public_feed_snapshot
-			: typeof payload === 'object' && payload
-				? payload.refresh_public_feed_snapshot
-				: typeof payload === 'string'
-					? payload
-					: null;
-		refreshedAt = typeof value === 'string' ? value : null;
-	} catch {
-		refreshedAt = null;
-	}
-
-	await logInfo(env, 'worker.supabase.public_feed_snapshot_refreshed', 'Refreshed public feed snapshot', {
-		refreshedAt,
-		durationMs: Date.now() - startedAt,
-	});
-
-	const edgeSnapshotPublishingEnabled = await isRuntimeFeatureFlagEnabled(
-		'worker_public_feed_edge_snapshot_publish',
-		config,
-	);
-	const edgeSnapshotPublishResult = edgeSnapshotPublishingEnabled
-		? await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt)
-		: { ok: true, articleCount: 0 };
-
-	return {
-		publicFeedSnapshotRefreshOk: true,
-		publicFeedEdgeSnapshotPublishOk: edgeSnapshotPublishResult.ok,
-		publicFeedEdgeSnapshotArticleCount: edgeSnapshotPublishResult.articleCount,
-		publicFeedSnapshotRefreshedAt: refreshedAt,
-	};
 }
 
 async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunInsert): Promise<boolean> {
 	const startedAt = Date.now();
-	let response: Response;
 
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/ai_usage_runs`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'return=minimal',
-			},
-			body: JSON.stringify(run),
-		});
+		await config.database.saveAiUsageRun(run);
 	} catch (error) {
-		await logError(env, 'worker.supabase.ai_usage_run_save_exception', 'Supabase AI usage run save threw an exception', error, {
+		await logError(env, 'worker.database.ai_usage_run_save_exception', 'AI usage run save threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			shardIndex: run.shard_index,
 			openAiCallCount: run.openai_call_count,
 			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
+			providerMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.ai_usage_run_save_failed', 'Failed to save AI usage run', {
-			status: response.status,
-			errorText,
-			shardIndex: run.shard_index,
-			openAiCallCount: run.openai_call_count,
-			estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.ai_usage_run_saved', 'Saved AI usage run', {
+	await logInfo(env, 'worker.database.ai_usage_run_saved', 'Saved AI usage run', {
 		shardIndex: run.shard_index,
 		openAiCallCount: run.openai_call_count,
 		openAiPromptTokens: run.openai_prompt_tokens,
@@ -6117,62 +6568,45 @@ async function saveAiUsageRun(env: Env, config: RuntimeConfig, run: AiUsageRunIn
 		localAiTranslationCount: run.local_ai_translation_count,
 		estimatedOpenAiCostUsd: run.estimated_openai_cost_usd,
 		estimatedLocalAiSavingsUsd: run.estimated_local_ai_savings_usd,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
 	return true;
 }
 
-async function saveWorkerRun(env: Env, config: WorkerRunSaveConfig, run: WorkerRunInsert): Promise<boolean> {
+async function saveWorkerRun(env: Env, config: RuntimeConfig | WorkerDatabaseClient, run: WorkerRunInsert): Promise<boolean> {
 	const startedAt = Date.now();
-	let response: Response;
+	const database = 'database' in config ? config.database : config;
 
 	try {
-		response = await fetch(`${config.supabaseUrl}/rest/v1/worker_runs`, {
-			method: 'POST',
-			headers: {
-				apikey: config.supabaseServiceRoleKey,
-				Authorization: `Bearer ${config.supabaseServiceRoleKey}`,
-				'Content-Type': 'application/json',
-				Prefer: 'return=minimal',
-			},
-			body: JSON.stringify(run),
-		});
+		await database.saveWorkerRun(run);
 	} catch (error) {
-		await logError(env, 'worker.supabase.worker_run_save_exception', 'Supabase Worker run save threw an exception', error, {
+		await logError(env, 'worker.database.worker_run_save_exception', 'Worker run save threw an exception', error, {
+			status: getDatabaseOperationErrorStatus(error),
+			errorText: getDatabaseOperationErrorText(error),
 			shardIndex: run.shard_index,
 			runSource: run.run_source,
 			success: run.success,
 			errorName: run.error_name,
+			providerMode: database.providerMode,
+			databaseProvider: database.provider,
 			durationMs: Date.now() - startedAt,
 		});
 
 		return false;
 	}
 
-	if (!response.ok) {
-		const errorText = await readResponseTextSafely(response);
-
-		await logWarn(env, 'worker.supabase.worker_run_save_failed', 'Failed to save Worker run', {
-			status: response.status,
-			errorText,
-			shardIndex: run.shard_index,
-			runSource: run.run_source,
-			success: run.success,
-			errorName: run.error_name,
-			durationMs: Date.now() - startedAt,
-		});
-
-		return false;
-	}
-
-	await logInfo(env, 'worker.supabase.worker_run_saved', 'Saved Worker run', {
+	await logInfo(env, 'worker.database.worker_run_saved', 'Saved Worker run', {
 		shardIndex: run.shard_index,
 		runSource: run.run_source,
 		success: run.success,
 		acceptedCount: run.accepted_count,
 		rejectedCount: run.rejected_count,
 		fetchedCount: run.fetched_count,
+		providerMode: database.providerMode,
+		databaseProvider: database.provider,
 		durationMs: Date.now() - startedAt,
 	});
 
@@ -6239,13 +6673,13 @@ async function saveFailedWorkerRun(
 		error: unknown;
 	},
 ): Promise<boolean> {
-	const config = await getWorkerRunSaveConfig(env);
+	const database = await getWorkerRunSaveDatabase(env);
 
-	if (!config) {
+	if (!database) {
 		await logWarn(
 			env,
-			'worker.supabase.worker_run_failed_save_skipped',
-			'Skipped saving failed Worker run because Supabase config is missing',
+			'worker.database.worker_run_failed_save_skipped',
+			'Skipped saving failed Worker run because database provider config is missing',
 			{
 				requestId: options.requestId,
 				shardIndex: getShardIndex(env),
@@ -6262,7 +6696,7 @@ async function saveFailedWorkerRun(
 	const durationMs = Date.now() - options.runStartedAt;
 	const maxAiReviews = clampAiReviewLimit(options.maxAiReviews);
 
-	return saveWorkerRun(env, config, {
+	return saveWorkerRun(env, database, {
 		run_started_at: new Date(options.runStartedAt).toISOString(),
 		run_completed_at: runCompletedAt.toISOString(),
 		run_source: options.runSource,
@@ -6449,6 +6883,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		openAiTimeoutMs: config.openAiTimeoutMs,
 		rssFeedFetchTimeoutMs: config.rssFeedFetchTimeoutMs,
 		articlePageFetchTimeoutMs: config.articlePageFetchTimeoutMs,
+		databaseProviderMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+		databaseShadowProvider: config.database.shadowProvider ?? null,
 		openAiFallbackEnabled: config.aiProviderFallbackToOpenAi,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 		enabledSummaryLanguages: config.enabledSummaryLanguages,
@@ -6468,6 +6905,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		localAiModel: config.localAiModel,
 		localAiTimeoutMs: config.localAiTimeoutMs,
 		openAiTimeoutMs: config.openAiTimeoutMs,
+		databaseProviderMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+		databaseShadowProvider: config.database.shadowProvider ?? null,
 		aiReviewConcurrency: config.aiReviewConcurrency,
 	});
 
@@ -6497,9 +6937,9 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	});
 
 	const kvProcessedUrlLookup = await getProcessedUrlsFromKv(env, shardIndex, candidateUrls);
-	const candidateUrlsNeedingSupabaseLookup = candidateUrls.filter((url) => !kvProcessedUrlLookup.urls.has(url));
-	const supabaseProcessedUrlLookup = await getReviewedUrls(env, config, candidateUrlsNeedingSupabaseLookup);
-	const reviewedUrls = new Set([...kvProcessedUrlLookup.urls, ...supabaseProcessedUrlLookup.urls]);
+	const candidateUrlsNeedingDatabaseLookup = candidateUrls.filter((url) => !kvProcessedUrlLookup.urls.has(url));
+	const databaseProcessedUrlLookup = await getReviewedUrls(env, config, candidateUrlsNeedingDatabaseLookup);
+	const reviewedUrls = new Set([...kvProcessedUrlLookup.urls, ...databaseProcessedUrlLookup.urls]);
 
 	const unreviewedArticlesBeforeImageHydration = candidateArticles.filter((article) => !reviewedUrls.has(article.url));
 	const queuedBySource = buildQueueVisibilityBySource(unreviewedArticlesBeforeImageHydration, shardIndex);
@@ -6510,7 +6950,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		shardIndex,
 		queuedCount: unreviewedArticlesBeforeImageHydration.length,
 		queuedBySource,
-		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		retriedCount: databaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
 		processedCount: reviewedUrls.size,
 		backpressureQueueLimit: backpressureDecision.queueLimit,
 		backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
@@ -6535,8 +6975,11 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			deferredReasons: backpressureDecision.reasons,
 		});
 
-		const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
+	const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
 			message: 'NutsNews refresh deferred by ingestion backpressure',
+			databaseProviderMode: config.databaseProviderMode,
+			databaseProvider: config.database.provider,
+			databaseShadowProvider: config.database.shadowProvider,
 			shardIndex,
 			feedsPerShard,
 			maxAiReviews,
@@ -6553,7 +6996,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			queuedBySource,
 			deferredCount: unreviewedArticlesBeforeImageHydration.length,
 			deferredReasons: backpressureDecision.reasons,
-			retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+			retriedCount: databaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
 			processedCount: reviewedUrls.size,
 			backpressureQueueLimit: backpressureDecision.queueLimit,
 			backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
@@ -6715,7 +7158,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		unreviewedCount: unreviewedArticles.length,
 		queuedCount: unreviewedArticlesBeforeImageHydration.length,
 		queuedBySource,
-		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		retriedCount: databaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
 		processedCount: reviewedUrls.size,
 		imageHydrationLookupCount: imageHydrationResult.lookupCount,
 		imageHydrationFoundCount: imageHydrationResult.foundCount,
@@ -6731,7 +7174,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
 		kvEnabled: kvProcessedUrlLookup.cacheAvailable,
 		kvProcessedUrlHitCount: kvProcessedUrlLookup.hitCount,
-		candidateUrlsNeedingSupabaseLookup: candidateUrlsNeedingSupabaseLookup.length,
+		candidateUrlsNeedingDatabaseLookup: candidateUrlsNeedingDatabaseLookup.length,
 	});
 
 	const noThumbnailRejectedResults = buildRejectedArticles(
@@ -7004,8 +7447,11 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
 	const redisEnabled = await isUpstashRedisEnabled(env);
 
-	const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
+		const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
 		message: 'NutsNews refresh complete',
+		databaseProviderMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+		databaseShadowProvider: config.database.shadowProvider,
 		shardIndex,
 		feedsPerShard,
 		maxAiReviews,
@@ -7022,7 +7468,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		queuedBySource,
 		deferredCount: 0,
 		deferredReasons: [],
-		retriedCount: supabaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
+		retriedCount: databaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
 		processedCount: reviewedArticles.length,
 		backpressureQueueLimit: backpressureDecision.queueLimit,
 		backpressureDbArticleLimit: backpressureDecision.dbArticleLimit,
@@ -7157,6 +7603,9 @@ async function translateSummaryBacklog(
 		shardIndex,
 		runSource: options.runSource,
 		requestId: options.requestId ?? null,
+		databaseProviderMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+		databaseShadowProvider: config.database.shadowProvider ?? null,
 		enabledSummaryLanguages: config.enabledSummaryLanguages,
 		summaryTranslationLimit: config.summaryTranslationLimit,
 		summaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
@@ -7206,6 +7655,9 @@ async function translateSummaryBacklog(
 
 	const result: TranslationBacklogResult = {
 		message: 'NutsNews translation backlog run complete',
+		databaseProviderMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+		databaseShadowProvider: config.database.shadowProvider,
 		shardIndex,
 		enabledSummaryLanguages: config.enabledSummaryLanguages,
 		summaryTranslationLimit: config.summaryTranslationLimit,

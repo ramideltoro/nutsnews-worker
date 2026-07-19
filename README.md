@@ -62,7 +62,10 @@ Run the fully mocked offline Worker test:
 ```bash
 cd worker
 npm run test:e2e:offline
+npm run test:db-provider-modes
 ```
+
+See [Worker Database Provider Modes](docs/WORKER_DATABASE_PROVIDER_MODES.md) for backend-primary cutover, parity, and rollback anchors.
 
 ## Related Repositories
 
