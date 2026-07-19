@@ -10,6 +10,28 @@ on:
       - main
       - master
   workflow_dispatch:
+    inputs:
+      database_provider_mode:
+        description: Production Worker database provider mode to deploy.
+        required: true
+        default: supabase_primary
+        type: choice
+        options:
+          - supabase_primary
+          - backend_postgres_primary
+      production_writes_paused:
+        description: Keep production Worker writes paused after this deploy.
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      provider_switch_confirmation:
+        description: Use enable-backend-postgres-primary or deploy-supabase-primary for a manual production provider deploy.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -94,7 +116,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: ci
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: >-
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
+      (github.event_name == 'workflow_dispatch' &&
+        ((inputs.database_provider_mode == 'backend_postgres_primary' && inputs.provider_switch_confirmation == 'enable-backend-postgres-primary') ||
+         (inputs.database_provider_mode == 'supabase_primary' && inputs.provider_switch_confirmation == 'deploy-supabase-primary')))
     environment: production
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -116,7 +142,10 @@ jobs:
       ENABLED_SUMMARY_LANGUAGES: ${{ vars.ENABLED_SUMMARY_LANGUAGES || 'fr,ja,de-CH,de,el' }}
       SUMMARY_TRANSLATION_LIMIT: ${{ vars.SUMMARY_TRANSLATION_LIMIT || '5' }}
       HOLD_ARTICLES_FOR_TRANSLATIONS: ${{ vars.HOLD_ARTICLES_FOR_TRANSLATIONS || 'true' }}
-      NUTSNEWS_PRODUCTION_WRITES_PAUSED: ${{ vars.NUTSNEWS_PRODUCTION_WRITES_PAUSED || 'false' }}
+      NUTSNEWS_DATABASE_PROVIDER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.database_provider_mode || vars.NUTSNEWS_DATABASE_PROVIDER_MODE || 'supabase_primary' }}
+      NUTSNEWS_BACKEND_API_URL: ${{ vars.NUTSNEWS_BACKEND_API_URL || 'https://backend.nutsnews.com' }}
+      NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION: ${{ github.event_name == 'workflow_dispatch' && inputs.provider_switch_confirmation || vars.NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION || '' }}
+      NUTSNEWS_PRODUCTION_WRITES_PAUSED: ${{ github.event_name == 'workflow_dispatch' && inputs.production_writes_paused || vars.NUTSNEWS_PRODUCTION_WRITES_PAUSED || 'false' }}
       SHARD_COUNT: "25"
     steps:
       - name: Checkout repository
@@ -147,6 +176,34 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             exit 1
+          fi
+
+      - name: Validate production provider switch request
+        run: |
+          set -euo pipefail
+          case "$NUTSNEWS_DATABASE_PROVIDER_MODE" in
+            supabase_primary|backend_postgres_primary) ;;
+            *)
+              echo "Unsupported NUTSNEWS_DATABASE_PROVIDER_MODE=$NUTSNEWS_DATABASE_PROVIDER_MODE" >&2
+              exit 1
+              ;;
+          esac
+          case "$NUTSNEWS_PRODUCTION_WRITES_PAUSED" in
+            true|false) ;;
+            *)
+              echo "NUTSNEWS_PRODUCTION_WRITES_PAUSED must be true or false." >&2
+              exit 1
+              ;;
+          esac
+          if [ "$NUTSNEWS_DATABASE_PROVIDER_MODE" = "backend_postgres_primary" ]; then
+            if [ "$NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION" != "enable-backend-postgres-primary" ]; then
+              echo "backend_postgres_primary requires enable-backend-postgres-primary confirmation." >&2
+              exit 1
+            fi
+            if [ -z "$NUTSNEWS_BACKEND_API_URL" ]; then
+              echo "backend_postgres_primary requires NUTSNEWS_BACKEND_API_URL." >&2
+              exit 1
+            fi
           fi
 
       - name: Generate and verify production Wrangler configs
