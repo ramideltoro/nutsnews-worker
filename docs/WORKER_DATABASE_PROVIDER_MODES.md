@@ -30,3 +30,26 @@ Local smoke command:
 cd worker
 npm run test:db-provider-modes
 ```
+
+Non-production backend shadow smoke target:
+
+- Issue: ramideltoro/nutsnews-worker#29
+- Workflow: `.github/workflows/worker-shadow-smoke.yml`
+- Route: `GET /backend-shadow-smoke`
+- Mode: `NUTSNEWS_DATABASE_PROVIDER_MODE=backend_postgres_shadow`
+- Supabase secret bindings: intentionally absent
+- Backend compatibility evidence: one bounded `loadBackpressureArticleCount` read through `/api/worker/db/load-article-count-for-backpressure`
+
+Local regression commands:
+
+```bash
+cd worker
+npm run test:shadow-smoke-config
+npm run test:shadow-smoke-route
+```
+
+Manual live workflow requirements before dispatching with `deploy=true`:
+
+- GitHub `non-production` environment secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `NUTSNEWS_SECRETS_STORE_ID`, `NUTSNEWS_SHADOW_SMOKE_TOKEN`.
+- Cloudflare Secrets Store entries named by `NUTSNEWS_BACKEND_API_URL_SECRET_NAME`, `NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME`, and `NUTSNEWS_SHADOW_SMOKE_TOKEN_SECRET_NAME` must exist. Defaults are `NUTSNEWS_BACKEND_API_URL`, `NUTSNEWS_BACKEND_API_TOKEN`, and `NUTSNEWS_SHADOW_SMOKE_TOKEN`.
+- Optional GitHub environment vars: `NUTSNEWS_SHADOW_SMOKE_WORKER_NAME`, `NUTSNEWS_BACKEND_API_URL_SECRET_NAME`, `NUTSNEWS_BACKEND_API_TOKEN_SECRET_NAME`, `NUTSNEWS_SHADOW_SMOKE_TOKEN_SECRET_NAME`.
