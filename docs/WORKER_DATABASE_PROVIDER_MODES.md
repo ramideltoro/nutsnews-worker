@@ -18,11 +18,27 @@ Rollback to Supabase is explicit: set `NUTSNEWS_DATABASE_PROVIDER_MODE=supabase_
 
 Before production cutover, attach parity evidence and runbook links to the cutover issue/PR:
 
-- TODO(worker-db-cutover-contract): verify the final route contract against `ramideltoro/nutsnews-backend/docs/backend-api-compatibility-contract.json`.
-- TODO(worker-db-cutover-provider-switch): follow `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PROVIDER_SWITCH.md`.
-- TODO(worker-db-cutover-parity): attach evidence from `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PARITY_VALIDATION.md`.
-- TODO(worker-db-cutover-production): follow `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PRODUCTION_CUTOVER.md`.
-- TODO(worker-db-cutover-rollback): keep `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_ROLLBACK_FAILBACK.md` ready before backend primary deploy.
+- verify the final route contract against `ramideltoro/nutsnews-backend/docs/backend-api-compatibility-contract.json`;
+- follow `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PROVIDER_SWITCH.md`;
+- attach current evidence from `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PARITY_VALIDATION.md`;
+- follow `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_PRODUCTION_CUTOVER.md`;
+- keep `ramideltoro/nutsnews-backend/runbooks/DB_MIGRATION_ROLLBACK_FAILBACK.md` ready before backend primary deploy.
+
+Protected production provider deploy:
+
+```bash
+gh workflow run worker-pipeline.yml \
+  --repo ramideltoro/nutsnews-worker \
+  --ref main \
+  -f database_provider_mode=backend_postgres_primary \
+  -f production_writes_paused=false \
+  -f provider_switch_confirmation=enable-backend-postgres-primary
+```
+
+The deploy job is behind the GitHub `production` environment. It accepts
+`backend_postgres_primary` only with the explicit confirmation above. Rollback
+uses the same protected workflow with `database_provider_mode=supabase_primary`
+and `provider_switch_confirmation=deploy-supabase-primary`.
 
 Local smoke command:
 
