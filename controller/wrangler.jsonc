@@ -13,7 +13,7 @@
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "SHARD_COUNT": "3",
+    "SHARD_COUNT": "25",
     "SHARD_RUN_INTERVAL_MINUTES": "5",
     "SHARD_WORKER_PREFIX": "nutsnews-worker",
     "SHARD_WORKER_SUBDOMAIN": "nutsnews",
