@@ -157,3 +157,60 @@ describe("article translation publish guard", () => {
 		} as any)).toBe(false);
 	});
 });
+
+describe("refresh subrequest budget", () => {
+	const localFirstTranslationConfig = {
+		enabledSummaryLanguages: ["fr", "ja", "de-CH", "de", "el"],
+		summaryTranslationLimit: 5,
+		localAiUrl: "https://local-ai.example.test",
+		localAiApiKey: "test-key",
+		aiProvider: "local",
+		aiProviderFallbackToOpenAi: true,
+	} as any;
+
+	it("defers summary translation work for a live-shaped long refresh", () => {
+		const budget = __test.createSubrequestBudget({
+			WORKER_SUBREQUEST_SOFT_LIMIT: "45",
+			WORKER_SUBREQUEST_RESERVE: "3",
+		} as any);
+
+		__test.recordEstimatedSubrequests(budget, __test.estimateRefreshSubrequestsBeforeSummary({
+			feedCount: 20,
+			kvProcessedUrlLookupRead: true,
+			candidateUrlsNeedingDatabaseLookupCount: 196,
+			imageHydrationLookupCount: 3,
+			aiReviewAttemptCount: 6,
+			acceptedArticleCount: 3,
+			redisWorkerLockExtended: false,
+			redisAiReviewLockEnabled: false,
+		}));
+
+		expect(__test.getSummaryTranslationTaskBudgetForSubrequests(
+			budget,
+			localFirstTranslationConfig,
+			{ reserveAfterTranslation: 3 },
+		)).toBe(0);
+		expect(__test.trySpendSubrequestBudget(budget, "article_summary_translation_build", 8)).toBe(false);
+
+		const snapshot = __test.snapshotSubrequestBudget(budget);
+		expect(snapshot.deferredPhases).toContain("article_summary_translation_build");
+		expect(snapshot.estimatedRemaining).toBe(7);
+	});
+
+	it("records optional persistence as deferred instead of spending past reserve", () => {
+		const budget = __test.createSubrequestBudget({
+			WORKER_SUBREQUEST_SOFT_LIMIT: "12",
+			WORKER_SUBREQUEST_RESERVE: "2",
+		} as any);
+
+		__test.recordEstimatedSubrequests(budget, 8);
+
+		expect(__test.trySpendSubrequestBudget(budget, "article_review_save", 1)).toBe(true);
+		expect(__test.trySpendSubrequestBudget(budget, "public_feed_snapshot_refresh", 3)).toBe(false);
+
+		const snapshot = __test.snapshotSubrequestBudget(budget);
+		expect(snapshot.estimatedUsed).toBe(9);
+		expect(snapshot.estimatedRemaining).toBe(1);
+		expect(snapshot.deferredPhases).toEqual(["public_feed_snapshot_refresh"]);
+	});
+});
