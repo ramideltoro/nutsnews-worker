@@ -60,6 +60,8 @@ type Env = {
 	UPSTASH_REDIS_COUNTER_TTL_SECONDS?: string;
 	INGESTION_BACKPRESSURE_QUEUE_LIMIT?: string;
 	INGESTION_BACKPRESSURE_DB_ARTICLE_LIMIT?: string;
+	WORKER_SUBREQUEST_SOFT_LIMIT?: string;
+	WORKER_SUBREQUEST_RESERVE?: string;
 };
 
 type RuntimeConfig = {
@@ -185,6 +187,21 @@ type PublicFeedSnapshotRefreshResult = {
 	publicFeedEdgeSnapshotPublishOk: boolean;
 	publicFeedEdgeSnapshotArticleCount: number;
 	publicFeedSnapshotRefreshedAt: string | null;
+};
+
+type SubrequestBudgetSnapshot = {
+	softLimit: number;
+	reserve: number;
+	estimatedUsed: number;
+	estimatedRemaining: number;
+	deferredPhases: string[];
+};
+
+type SubrequestBudgetState = {
+	softLimit: number;
+	reserve: number;
+	estimatedUsed: number;
+	deferredPhases: string[];
 };
 
 type KvOperationCounts = {
@@ -584,6 +601,7 @@ type RefreshResult = {
 	redisAiReviewLockAcquiredCount: number;
 	redisAiReviewLockSkippedCount: number;
 	redisStatsSaveOk: boolean;
+	subrequestBudget: SubrequestBudgetSnapshot;
 	durationMs: number;
 };
 
@@ -1354,8 +1372,17 @@ const PUBLISHED_URL_LOOKBACK_LIMIT = 5000;
 const DEFAULT_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 6;
 const HARD_MAX_ARTICLE_PAGE_IMAGE_LOOKUPS_PER_RUN = 8;
 const ARTICLE_PAGE_IMAGE_LOOKUP_CONCURRENCY = 3;
-const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = 48;
+const DEFAULT_WORKER_SUBREQUEST_SOFT_LIMIT = 45;
+const HARD_MAX_WORKER_SUBREQUEST_SOFT_LIMIT = 10000;
+const DEFAULT_WORKER_SUBREQUEST_RESERVE = 3;
+const HARD_MAX_WORKER_SUBREQUEST_RESERVE = 100;
+const MAX_ESTIMATED_SUBREQUESTS_PER_RUN = DEFAULT_WORKER_SUBREQUEST_SOFT_LIMIT;
 const RESERVED_NON_FEED_SUBREQUESTS_PER_RUN = 10;
+const SUMMARY_PERSISTENCE_SUBREQUEST_RESERVE = 3;
+const SUMMARY_TRANSLATION_RECOVERY_LOOKUP_SUBREQUESTS = 3;
+const FEED_HEALTH_PERSISTENCE_SUBREQUESTS = 2;
+const KV_RUN_STATE_SAVE_SUBREQUESTS = 2;
+const REDIS_STATS_SAVE_SUBREQUESTS = 1;
 const NO_THUMBNAIL_RETRY_AFTER_HOURS = 6;
 const MAX_RESPONSE_ERROR_TEXT_LENGTH = 500;
 const AI_SUMMARY_MAX_CHARS = 250;
@@ -1391,6 +1418,7 @@ const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION = 1;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY = `public-feed:snapshot:v${PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION}:latest`;
 const PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES: PublicFeedLanguageCode[] = ['en', 'fr', 'ja', 'de-CH', 'de', 'el'];
+const PUBLIC_FEED_SNAPSHOT_REFRESH_SUBREQUESTS = 2 + PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES.length * 3;
 const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 120;
 const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 250;
 const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -3449,6 +3477,160 @@ function getArticlePageImageLookupLimit(feedCount: number, maxAiReviews: number,
 		MAX_ESTIMATED_SUBREQUESTS_PER_RUN - feedCount - maxAiReviews - RESERVED_NON_FEED_SUBREQUESTS_PER_RUN;
 
 	return Math.max(0, Math.min(requestedLookupLimit, estimatedAvailableSubrequests));
+}
+
+function getWorkerSubrequestSoftLimit(env: Env) {
+	return clampPositiveNumber(
+		env.WORKER_SUBREQUEST_SOFT_LIMIT,
+		DEFAULT_WORKER_SUBREQUEST_SOFT_LIMIT,
+		HARD_MAX_WORKER_SUBREQUEST_SOFT_LIMIT,
+	);
+}
+
+function getWorkerSubrequestReserve(env: Env) {
+	return clampPositiveNumber(
+		env.WORKER_SUBREQUEST_RESERVE,
+		DEFAULT_WORKER_SUBREQUEST_RESERVE,
+		HARD_MAX_WORKER_SUBREQUEST_RESERVE,
+	);
+}
+
+function createSubrequestBudget(env: Env): SubrequestBudgetState {
+	const softLimit = getWorkerSubrequestSoftLimit(env);
+	const reserve = Math.min(getWorkerSubrequestReserve(env), Math.max(0, softLimit - 1));
+
+	return {
+		softLimit,
+		reserve,
+		estimatedUsed: 0,
+		deferredPhases: [],
+	};
+}
+
+function recordEstimatedSubrequests(budget: SubrequestBudgetState, count: number) {
+	if (!Number.isFinite(count) || count <= 0) {
+		return;
+	}
+
+	budget.estimatedUsed += Math.ceil(count);
+}
+
+function getSubrequestBudgetRemaining(budget: SubrequestBudgetState) {
+	return Math.max(0, budget.softLimit - budget.reserve - budget.estimatedUsed);
+}
+
+function snapshotSubrequestBudget(budget: SubrequestBudgetState): SubrequestBudgetSnapshot {
+	return {
+		softLimit: budget.softLimit,
+		reserve: budget.reserve,
+		estimatedUsed: budget.estimatedUsed,
+		estimatedRemaining: getSubrequestBudgetRemaining(budget),
+		deferredPhases: [...budget.deferredPhases],
+	};
+}
+
+function deferSubrequestPhase(budget: SubrequestBudgetState, phase: string) {
+	if (!budget.deferredPhases.includes(phase)) {
+		budget.deferredPhases.push(phase);
+	}
+}
+
+function trySpendSubrequestBudget(budget: SubrequestBudgetState, phase: string, estimatedCost: number) {
+	const cost = Math.max(0, Math.ceil(estimatedCost));
+
+	if (cost === 0) {
+		return true;
+	}
+
+	if (budget.estimatedUsed + cost + budget.reserve <= budget.softLimit) {
+		budget.estimatedUsed += cost;
+		return true;
+	}
+
+	deferSubrequestPhase(budget, phase);
+	return false;
+}
+
+function getSummaryTranslationTaskSubrequestCost(config: RuntimeConfig) {
+	return Math.max(1, getSummaryTranslationProviderOrder(config).length);
+}
+
+function getSummaryTranslationTaskBudgetForSubrequests(
+	budget: SubrequestBudgetState,
+	config: RuntimeConfig,
+	options: { reserveAfterTranslation: number },
+) {
+	const configuredTaskBudget = getSummaryTranslationTaskBudget(config);
+
+	if (configuredTaskBudget <= 0) {
+		return 0;
+	}
+
+	const available = budget.softLimit - budget.reserve - budget.estimatedUsed - Math.max(0, options.reserveAfterTranslation);
+
+	if (available <= SUMMARY_TRANSLATION_RECOVERY_LOOKUP_SUBREQUESTS) {
+		return 0;
+	}
+
+	return Math.max(
+		0,
+		Math.min(
+			configuredTaskBudget,
+			Math.floor((available - SUMMARY_TRANSLATION_RECOVERY_LOOKUP_SUBREQUESTS) / getSummaryTranslationTaskSubrequestCost(config)),
+		),
+	);
+}
+
+function getSummaryTranslationBuildSubrequestCost(config: RuntimeConfig, taskBudget: number) {
+	if (taskBudget <= 0) {
+		return 0;
+	}
+
+	return SUMMARY_TRANSLATION_RECOVERY_LOOKUP_SUBREQUESTS + taskBudget * getSummaryTranslationTaskSubrequestCost(config);
+}
+
+function getPublicFeedSnapshotRefreshSubrequestCost(env: Env) {
+	return env.NUTSNEWS_KV ? PUBLIC_FEED_SNAPSHOT_REFRESH_SUBREQUESTS : 2;
+}
+
+function estimateRefreshSubrequestsBeforeSummary(args: {
+	feedCount: number;
+	kvProcessedUrlLookupRead: boolean;
+	candidateUrlsNeedingDatabaseLookupCount: number;
+	imageHydrationLookupCount: number;
+	aiReviewAttemptCount: number;
+	acceptedArticleCount: number;
+	redisWorkerLockExtended: boolean;
+	redisAiReviewLockEnabled: boolean;
+}) {
+	return (
+		1 +
+		args.feedCount +
+		(args.kvProcessedUrlLookupRead ? 1 : 0) +
+		(args.candidateUrlsNeedingDatabaseLookupCount > 0 ? 2 : 0) +
+		1 +
+		args.imageHydrationLookupCount +
+		args.aiReviewAttemptCount +
+		(args.acceptedArticleCount > 0 ? 1 : 0) +
+		(args.redisWorkerLockExtended ? 1 : 0) +
+		(args.redisAiReviewLockEnabled ? 1 : 0)
+	);
+}
+
+function createDeferredArticleSummarySaveResult(message: string, summaries: ArticleSummaryInsert[]): ArticleSummarySaveResult {
+	return {
+		ok: false,
+		errorSamples: [
+			{
+				status: null,
+				errorText: message,
+				summaryCount: summaries.length,
+				languageCodes: Array.from(new Set(summaries.map((summary) => summary.language_code))).slice(0, 10),
+				sampleOriginalUrls: summaries.map((summary) => summary.original_url).slice(0, 10),
+				durationMs: 0,
+			},
+		],
+	};
 }
 
 async function getFeedsForShard(env: Env, config: RuntimeConfig): Promise<RssFeed[]> {
@@ -6307,12 +6489,8 @@ type ArticleSummaryTranslationBuildResult = {
 	estimatedLocalAiTranslationSavingsUsd: number;
 };
 
-async function buildArticleSummaryTranslations(
-	env: Env,
-	config: RuntimeConfig,
-	acceptedArticles: ArticleInsert[],
-): Promise<ArticleSummaryTranslationBuildResult> {
-	const emptyResult: ArticleSummaryTranslationBuildResult = {
+function createEmptyArticleSummaryTranslationBuildResult(): ArticleSummaryTranslationBuildResult {
+	return {
 		summaries: [],
 		attemptedTaskCount: 0,
 		failedTaskCount: 0,
@@ -6330,15 +6508,34 @@ async function buildArticleSummaryTranslations(
 		estimatedOpenAiTranslationCostUsd: 0,
 		estimatedLocalAiTranslationSavingsUsd: 0,
 	};
+}
+
+async function buildArticleSummaryTranslations(
+	env: Env,
+	config: RuntimeConfig,
+	acceptedArticles: ArticleInsert[],
+	options: { maxTaskCount?: number } = {},
+): Promise<ArticleSummaryTranslationBuildResult> {
+	const emptyResult = createEmptyArticleSummaryTranslationBuildResult();
 
 	if (config.enabledSummaryLanguages.length === 0 || config.summaryTranslationLimit <= 0) {
 		return emptyResult;
 	}
 
-	const maxTranslationTaskCount = getSummaryTranslationTaskBudget(config);
+	const maxTranslationTaskCount = Math.max(
+		0,
+		Math.min(
+			getSummaryTranslationTaskBudget(config),
+			options.maxTaskCount === undefined ? getSummaryTranslationTaskBudget(config) : Math.floor(options.maxTaskCount),
+		),
+	);
 
 	if (maxTranslationTaskCount <= 0) {
-		return emptyResult;
+		return {
+			...emptyResult,
+			skippedByLimitArticleCount: acceptedArticles.length,
+			skippedByLimitLanguageTaskCount: acceptedArticles.length * config.enabledSummaryLanguages.length,
+		};
 	}
 
 	const acceptedOriginalUrls = new Set(acceptedArticles.map((article) => article.original_url));
@@ -7291,6 +7488,17 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		const runCompletedAt = new Date();
 		const durationMs = Date.now() - refreshStartedAt;
 		const redisEnabled = await isUpstashRedisEnabled(env);
+		const subrequestBudget = createSubrequestBudget(env);
+		recordEstimatedSubrequests(subrequestBudget, estimateRefreshSubrequestsBeforeSummary({
+			feedCount: shardFeeds.length,
+			kvProcessedUrlLookupRead: kvProcessedUrlLookup.cacheAvailable && candidateUrls.length > 0,
+			candidateUrlsNeedingDatabaseLookupCount: candidateUrlsNeedingDatabaseLookup.length,
+			imageHydrationLookupCount: 0,
+			aiReviewAttemptCount: 0,
+			acceptedArticleCount: 0,
+			redisWorkerLockExtended: false,
+			redisAiReviewLockEnabled: false,
+		}));
 
 		await logWarn(env, 'worker.backpressure.expensive_work_deferred', 'Worker refresh deferred expensive work because ingestion backpressure limits were reached', {
 			shardIndex,
@@ -7398,6 +7606,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			redisAiReviewLockAcquiredCount: 0,
 			redisAiReviewLockSkippedCount: 0,
 			redisStatsSaveOk: false,
+			subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 			durationMs,
 		};
 
@@ -7414,6 +7623,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		const resultBeforeKvRunStateSave: RefreshResult = {
 			...resultWithoutWorkerRunSaveStatus,
 			workerRunSaveOk,
+			subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 		};
 		const kvRunStateSaveOk = await saveRunStateToKv(env, resultBeforeKvRunStateSave, {
 			runStartedAt: refreshStartedAt,
@@ -7427,12 +7637,14 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			kvRunStateSaveOk,
 			kvRunStateSaveSkipped,
 			kvOperationCounts: getKvOperationCounts(env),
+			subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 		};
 		const redisStatsSaveOk = await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown');
 		const result: RefreshResult = {
 			...resultBeforeRedisStatsSave,
 			redisStatsSaveOk,
 			kvOperationCounts: getKvOperationCounts(env),
+			subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 		};
 
 		await logInfo(env, 'worker.refresh.deferred', 'NutsNews Worker refresh deferred by backpressure', result);
@@ -7451,12 +7663,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		});
 	}
 
-	const imageHydrationResult = await hydrateMissingArticleImages(
-		env,
-		unreviewedArticlesBeforeImageHydration,
-		articlePageImageLookupLimit,
-		config.articlePageFetchTimeoutMs,
-	);
+	const imageHydrationResult = await hydrateMissingArticleImages(env, unreviewedArticlesBeforeImageHydration, articlePageImageLookupLimit, config.articlePageFetchTimeoutMs);
 
 	const unreviewedArticles = imageHydrationResult.articles;
 	const noThumbnailArticles = unreviewedArticles.filter((article) => !hasUsableThumbnail(article));
@@ -7530,42 +7737,64 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	const feedOutcomeCounts = buildFeedOutcomeCounts(reviewedArticles);
 
 	const articleSaveOk = await saveAcceptedArticlesBatch(env, config, acceptedArticleRows);
-	const articleSummaryBuildResult = articleSaveOk
-		? await buildArticleSummaryTranslations(env, config, acceptedArticleRows)
-		: {
-			summaries: [],
-			attemptedTaskCount: 0,
-			failedTaskCount: 0,
-			failureSamples: [],
-			skippedByLimitArticleCount: 0,
-			skippedByLimitLanguageTaskCount: 0,
-			recoveryCandidateCount: 0,
-			recoveryAttemptedTaskCount: 0,
-			localTranslationCount: 0,
-			openAiTranslationCount: 0,
-			localTranslationUsage: emptyOpenAiUsage(),
-			openAiTranslationUsage: emptyOpenAiUsage(),
-			localTranslationDurationMs: 0,
-			openAiTranslationDurationMs: 0,
-			estimatedOpenAiTranslationCostUsd: 0,
-			estimatedLocalAiTranslationSavingsUsd: 0,
-		};
+	const subrequestBudget = createSubrequestBudget(env);
+	recordEstimatedSubrequests(subrequestBudget, estimateRefreshSubrequestsBeforeSummary({
+		feedCount: shardFeeds.length,
+		kvProcessedUrlLookupRead: kvProcessedUrlLookup.cacheAvailable && candidateUrls.length > 0,
+		candidateUrlsNeedingDatabaseLookupCount: candidateUrlsNeedingDatabaseLookup.length,
+		imageHydrationLookupCount: imageHydrationResult.lookupCount,
+		aiReviewAttemptCount: aiReviewedArticles.length * getAiReviewProviderOrder(config).length,
+		acceptedArticleCount: acceptedArticleRows.length,
+		redisWorkerLockExtended: Boolean(options.workerLock?.enabled && redisWorkerLockExtended),
+		redisAiReviewLockEnabled: aiReviewLockResult.enabled && articlesEligibleForAi.length > 0,
+	}));
+
+	const configuredSummaryTranslationTaskBudget = getSummaryTranslationTaskBudget(config);
+	const subrequestSummaryTranslationTaskBudget = articleSaveOk
+		? getSummaryTranslationTaskBudgetForSubrequests(subrequestBudget, config, {
+			reserveAfterTranslation: SUMMARY_PERSISTENCE_SUBREQUEST_RESERVE,
+		})
+		: 0;
+	const summaryTranslationBuildCost = getSummaryTranslationBuildSubrequestCost(config, subrequestSummaryTranslationTaskBudget);
+	let articleSummaryBuildResult = createEmptyArticleSummaryTranslationBuildResult();
+
+	if (articleSaveOk && configuredSummaryTranslationTaskBudget > 0) {
+		if (
+			subrequestSummaryTranslationTaskBudget > 0 &&
+			trySpendSubrequestBudget(subrequestBudget, 'article_summary_translation_build', summaryTranslationBuildCost)
+		) {
+			articleSummaryBuildResult = await buildArticleSummaryTranslations(env, config, acceptedArticleRows, {
+				maxTaskCount: subrequestSummaryTranslationTaskBudget,
+			});
+		} else {
+			deferSubrequestPhase(subrequestBudget, 'article_summary_translation_build');
+			articleSummaryBuildResult = {
+				...articleSummaryBuildResult,
+				skippedByLimitArticleCount: acceptedArticleRows.length,
+				skippedByLimitLanguageTaskCount: acceptedArticleRows.length * config.enabledSummaryLanguages.length,
+			};
+
+			await logWarn(env, 'worker.subrequest_budget.article_summary_translation_deferred', 'Deferred article summary translation work to the translation backlog because this refresh is near the Worker subrequest budget', {
+				shardIndex,
+				runSource: options.runSource ?? 'unknown',
+				requestId: options.requestId ?? null,
+				acceptedArticleCount: acceptedArticleRows.length,
+				configuredSummaryTranslationTaskBudget,
+				subrequestSummaryTranslationTaskBudget,
+				subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
+			});
+		}
+	}
+
 	const articleSummaryRows = articleSummaryBuildResult.summaries;
-	const articleSummarySaveResult = articleSaveOk
-		? await saveArticleSummariesBatch(env, config, articleSummaryRows)
-		: {
-			ok: false,
-			errorSamples: [
-				{
-					status: null,
-					errorText: 'Skipped article summary save because accepted article save failed.',
-					summaryCount: articleSummaryRows.length,
-					languageCodes: Array.from(new Set(articleSummaryRows.map((summary) => summary.language_code))).slice(0, 10),
-					sampleOriginalUrls: articleSummaryRows.map((summary) => summary.original_url).slice(0, 10),
-					durationMs: 0,
-				},
-			],
-		};
+	const articleSummaryTranslationDeferred = subrequestBudget.deferredPhases.includes('article_summary_translation_build');
+	const articleSummarySaveResult = !articleSaveOk
+		? createDeferredArticleSummarySaveResult('Skipped article summary save because accepted article save failed.', articleSummaryRows)
+		: articleSummaryTranslationDeferred && articleSummaryRows.length === 0
+			? createDeferredArticleSummarySaveResult('Deferred article summary save because summary translation work was moved to the translation backlog under the Worker subrequest budget.', articleSummaryRows)
+			: trySpendSubrequestBudget(subrequestBudget, 'article_summary_save', articleSummaryRows.length > 0 ? 1 : 0)
+				? await saveArticleSummariesBatch(env, config, articleSummaryRows)
+				: createDeferredArticleSummarySaveResult('Deferred article summary save because this refresh is near the Worker subrequest budget.', articleSummaryRows);
 	const articleSummarySaveOk = articleSummarySaveResult.ok;
 	const articleUrlsWithNewOrRecoveredTranslations = Array.from(
 		new Set([
@@ -7573,34 +7802,74 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 			...articleSummaryRows.map((summary) => summary.original_url),
 		]),
 	);
-	const summaryLanguageCodesByUrlAfterSave = articleSummarySaveOk
-		? await loadExistingSummaryLanguageCodes(env, config, articleUrlsWithNewOrRecoveredTranslations)
-		: new Map<string, Set<SummaryLanguageCode>>();
-	const fullyTranslatedArticleUrls = getFullyTranslatedOriginalUrls(
-		articleUrlsWithNewOrRecoveredTranslations,
-		summaryLanguageCodesByUrlAfterSave,
-		config.enabledSummaryLanguages,
-	);
-	const articleSummaryPublishOk = articleSaveOk
-		? await publishArticlesBatch(
-			env,
-			config,
-			shouldHoldAcceptedArticlesForTranslations(config)
-				? fullyTranslatedArticleUrls
-				: acceptedArticleRows.map((article) => article.original_url),
-		)
-		: false;
-	const articleSummaryPublishCount = shouldHoldAcceptedArticlesForTranslations(config)
-		? fullyTranslatedArticleUrls.length
-		: acceptedArticleRows.length;
-	const publicFeedSnapshotRefreshResult = articleSaveOk
-		? await refreshPublicFeedSnapshot(env, config)
+	const shouldHoldForTranslations = shouldHoldAcceptedArticlesForTranslations(config);
+	let fullyTranslatedArticleUrls: string[] = [];
+	let articleSummaryPublishOk = articleSaveOk && articleSummarySaveOk;
+
+	if (articleSaveOk && articleSummarySaveOk && shouldHoldForTranslations && articleSummaryRows.length > 0) {
+		if (trySpendSubrequestBudget(subrequestBudget, 'article_summary_publish_lookup', 1)) {
+			const summaryLanguageCodesByUrlAfterSave = await loadExistingSummaryLanguageCodes(env, config, articleUrlsWithNewOrRecoveredTranslations);
+			fullyTranslatedArticleUrls = getFullyTranslatedOriginalUrls(
+				articleUrlsWithNewOrRecoveredTranslations,
+				summaryLanguageCodesByUrlAfterSave,
+				config.enabledSummaryLanguages,
+			);
+		} else {
+			articleSummaryPublishOk = false;
+		}
+	}
+
+	const articleUrlsToPublish = shouldHoldForTranslations
+		? fullyTranslatedArticleUrls
+		: acceptedArticleRows.map((article) => article.original_url);
+	let articleSummaryPublishCount = 0;
+
+	if (articleSaveOk && articleSummaryPublishOk && articleUrlsToPublish.length > 0) {
+		articleSummaryPublishOk = trySpendSubrequestBudget(subrequestBudget, 'article_publish', 1)
+			? await publishArticlesBatch(env, config, articleUrlsToPublish)
+			: false;
+		articleSummaryPublishCount = articleSummaryPublishOk ? articleUrlsToPublish.length : 0;
+	} else if (!articleSaveOk) {
+		articleSummaryPublishOk = false;
+	}
+
+	const shouldRefreshPublicFeedSnapshot =
+		articleSaveOk &&
+		articleSummaryPublishOk &&
+		(articleSummaryPublishCount > 0 || (!shouldHoldForTranslations && acceptedArticleRows.length > 0));
+	let publicFeedSnapshotRefreshResult: PublicFeedSnapshotRefreshResult = articleSaveOk
+		? {
+			publicFeedSnapshotRefreshOk: true,
+			publicFeedEdgeSnapshotPublishOk: true,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		}
 		: {
 			publicFeedSnapshotRefreshOk: false,
 			publicFeedEdgeSnapshotPublishOk: false,
 			publicFeedEdgeSnapshotArticleCount: 0,
 			publicFeedSnapshotRefreshedAt: null,
 		};
+
+	if (shouldRefreshPublicFeedSnapshot) {
+		publicFeedSnapshotRefreshResult = trySpendSubrequestBudget(subrequestBudget, 'public_feed_snapshot_refresh', getPublicFeedSnapshotRefreshSubrequestCost(env))
+			? await refreshPublicFeedSnapshot(env, config)
+			: {
+				publicFeedSnapshotRefreshOk: false,
+				publicFeedEdgeSnapshotPublishOk: false,
+				publicFeedEdgeSnapshotArticleCount: 0,
+				publicFeedSnapshotRefreshedAt: null,
+			};
+	} else if (articleSaveOk && shouldHoldForTranslations && acceptedArticleRows.length > 0 && articleSummaryPublishCount === 0) {
+		deferSubrequestPhase(subrequestBudget, 'public_feed_snapshot_waiting_for_translation_publish');
+		publicFeedSnapshotRefreshResult = {
+			publicFeedSnapshotRefreshOk: false,
+			publicFeedEdgeSnapshotPublishOk: false,
+			publicFeedEdgeSnapshotArticleCount: 0,
+			publicFeedSnapshotRefreshedAt: null,
+		};
+	}
+
 	const {
 		publicFeedSnapshotRefreshOk,
 		publicFeedEdgeSnapshotPublishOk,
@@ -7614,7 +7883,8 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		summaryTranslationLimit: config.summaryTranslationLimit,
 		acceptedArticleCount: acceptedArticleRows.length,
 		articleSummaryTranslationCount: articleSummaryRows.length,
-		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		articleSummaryTranslationTaskBudget: subrequestSummaryTranslationTaskBudget,
+		configuredSummaryTranslationTaskBudget,
 		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
 		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
 		articleSummaryLocalTranslationTokens: articleSummaryBuildResult.localTranslationUsage.totalTokens,
@@ -7642,18 +7912,28 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		publicFeedSnapshotRefreshedAt,
 	});
 
-	const previousFeedHealth = await getFeedHealthSnapshots(env, config);
-	const feedHealthRows = buildFeedHealthRows(rssFetchResult.feedResults, feedOutcomeCounts, previousFeedHealth, new Date());
-	const feedHealthSaveOk = await saveFeedHealthBatch(env, config, feedHealthRows);
-
-	const reviewSaveOk = await saveArticleReviewsBatch(env, config, reviewRows);
+	const reviewSaveOk = trySpendSubrequestBudget(subrequestBudget, 'article_review_save', reviewRows.length > 0 ? 1 : 0)
+		? await saveArticleReviewsBatch(env, config, reviewRows)
+		: false;
 	const reviewRowsEligibleForKvProcessedCache = getReviewRowsEligibleForKvProcessedCache(reviewRows);
 	const kvProcessedUrlSaveOk = reviewSaveOk
-		? await rememberProcessedUrlsInKv(
+		? trySpendSubrequestBudget(
+			subrequestBudget,
+			'kv_processed_url_save',
+			env.NUTSNEWS_KV && reviewRowsEligibleForKvProcessedCache.length > 0 ? 1 : 0,
+		) && await rememberProcessedUrlsInKv(
 			env,
 			shardIndex,
 			reviewRowsEligibleForKvProcessedCache.map((row) => row.original_url),
 		)
+		: false;
+
+	const feedHealthSaveOk = trySpendSubrequestBudget(subrequestBudget, 'feed_health_save', rssFetchResult.feedResults.length > 0 ? FEED_HEALTH_PERSISTENCE_SUBREQUESTS : 0)
+		? await (async () => {
+			const previousFeedHealth = await getFeedHealthSnapshots(env, config);
+			const feedHealthRows = buildFeedHealthRows(rssFetchResult.feedResults, feedOutcomeCounts, previousFeedHealth, new Date());
+			return saveFeedHealthBatch(env, config, feedHealthRows);
+		})()
 		: false;
 
 	const openAiReviewedArticles = aiReviewedArticles.filter((reviewedArticle) => reviewedArticle.aiProvider === 'openai');
@@ -7771,10 +8051,12 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		});
 	}
 
-	const aiUsageSaveOk = await saveAiUsageRun(env, config, aiUsageRun);
+	const aiUsageSaveOk = trySpendSubrequestBudget(subrequestBudget, 'ai_usage_save', 1)
+		? await saveAiUsageRun(env, config, aiUsageRun)
+		: false;
 	const redisEnabled = await isUpstashRedisEnabled(env);
 
-		const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
+	const resultWithoutWorkerRunSaveStatus: Omit<RefreshResult, 'workerRunSaveOk'> = {
 		message: 'NutsNews refresh complete',
 		databaseProviderMode: config.databaseProviderMode,
 		databaseProvider: config.database.provider,
@@ -7794,7 +8076,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		queuedCount: unreviewedArticlesBeforeImageHydration.length,
 		queuedBySource,
 		deferredCount: 0,
-		deferredReasons: [],
+		deferredReasons: subrequestBudget.deferredPhases.map((phase) => `subrequest_budget:${phase}`),
 		retriedCount: databaseProcessedUrlLookup.retryableNoThumbnailReviewCount,
 		processedCount: reviewedArticles.length,
 		backpressureQueueLimit: backpressureDecision.queueLimit,
@@ -7824,7 +8106,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		reviewSaveOk,
 		articleSaveOk,
 		articleSummaryTranslationCount: articleSummaryRows.length,
-		articleSummaryTranslationTaskBudget: getSummaryTranslationTaskBudget(config),
+		articleSummaryTranslationTaskBudget: subrequestSummaryTranslationTaskBudget,
 		articleSummaryLocalTranslationCount: articleSummaryBuildResult.localTranslationCount,
 		articleSummaryOpenAiTranslationCount: articleSummaryBuildResult.openAiTranslationCount,
 		articleSummaryLocalTranslationTokens: articleSummaryBuildResult.localTranslationUsage.totalTokens,
@@ -7870,46 +8152,68 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		redisAiReviewLockAcquiredCount: aiReviewLockResult.acquiredCount,
 		redisAiReviewLockSkippedCount: aiReviewLockResult.skippedCount,
 		redisStatsSaveOk: false,
+		subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 		durationMs,
 	};
 
-	const workerRunSaveOk = await saveWorkerRun(
-		env,
-		config,
-		buildSuccessfulWorkerRun(resultWithoutWorkerRunSaveStatus, {
-			runStartedAt: refreshStartedAt,
-			runCompletedAt,
-			runSource: options.runSource ?? 'unknown',
-			requestId: options.requestId ?? null,
-		}),
-	);
+	const workerRunSaveOk = trySpendSubrequestBudget(subrequestBudget, 'worker_run_save', 1)
+		? await saveWorkerRun(
+			env,
+			config,
+			buildSuccessfulWorkerRun(resultWithoutWorkerRunSaveStatus, {
+				runStartedAt: refreshStartedAt,
+				runCompletedAt,
+				runSource: options.runSource ?? 'unknown',
+				requestId: options.requestId ?? null,
+			}),
+		)
+		: false;
 
 	const resultBeforeKvRunStateSave: RefreshResult = {
 		...resultWithoutWorkerRunSaveStatus,
 		workerRunSaveOk,
+		deferredReasons: subrequestBudget.deferredPhases.map((phase) => `subrequest_budget:${phase}`),
+		subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 	};
 
-	const kvRunStateSaveOk = await saveRunStateToKv(env, resultBeforeKvRunStateSave, {
-		runStartedAt: refreshStartedAt,
-		runCompletedAt,
-		runSource: options.runSource ?? 'unknown',
-		requestId: options.requestId ?? null,
-	});
-	const kvRunStateSaveSkipped = shouldSkipKvRunStateSave(resultBeforeKvRunStateSave, options.runSource ?? 'unknown');
+	const kvRunStateWouldSkip = shouldSkipKvRunStateSave(resultBeforeKvRunStateSave, options.runSource ?? 'unknown');
+	const kvRunStateSaveOk = trySpendSubrequestBudget(
+		subrequestBudget,
+		'kv_run_state_save',
+		env.NUTSNEWS_KV && !kvRunStateWouldSkip ? KV_RUN_STATE_SAVE_SUBREQUESTS : 0,
+	)
+		? await saveRunStateToKv(env, resultBeforeKvRunStateSave, {
+			runStartedAt: refreshStartedAt,
+			runCompletedAt,
+			runSource: options.runSource ?? 'unknown',
+			requestId: options.requestId ?? null,
+		})
+		: false;
+	const kvRunStateSaveSkipped = kvRunStateWouldSkip || subrequestBudget.deferredPhases.includes('kv_run_state_save');
 
 	const resultBeforeRedisStatsSave: RefreshResult = {
 		...resultBeforeKvRunStateSave,
 		kvRunStateSaveOk,
 		kvRunStateSaveSkipped,
+		deferredReasons: subrequestBudget.deferredPhases.map((phase) => `subrequest_budget:${phase}`),
 		kvOperationCounts: getKvOperationCounts(env),
+		subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 	};
 
-	const redisStatsSaveOk = await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown');
+	const redisStatsSaveOk = trySpendSubrequestBudget(
+		subrequestBudget,
+		'redis_stats_save',
+		redisEnabled ? REDIS_STATS_SAVE_SUBREQUESTS : 0,
+	)
+		? await recordRedisWorkerStats(env, resultBeforeRedisStatsSave, options.runSource ?? 'unknown')
+		: false;
 
 	const result: RefreshResult = {
 		...resultBeforeRedisStatsSave,
 		redisStatsSaveOk,
+		deferredReasons: subrequestBudget.deferredPhases.map((phase) => `subrequest_budget:${phase}`),
 		kvOperationCounts: getKvOperationCounts(env),
+		subrequestBudget: snapshotSubrequestBudget(subrequestBudget),
 	};
 
 	await logInfo(env, 'worker.refresh.completed', 'NutsNews Worker refresh completed', result);
@@ -8219,11 +8523,18 @@ async function serveBackendShadowSmoke(request: Request, env: Env, requestId: st
 }
 
 export const __test = {
+	createSubrequestBudget,
+	estimateRefreshSubrequestsBeforeSummary,
 	getPublicFeedEdgeSnapshotKvKey,
+	getSummaryTranslationBuildSubrequestCost,
+	getSummaryTranslationTaskBudgetForSubrequests,
 	normalizePublicFeedLanguageCode,
 	publishPublicFeedEdgeSnapshotToKv,
+	recordEstimatedSubrequests,
 	servePublicFeedEdgeSnapshot,
 	shouldHoldAcceptedArticlesForTranslations,
+	snapshotSubrequestBudget,
+	trySpendSubrequestBudget,
 };
 
 export default {
