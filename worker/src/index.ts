@@ -3433,7 +3433,7 @@ function clampArticlePageImageLookupLimit(value: number | undefined, fallback: n
 }
 
 function shouldHoldAcceptedArticlesForTranslations(config: RuntimeConfig) {
-	return config.holdArticlesForTranslations && config.enabledSummaryLanguages.length > 0 && config.summaryTranslationLimit > 0;
+	return config.holdArticlesForTranslations && config.enabledSummaryLanguages.length > 0;
 }
 
 function getSummaryTranslationTaskBudget(config: RuntimeConfig) {
@@ -8223,6 +8223,7 @@ export const __test = {
 	normalizePublicFeedLanguageCode,
 	publishPublicFeedEdgeSnapshotToKv,
 	servePublicFeedEdgeSnapshot,
+	shouldHoldAcceptedArticlesForTranslations,
 };
 
 export default {

@@ -134,3 +134,26 @@ describe("localized public feed edge snapshots", () => {
 		expect(payload.error).toContain("fr public feed edge snapshot");
 	});
 });
+
+describe("article translation publish guard", () => {
+	it("holds accepted articles when translations are enabled even if this run has zero translation budget", () => {
+		expect(__test.shouldHoldAcceptedArticlesForTranslations({
+			holdArticlesForTranslations: true,
+			enabledSummaryLanguages: ["fr", "ja"],
+			summaryTranslationLimit: 0,
+		} as any)).toBe(true);
+	});
+
+	it("does not hold accepted articles when translation holding is disabled or no languages are enabled", () => {
+		expect(__test.shouldHoldAcceptedArticlesForTranslations({
+			holdArticlesForTranslations: false,
+			enabledSummaryLanguages: ["fr"],
+			summaryTranslationLimit: 5,
+		} as any)).toBe(false);
+		expect(__test.shouldHoldAcceptedArticlesForTranslations({
+			holdArticlesForTranslations: true,
+			enabledSummaryLanguages: [],
+			summaryTranslationLimit: 5,
+		} as any)).toBe(false);
+	});
+});
