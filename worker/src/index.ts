@@ -922,8 +922,41 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 
 	async publishArticlesBatch(args: { originalUrls: string[]; languageCodes: SummaryLanguageCode[] }): Promise<ArticlePublishResult> {
 		const originalUrls = Array.from(new Set(args.originalUrls.filter(Boolean)));
+		const requiredLanguageCodes = Array.from(new Set(args.languageCodes));
 
-		await this.writeOk(`publishArticlesBatch`, `articles?original_url=${encodeURIComponent(encodePostgrestInFilter(originalUrls))}`, {
+		if (originalUrls.length === 0) {
+			return {
+				ok: true,
+				requestedCount: 0,
+				publishedCount: 0,
+				blockedCount: 0,
+				missingTranslations: [],
+			};
+		}
+
+		const readiness = getArticlePublishTranslationReadiness(
+			originalUrls,
+			requiredLanguageCodes,
+			requiredLanguageCodes.length > 0
+				? await this.loadExistingSummaryLanguageRows({
+					originalUrls,
+					languageCodes: requiredLanguageCodes,
+					limit: Math.max(1, originalUrls.length * requiredLanguageCodes.length),
+				})
+				: [],
+		);
+
+		if (readiness.publishableOriginalUrls.length === 0) {
+			return {
+				ok: readiness.missingTranslations.length === 0,
+				requestedCount: originalUrls.length,
+				publishedCount: 0,
+				blockedCount: readiness.blockedCount,
+				missingTranslations: readiness.missingTranslations,
+			};
+		}
+
+		await this.writeOk(`publishArticlesBatch`, `articles?original_url=${encodeURIComponent(encodePostgrestInFilter(readiness.publishableOriginalUrls))}`, {
 			method: 'PATCH',
 			headers: {
 				'Content-Type': 'application/json',
@@ -933,11 +966,11 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 		});
 
 		return {
-			ok: true,
+			ok: readiness.missingTranslations.length === 0,
 			requestedCount: originalUrls.length,
-			publishedCount: originalUrls.length,
-			blockedCount: 0,
-			missingTranslations: [],
+			publishedCount: readiness.publishableOriginalUrls.length,
+			blockedCount: readiness.blockedCount,
+			missingTranslations: readiness.missingTranslations,
 		};
 	}
 
@@ -6944,6 +6977,52 @@ function getFullyTranslatedOriginalUrls(
 	});
 }
 
+function getArticlePublishTranslationReadiness(
+	originalUrls: string[],
+	requiredLanguages: SummaryLanguageCode[],
+	existingRows: ExistingSummaryLanguageRow[],
+) {
+	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
+	const uniqueRequiredLanguages = Array.from(new Set(requiredLanguages));
+	const languageCodesByUrl = new Map<string, Set<SummaryLanguageCode>>();
+
+	for (const row of existingRows) {
+		if (!isSummaryLanguageCode(row.language_code)) {
+			continue;
+		}
+
+		const current = languageCodesByUrl.get(row.original_url) ?? new Set<SummaryLanguageCode>();
+		current.add(row.language_code);
+		languageCodesByUrl.set(row.original_url, current);
+	}
+
+	const publishableOriginalUrls: string[] = [];
+	const missingTranslations: ArticlePublishMissingTranslation[] = [];
+
+	for (const originalUrl of uniqueOriginalUrls) {
+		const languageCodes = languageCodesByUrl.get(originalUrl) ?? new Set<SummaryLanguageCode>();
+		const missingForArticle = uniqueRequiredLanguages.filter((languageCode) => !languageCodes.has(languageCode));
+
+		if (missingForArticle.length === 0) {
+			publishableOriginalUrls.push(originalUrl);
+			continue;
+		}
+
+		for (const languageCode of missingForArticle) {
+			missingTranslations.push({
+				original_url: originalUrl,
+				language_code: languageCode,
+			});
+		}
+	}
+
+	return {
+		publishableOriginalUrls,
+		missingTranslations,
+		blockedCount: uniqueOriginalUrls.length - publishableOriginalUrls.length,
+	};
+}
+
 async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrls: string[]): Promise<boolean> {
 	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
 	const requiredLanguageCodes = config.enabledSummaryLanguages;
@@ -6968,7 +7047,7 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 
 		if (!publishResult.ok) {
 			for (const missingTranslation of publishResult.missingTranslations) {
-				await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translation', 'Backend publish guard blocked an article that is missing a summary translation', {
+				await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translation', 'Database publish guard blocked an article that is missing a summary translation', {
 					articleUrl: missingTranslation.original_url,
 					languageCode: missingTranslation.language_code,
 					...publishContext,
@@ -6979,7 +7058,7 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 				});
 			}
 
-			await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translations', 'Backend publish guard left articles hidden because required summary translations are missing', {
+			await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translations', 'Database publish guard left articles hidden because required summary translations are missing', {
 				...publishContext,
 				requestedCount: publishResult.requestedCount,
 				publishedCount: publishResult.publishedCount,
@@ -8525,15 +8604,18 @@ async function serveBackendShadowSmoke(request: Request, env: Env, requestId: st
 export const __test = {
 	createSubrequestBudget,
 	estimateRefreshSubrequestsBeforeSummary,
+	getArticlePublishTranslationReadiness,
 	getPublicFeedEdgeSnapshotKvKey,
 	getSummaryTranslationBuildSubrequestCost,
 	getSummaryTranslationTaskBudgetForSubrequests,
 	normalizePublicFeedLanguageCode,
 	publishPublicFeedEdgeSnapshotToKv,
+	publishArticlesBatch,
 	recordEstimatedSubrequests,
 	servePublicFeedEdgeSnapshot,
 	shouldHoldAcceptedArticlesForTranslations,
 	snapshotSubrequestBudget,
+	SupabaseWorkerDatabaseClient,
 	trySpendSubrequestBudget,
 };
 

@@ -72,7 +72,7 @@ const upstashRedisRestTokenSecretName = process.env.UPSTASH_REDIS_REST_TOKEN_SEC
 const defaultTranslationVars = {
 	ENABLED_SUMMARY_LANGUAGES: process.env.ENABLED_SUMMARY_LANGUAGES ?? 'fr,ja,de-CH,de,el',
 	SUMMARY_TRANSLATION_LIMIT: process.env.SUMMARY_TRANSLATION_LIMIT ?? (allowOpenAiFallbackDeployment ? '0' : '5'),
-	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? (allowOpenAiFallbackDeployment ? 'false' : 'true'),
+	HOLD_ARTICLES_FOR_TRANSLATIONS: process.env.HOLD_ARTICLES_FOR_TRANSLATIONS ?? 'true',
 };
 
 const fallbackHotPathVars = allowOpenAiFallbackDeployment
