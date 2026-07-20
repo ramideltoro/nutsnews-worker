@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { __test } from "../src/index";
 
 class MemoryKv {
@@ -136,6 +136,9 @@ describe("localized public feed edge snapshots", () => {
 });
 
 describe("article translation publish guard", () => {
+	const readyUrl = "https://example.test/ready";
+	const partialUrl = "https://example.test/partial";
+
 	it("holds accepted articles when translations are enabled even if this run has zero translation budget", () => {
 		expect(__test.shouldHoldAcceptedArticlesForTranslations({
 			holdArticlesForTranslations: true,
@@ -155,6 +158,80 @@ describe("article translation publish guard", () => {
 			enabledSummaryLanguages: [],
 			summaryTranslationLimit: 5,
 		} as any)).toBe(false);
+	});
+
+	it("identifies publishable and blocked URLs from existing summary rows", () => {
+		const readiness = __test.getArticlePublishTranslationReadiness(
+			[readyUrl, partialUrl],
+			["fr", "ja"],
+			[
+				{ original_url: readyUrl, language_code: "fr" },
+				{ original_url: readyUrl, language_code: "ja" },
+				{ original_url: partialUrl, language_code: "fr" },
+			],
+		);
+
+		expect(readiness).toEqual({
+			publishableOriginalUrls: [readyUrl],
+			blockedCount: 1,
+			missingTranslations: [
+				{
+					original_url: partialUrl,
+					language_code: "ja",
+				},
+			],
+		});
+	});
+
+	it("direct Supabase mode publishes only URLs with every required summary row", async () => {
+		const patchUrls: string[] = [];
+		const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const requestUrl = String(input);
+
+			if (requestUrl.includes("/rest/v1/article_summaries")) {
+				return Response.json([
+					{ original_url: readyUrl, language_code: "fr" },
+					{ original_url: readyUrl, language_code: "ja" },
+					{ original_url: partialUrl, language_code: "fr" },
+				]);
+			}
+
+			if (requestUrl.includes("/rest/v1/articles")) {
+				patchUrls.push(requestUrl);
+				expect(init?.method).toBe("PATCH");
+				expect(init?.body).toBe(JSON.stringify({ status: "published" }));
+				return new Response(null, { status: 204 });
+			}
+
+			throw new Error(`Unexpected fetch URL ${requestUrl}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const client = new __test.SupabaseWorkerDatabaseClient(
+			"supabase_primary",
+			"https://supabase.example.test",
+			"service-role-key",
+		);
+		const result = await client.publishArticlesBatch({
+			originalUrls: [readyUrl, partialUrl],
+			languageCodes: ["fr", "ja"],
+		});
+
+		expect(result).toEqual({
+			ok: false,
+			requestedCount: 2,
+			publishedCount: 1,
+			blockedCount: 1,
+			missingTranslations: [
+				{
+					original_url: partialUrl,
+					language_code: "ja",
+				},
+			],
+		});
+		expect(patchUrls).toHaveLength(1);
+		expect(decodeURIComponent(patchUrls[0])).toContain(readyUrl);
+		expect(decodeURIComponent(patchUrls[0])).not.toContain(partialUrl);
 	});
 });
 

@@ -93,7 +93,7 @@ try {
     assertIncludes(label, text, '"LOCAL_AI_API_KEY"');
     assertIncludes(label, text, '"OPENAI_API_KEY"');
     assertIncludes(label, text, '"SUMMARY_TRANSLATION_LIMIT": "0"');
-    assertIncludes(label, text, '"HOLD_ARTICLES_FOR_TRANSLATIONS": "false"');
+    assertIncludes(label, text, '"HOLD_ARTICLES_FOR_TRANSLATIONS": "true"');
     assertIncludes(label, text, '"RSS_FEED_FETCH_TIMEOUT_MS": "15000"');
     assertIncludes(label, text, '"ARTICLE_PAGE_FETCH_TIMEOUT_MS": "10000"');
     assertIncludes(label, text, '"LOCAL_AI_TIMEOUT_MS": "15000"');
