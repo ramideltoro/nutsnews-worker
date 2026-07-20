@@ -639,6 +639,19 @@ type ArticleSummaryLocalizationRow = {
 	summary: string | null;
 };
 
+type ArticlePublishMissingTranslation = {
+	original_url: string;
+	language_code: string;
+};
+
+type ArticlePublishResult = {
+	ok: boolean;
+	requestedCount: number;
+	publishedCount: number;
+	blockedCount: number;
+	missingTranslations: ArticlePublishMissingTranslation[];
+};
+
 type WorkerDatabaseClient = {
 	readonly provider: WorkerDatabaseProvider;
 	readonly providerMode: DatabaseProviderMode;
@@ -659,7 +672,7 @@ type WorkerDatabaseClient = {
 	saveFeedHealthBatch(feedHealthRows: FeedHealthUpsert[]): Promise<void>;
 	saveArticleReviewsBatch(reviews: ArticleReviewInsert[]): Promise<void>;
 	saveAcceptedArticlesBatch(articles: ArticleInsert[]): Promise<void>;
-	publishArticlesBatch(originalUrls: string[]): Promise<void>;
+	publishArticlesBatch(args: { originalUrls: string[]; languageCodes: SummaryLanguageCode[] }): Promise<ArticlePublishResult>;
 	refreshPublicFeedSnapshot(): Promise<string | null>;
 	saveAiUsageRun(run: AiUsageRunInsert): Promise<void>;
 	saveWorkerRun(run: WorkerRunInsert): Promise<void>;
@@ -889,7 +902,9 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 		});
 	}
 
-	async publishArticlesBatch(originalUrls: string[]): Promise<void> {
+	async publishArticlesBatch(args: { originalUrls: string[]; languageCodes: SummaryLanguageCode[] }): Promise<ArticlePublishResult> {
+		const originalUrls = Array.from(new Set(args.originalUrls.filter(Boolean)));
+
 		await this.writeOk(`publishArticlesBatch`, `articles?original_url=${encodeURIComponent(encodePostgrestInFilter(originalUrls))}`, {
 			method: 'PATCH',
 			headers: {
@@ -898,6 +913,14 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 			},
 			body: JSON.stringify({ status: 'published' }),
 		});
+
+		return {
+			ok: true,
+			requestedCount: originalUrls.length,
+			publishedCount: originalUrls.length,
+			blockedCount: 0,
+			missingTranslations: [],
+		};
 	}
 
 	async refreshPublicFeedSnapshot(): Promise<string | null> {
@@ -1091,11 +1114,14 @@ class BackendWorkerDatabaseClient implements WorkerDatabaseClient {
 		});
 	}
 
-	publishArticlesBatch(originalUrls: string[]): Promise<void> {
-		return this.postVoid('publish-articles-batch', {
-			originalUrls,
+	async publishArticlesBatch(args: { originalUrls: string[]; languageCodes: SummaryLanguageCode[] }): Promise<ArticlePublishResult> {
+		const payload = await this.postJson<unknown>('publish-articles-batch', {
+			originalUrls: args.originalUrls,
 			status: 'published',
+			languageCodes: args.languageCodes,
 		});
+
+		return normalizeArticlePublishResult(payload, args.originalUrls);
 	}
 
 	async refreshPublicFeedSnapshot(): Promise<string | null> {
@@ -1250,9 +1276,9 @@ class ProviderModeWorkerDatabaseClient implements WorkerDatabaseClient {
 		await this.primary.saveAcceptedArticlesBatch(articles);
 	}
 
-	async publishArticlesBatch(originalUrls: string[]): Promise<void> {
+	async publishArticlesBatch(args: { originalUrls: string[]; languageCodes: SummaryLanguageCode[] }): Promise<ArticlePublishResult> {
 		await this.assertNoShadowWrite('publishArticlesBatch');
-		await this.primary.publishArticlesBatch(originalUrls);
+		return this.primary.publishArticlesBatch(args);
 	}
 
 	async refreshPublicFeedSnapshot(): Promise<string | null> {
@@ -4435,6 +4461,77 @@ async function readJsonPayloadSafely(response: Response): Promise<unknown> {
 	}
 }
 
+function getNumberField(record: Record<string, unknown>, key: string, fallback: number) {
+	const value = record[key];
+	return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeArticlePublishMissingTranslations(value: unknown): ArticlePublishMissingTranslation[] {
+	if (!Array.isArray(value)) {
+		return [];
+	}
+
+	return value
+		.map((item) => {
+			if (!item || typeof item !== 'object') {
+				return null;
+			}
+
+			const record = item as Record<string, unknown>;
+			const originalUrl = typeof record.original_url === 'string' ? record.original_url : null;
+			const languageCode = typeof record.language_code === 'string' ? record.language_code : null;
+
+			if (!originalUrl || !languageCode) {
+				return null;
+			}
+
+			return {
+				original_url: originalUrl,
+				language_code: languageCode,
+			};
+		})
+		.filter((item): item is ArticlePublishMissingTranslation => Boolean(item));
+}
+
+function normalizeArticlePublishResult(payload: unknown, requestedOriginalUrls: string[]): ArticlePublishResult {
+	const requestedCountFallback = requestedOriginalUrls.length;
+
+	if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+		return {
+			ok: true,
+			requestedCount: requestedCountFallback,
+			publishedCount: requestedCountFallback,
+			blockedCount: 0,
+			missingTranslations: [],
+		};
+	}
+
+	const record = payload as Record<string, unknown>;
+	const missingTranslations = normalizeArticlePublishMissingTranslations(record.missingTranslations);
+	const requestedCount = getNumberField(record, 'requestedCount', requestedCountFallback);
+	const blockedCount = getNumberField(
+		record,
+		'blockedCount',
+		new Set(missingTranslations.map((missingTranslation) => missingTranslation.original_url)).size,
+	);
+	const publishedCount = getNumberField(
+		record,
+		'publishedCount',
+		record.ok === false ? Math.max(0, requestedCount - blockedCount) : requestedCount,
+	);
+	const ok = record.ok === false || blockedCount > 0 || missingTranslations.length > 0
+		? false
+		: true;
+
+	return {
+		ok,
+		requestedCount,
+		publishedCount,
+		blockedCount,
+		missingTranslations,
+	};
+}
+
 function extractPublicFeedSnapshotRefreshedAt(payload: unknown) {
 	const value = Array.isArray(payload)
 		? payload[0]?.refresh_public_feed_snapshot
@@ -6652,32 +6749,68 @@ function getFullyTranslatedOriginalUrls(
 
 async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrls: string[]): Promise<boolean> {
 	const uniqueOriginalUrls = Array.from(new Set(originalUrls.filter(Boolean)));
+	const requiredLanguageCodes = config.enabledSummaryLanguages;
 	const startedAt = Date.now();
 
 	if (uniqueOriginalUrls.length === 0) {
 		return true;
 	}
 
+	const publishContext = {
+		articleCount: uniqueOriginalUrls.length,
+		requiredLanguageCodes,
+		providerMode: config.databaseProviderMode,
+		databaseProvider: config.database.provider,
+	};
+
 	try {
-		await config.database.publishArticlesBatch(uniqueOriginalUrls);
+		const publishResult = await config.database.publishArticlesBatch({
+			originalUrls: uniqueOriginalUrls,
+			languageCodes: requiredLanguageCodes,
+		});
+
+		if (!publishResult.ok) {
+			for (const missingTranslation of publishResult.missingTranslations) {
+				await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translation', 'Backend publish guard blocked an article that is missing a summary translation', {
+					articleUrl: missingTranslation.original_url,
+					languageCode: missingTranslation.language_code,
+					...publishContext,
+					requestedCount: publishResult.requestedCount,
+					publishedCount: publishResult.publishedCount,
+					blockedCount: publishResult.blockedCount,
+					durationMs: Date.now() - startedAt,
+				});
+			}
+
+			await logWarn(env, 'worker.translation.publish_blocked_missing_summary_translations', 'Backend publish guard left articles hidden because required summary translations are missing', {
+				...publishContext,
+				requestedCount: publishResult.requestedCount,
+				publishedCount: publishResult.publishedCount,
+				blockedCount: publishResult.blockedCount,
+				missingTranslationCount: publishResult.missingTranslations.length,
+				missingTranslations: publishResult.missingTranslations.slice(0, 50),
+				durationMs: Date.now() - startedAt,
+			});
+
+			return false;
+		}
+
+		await logInfo(env, 'worker.database.article_publish_batch_saved', 'Published translated articles', {
+			...publishContext,
+			requestedCount: publishResult.requestedCount,
+			publishedCount: publishResult.publishedCount,
+			blockedCount: publishResult.blockedCount,
+			durationMs: Date.now() - startedAt,
+		});
 	} catch (error) {
 		await logError(env, 'worker.database.article_publish_batch_exception', 'Publishing translated articles threw an exception', error, {
 			status: getDatabaseOperationErrorStatus(error),
 			errorText: getDatabaseOperationErrorText(error),
-			articleCount: uniqueOriginalUrls.length,
-			providerMode: config.databaseProviderMode,
-			databaseProvider: config.database.provider,
+			...publishContext,
 			durationMs: Date.now() - startedAt,
 		});
 		return false;
 	}
-
-	await logInfo(env, 'worker.database.article_publish_batch_saved', 'Published translated articles', {
-		articleCount: uniqueOriginalUrls.length,
-		providerMode: config.databaseProviderMode,
-		databaseProvider: config.database.provider,
-		durationMs: Date.now() - startedAt,
-	});
 
 	return true;
 }

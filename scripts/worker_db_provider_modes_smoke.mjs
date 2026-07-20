@@ -14,6 +14,7 @@ const BACKEND_API_TOKEN = 'db-provider-smoke-backend-api-token';
 const BACKEND_POSTGRES_PRIMARY_CONFIRMATION = 'enable-backend-postgres-primary';
 const TEST_SOURCE = 'NutsNews DB Provider Smoke';
 const SERVER_CLOSE_TIMEOUT_MS = 1500;
+const SUMMARY_LANGUAGES = ['fr', 'ja', 'de-CH', 'de', 'el'];
 
 const scenarios = [
   {
@@ -106,8 +107,16 @@ function escapeXml(value) {
 function buildContext(scenario) {
   const runId = `db-provider-smoke-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const rssBaseUrl = `http://127.0.0.1:${scenario.ports.rss}`;
-  const articleUrl = `${rssBaseUrl}/article/${runId}`;
-  const imageUrl = `${rssBaseUrl}/images/${runId}.jpg`;
+  const articleCount = scenario.articleCount ?? 1;
+  const articles = Array.from({ length: articleCount }, (_, index) => {
+    const articleNumber = index + 1;
+    return {
+      title: `NutsNews DB provider smoke ${runId} neighbors restore joyful community garden ${articleNumber}`,
+      url: `${rssBaseUrl}/article/${runId}-${articleNumber}`,
+      imageUrl: `${rssBaseUrl}/images/${runId}-${articleNumber}.jpg`,
+    };
+  });
+  const scenarioSlug = scenario.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
   return {
     ...scenario,
@@ -118,12 +127,9 @@ function buildContext(scenario) {
     aiUrl: `http://127.0.0.1:${scenario.ports.ai}`,
     rssBaseUrl,
     feedUrl: `${rssBaseUrl}/rss.xml?run=${encodeURIComponent(runId)}`,
-    article: {
-      title: `NutsNews DB provider smoke ${runId} neighbors restore a joyful community garden`,
-      url: articleUrl,
-      imageUrl,
-    },
-    configPath: resolve(WORKER_DIR, `wrangler.db-provider-smoke.${scenario.providerMode}.generated.jsonc`),
+    article: articles[0],
+    articles,
+    configPath: resolve(WORKER_DIR, `wrangler.db-provider-smoke.${scenarioSlug}.generated.jsonc`),
   };
 }
 
@@ -149,6 +155,10 @@ function makeDb(ctx) {
     supabaseWriteCount: 0,
     backendApiRequestCount: 0,
     backendApiWriteCount: 0,
+    backendPublishRequests: [],
+    backendPublishGuardBlockedResponses: [],
+    droppedSummaryLanguageOnce: false,
+    optimisticSummaryLookupUsed: false,
   };
 }
 
@@ -213,20 +223,23 @@ function closeServer(server) {
 
 function buildRssXml(ctx) {
   const pubDate = new Date().toUTCString();
+  const items = ctx.articles.map((article) => `
+    <item>
+      <title>${escapeXml(article.title)}</title>
+      <link>${escapeXml(article.url)}</link>
+      <guid isPermaLink="true">${escapeXml(article.url)}</guid>
+      <pubDate>${escapeXml(pubDate)}</pubDate>
+      <description>Neighbors and volunteers restore a garden with kindness, hope, and a cheerful community celebration.</description>
+      <media:content url="${escapeXml(article.imageUrl)}" medium="image" type="image/jpeg" />
+    </item>`).join('');
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/">
   <channel>
     <title>NutsNews DB provider smoke feed</title>
     <link>${escapeXml(ctx.rssBaseUrl)}</link>
     <description>Mock provider-mode smoke feed.</description>
-    <item>
-      <title>${escapeXml(ctx.article.title)}</title>
-      <link>${escapeXml(ctx.article.url)}</link>
-      <guid isPermaLink="true">${escapeXml(ctx.article.url)}</guid>
-      <pubDate>${escapeXml(pubDate)}</pubDate>
-      <description>Neighbors and volunteers restore a garden with kindness, hope, and a cheerful community celebration.</description>
-      <media:content url="${escapeXml(ctx.article.imageUrl)}" medium="image" type="image/jpeg" />
-    </item>
+    ${items}
   </channel>
 </rss>`;
 }
@@ -278,6 +291,59 @@ function startMockAiServer(ctx) {
         positivity_score: 9,
         summary: 'Neighbors restore a community garden and celebrate a hopeful act of kindness together.',
         reason: 'Mock AI accepted this deterministic provider-mode smoke scenario.',
+        prompt_tokens: 10,
+        completion_tokens: 20,
+        total_tokens: 30,
+        duration_ms: 1,
+      });
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/translate') {
+      const body = (await readBody(request)) ?? {};
+      const languageCode = String(body.language_code ?? '');
+      const title = String(body.title ?? 'Untitled');
+
+      ctx.translationRequestCount = (ctx.translationRequestCount ?? 0) + 1;
+
+      if (ctx.failTranslations) {
+        jsonResponse(response, 503, { error: 'Mock local AI translation provider failure.' });
+        return;
+      }
+
+      const translations = {
+        fr: {
+          title: `[FR] Belle histoire solidaire: ${title}`,
+          summary: '[FR] Dans une communaute locale, des voisins et des benevoles celebrent une action pleine de gentillesse, de joie et d espoir pour rendre la journee plus lumineuse.',
+        },
+        ja: {
+          title: `[JA] 日本語の翻訳: ${title}`,
+          summary: '[JA] 地域の人々が協力し、思いやりのある行動で明るい一日を生み出したことを伝える前向きな要約です。笑顔と希望が広がります。',
+        },
+        'de-CH': {
+          title: `[de-CH] Freundliche Geschichte: ${title}`,
+          summary: '[de-CH] Die Gemeinschaft feiert eine gute Nachricht, denn Nachbarn und Freiwillige arbeiten mit Freude zusammen und bringen Hoffnung in den Alltag.',
+        },
+        de: {
+          title: `[de] Freundliche Geschichte: ${title}`,
+          summary: '[de] Die Gemeinschaft feiert eine gute Nachricht, denn Nachbarn und Freiwillige arbeiten mit Freude zusammen und bringen Hoffnung in den Alltag.',
+        },
+        el: {
+          title: `[el] Ελληνική μετάφραση: ${title}`,
+          summary: '[el] Μια αισιόδοξη περίληψη για ανθρώπους που συνεργάζονται με καλοσύνη και φέρνουν χαρά στην κοινότητα με ελπίδα και φροντίδα.',
+        },
+      };
+      const translation = translations[languageCode] ?? {
+        title: `[${languageCode}] ${title}`,
+        summary: `[${languageCode}] Localized summary for a hopeful community story with enough detail to pass the smoke validator.`,
+      };
+
+      jsonResponse(response, 200, {
+        model: 'nutsnews-db-provider-smoke-mock-ai',
+        ai_model: 'nutsnews-db-provider-smoke-mock-ai',
+        language_code: languageCode,
+        title: translation.title,
+        summary: translation.summary,
         prompt_tokens: 10,
         completion_tokens: 20,
         total_tokens: 30,
@@ -455,6 +521,17 @@ function rowsMatchingCandidateUrls(rows, candidateUrls) {
   return rows.filter((row) => allowed.has(row.original_url));
 }
 
+function rowsMatchingOriginalUrlsAndLanguages(rows, originalUrls, languageCodes) {
+  const allowedUrls = new Set(Array.isArray(originalUrls) ? originalUrls : []);
+  const allowedLanguages = new Set(Array.isArray(languageCodes) ? languageCodes : []);
+
+  return rows.filter((row) => {
+    const urlMatches = allowedUrls.size === 0 || allowedUrls.has(row.original_url);
+    const languageMatches = allowedLanguages.size === 0 || allowedLanguages.has(row.language_code);
+    return urlMatches && languageMatches;
+  });
+}
+
 function startMockBackendApiServer(ctx, db) {
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', ctx.backendApiUrl);
@@ -513,16 +590,71 @@ function startMockBackendApiServer(ctx, db) {
     }
 
     if (operation === 'load-existing-summary-language-rows') {
-      jsonResponse(response, 200, []);
+      if (ctx.optimisticSummaryLookupOnce && !db.optimisticSummaryLookupUsed) {
+        db.optimisticSummaryLookupUsed = true;
+        const optimisticRows = [];
+        const originalUrls = Array.isArray(body.originalUrls) ? body.originalUrls : [];
+        const languageCodes = Array.isArray(body.languageCodes) ? body.languageCodes : [];
+        for (const originalUrl of originalUrls) {
+          for (const languageCode of languageCodes) {
+            optimisticRows.push({ original_url: originalUrl, language_code: languageCode });
+          }
+        }
+        jsonResponse(response, 200, optimisticRows);
+        return;
+      }
+
+      jsonResponse(
+        response,
+        200,
+        rowsMatchingOriginalUrlsAndLanguages(db.article_summaries, body.originalUrls, body.languageCodes)
+          .map(({ original_url, language_code }) => ({ original_url, language_code })),
+      );
       return;
     }
 
     if (operation === 'load-summary-translation-recovery-articles') {
-      jsonResponse(response, 200, []);
+      const lookbackLimit = typeof body.lookbackLimit === 'number' ? body.lookbackLimit : 80;
+      jsonResponse(
+        response,
+        200,
+        db.articles
+          .filter((article) => ['published', 'translation_pending'].includes(article.status) && article.image_url && article.ai_summary)
+          .slice(0, lookbackLimit)
+          .map(({ source, title, original_url, ai_summary, category, published_on_site_at, status }) => ({
+            source,
+            title,
+            original_url,
+            ai_summary,
+            category,
+            published_on_site_at,
+            status,
+          })),
+      );
       return;
     }
 
     if (operation === 'save-article-summaries-batch') {
+      const summaries = Array.isArray(body.summaries) ? body.summaries : [];
+      const rowsToSave = [];
+
+      for (const summary of summaries) {
+        if (ctx.dropSummaryLanguageOnce && !db.droppedSummaryLanguageOnce && summary.language_code === ctx.dropSummaryLanguageOnce) {
+          continue;
+        }
+        rowsToSave.push(summary);
+      }
+
+      if (ctx.dropSummaryLanguageOnce && !db.droppedSummaryLanguageOnce && summaries.some((summary) => summary.language_code === ctx.dropSummaryLanguageOnce)) {
+        db.droppedSummaryLanguageOnce = true;
+      }
+
+      upsertByKey(
+        db.article_summaries,
+        rowsToSave,
+        (row) => `${row.original_url}::${row.language_code}`,
+        true,
+      );
       jsonResponse(response, 200, { ok: true });
       return;
     }
@@ -551,13 +683,55 @@ function startMockBackendApiServer(ctx, db) {
     }
 
     if (operation === 'publish-articles-batch') {
-      const originalUrls = new Set(Array.isArray(body.originalUrls) ? body.originalUrls : []);
+      const originalUrls = Array.isArray(body.originalUrls) ? Array.from(new Set(body.originalUrls.filter(Boolean))) : [];
+      const languageCodes = Array.isArray(body.languageCodes) ? body.languageCodes : [];
+      const missingTranslations = [];
+
+      db.backendPublishRequests.push({
+        originalUrls,
+        languageCodes,
+        status: body.status ?? 'published',
+      });
+
+      for (const originalUrl of originalUrls) {
+        for (const languageCode of languageCodes) {
+          const hasSummary = db.article_summaries.some(
+            (summary) => summary.original_url === originalUrl && summary.language_code === languageCode,
+          );
+
+          if (!hasSummary) {
+            missingTranslations.push({ original_url: originalUrl, language_code: languageCode });
+          }
+        }
+      }
+
+      if (missingTranslations.length > 0) {
+        const blockedCount = new Set(missingTranslations.map((missingTranslation) => missingTranslation.original_url)).size;
+        const payload = {
+          ok: false,
+          requestedCount: originalUrls.length,
+          publishedCount: 0,
+          blockedCount,
+          missingTranslations,
+        };
+        db.backendPublishGuardBlockedResponses.push(payload);
+        jsonResponse(response, 200, payload);
+        return;
+      }
+
+      const originalUrlSet = new Set(originalUrls);
       for (const article of db.articles) {
-        if (originalUrls.has(article.original_url)) {
+        if (originalUrlSet.has(article.original_url)) {
           article.status = body.status ?? 'published';
         }
       }
-      jsonResponse(response, 200, { ok: true });
+      jsonResponse(response, 200, {
+        ok: true,
+        requestedCount: originalUrls.length,
+        publishedCount: originalUrls.length,
+        blockedCount: 0,
+        missingTranslations: [],
+      });
       return;
     }
 
@@ -640,14 +814,14 @@ function writeGeneratedWranglerConfig(ctx) {
       LOCAL_AI_API_KEY: LOCAL_AI_KEY,
       LOCAL_AI_MODEL: 'nutsnews-db-provider-smoke-mock-ai',
       OPENAI_API_KEY: 'db-provider-smoke-openai-key',
-      AI_PROVIDER_FALLBACK_TO_OPENAI: 'true',
+      AI_PROVIDER_FALLBACK_TO_OPENAI: String(ctx.aiProviderFallbackToOpenAi ?? true),
       AI_REVIEW_CONCURRENCY: '1',
       FEED_SHARD_INDEX: '0',
       FEEDS_PER_SHARD: '1',
-      ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT: '1',
-      ENABLED_SUMMARY_LANGUAGES: 'off',
-      SUMMARY_TRANSLATION_LIMIT: '0',
-      HOLD_ARTICLES_FOR_TRANSLATIONS: 'false',
+      ARTICLE_PAGE_IMAGE_LOOKUP_LIMIT: String(ctx.articlePageImageLookupLimit ?? 1),
+      ENABLED_SUMMARY_LANGUAGES: ctx.enabledSummaryLanguages ?? 'off',
+      SUMMARY_TRANSLATION_LIMIT: String(ctx.summaryTranslationLimit ?? 0),
+      HOLD_ARTICLES_FOR_TRANSLATIONS: String(ctx.holdArticlesForTranslations ?? false),
       UPSTASH_REDIS_ENABLED: 'false',
       ...(ctx.writesPaused ? { NUTSNEWS_PRODUCTION_WRITES_PAUSED: 'true' } : {}),
     },
@@ -812,6 +986,191 @@ async function runScenario(scenario) {
   }
 }
 
+function assertPublishRequestsIncludeLanguages(db) {
+  assert(db.backendPublishRequests.length > 0, 'Backend publish guard was never called.', db);
+
+  for (const request of db.backendPublishRequests) {
+    assert(
+      SUMMARY_LANGUAGES.every((languageCode) => request.languageCodes.includes(languageCode)),
+      'Backend publish request did not include every enabled summary language.',
+      request,
+    );
+  }
+}
+
+function assertAllArticlesPublished(db, expectedCount) {
+  assert(db.articles.length === expectedCount, 'Unexpected accepted article count.', db.articles);
+  assert(
+    db.articles.every((article) => article.status === 'published'),
+    'Not every accepted article was published after translation recovery.',
+    db.articles,
+  );
+  assert(db.public_feed_snapshot.length === expectedCount, 'Public feed snapshot did not include every published article.', db.public_feed_snapshot);
+}
+
+function assertAllSummaryLanguagesSaved(db, ctx) {
+  for (const article of ctx.articles) {
+    const languages = new Set(db.article_summaries.filter((summary) => summary.original_url === article.url).map((summary) => summary.language_code));
+    assert(
+      SUMMARY_LANGUAGES.every((languageCode) => languages.has(languageCode)),
+      `Article is missing one or more summary translations: ${article.url}`,
+      db.article_summaries,
+    );
+  }
+}
+
+function buildBackendTranslationScenario(name, ports, overrides = {}) {
+  return {
+    name,
+    providerMode: 'backend_postgres_primary',
+    enabledSummaryLanguages: SUMMARY_LANGUAGES.join(','),
+    summaryTranslationLimit: 5,
+    holdArticlesForTranslations: true,
+    aiProviderFallbackToOpenAi: false,
+    articlePageImageLookupLimit: overrides.articleCount ?? 1,
+    ...overrides,
+    ports,
+  };
+}
+
+async function withBackendTranslationHarness(scenario, callback) {
+  const ctx = buildContext(scenario);
+  const db = makeDb(ctx);
+  let rssServer;
+  let aiServer;
+  let backendApiServer;
+  let workerProcess;
+
+  logStep(`Running database provider smoke: ${ctx.name}`);
+
+  try {
+    rssServer = await startMockRssServer(ctx);
+    aiServer = await startMockAiServer(ctx);
+    backendApiServer = await startMockBackendApiServer(ctx, db);
+    workerProcess = startWranglerDev(ctx);
+    await waitForWorker(ctx, workerProcess);
+    await callback(ctx, db);
+    logOk(`Database provider smoke passed: ${ctx.name}`);
+  } catch (error) {
+    console.error(`\n❌ Database provider smoke failed: ${ctx.name}`);
+    console.error(error?.stack || error?.message || error);
+    if (error?.details) {
+      console.error('\nFailure details:');
+      console.error(JSON.stringify(error.details, null, 2));
+    }
+    if (workerProcess?.getOutput) {
+      console.error('\nWrangler output:');
+      console.error(workerProcess.getOutput().slice(-8000));
+    }
+    throw error;
+  } finally {
+    await stopWranglerDev(workerProcess).catch(() => null);
+    await Promise.all([
+      closeServer(rssServer),
+      closeServer(aiServer),
+      closeServer(backendApiServer),
+    ]);
+    if (ctx.configPath && existsSync(ctx.configPath)) {
+      unlinkSync(ctx.configPath);
+    }
+  }
+}
+
+async function runBackendTranslationBudgetRecoveryScenario() {
+  await withBackendTranslationHarness(
+    buildBackendTranslationScenario('backend_postgres_primary translation budget overflow recovery', {
+      worker: 8817,
+      supabase: 8922,
+      backendApi: 8924,
+      ai: 8920,
+      rss: 8921,
+    }, {
+      articleCount: 2,
+    }),
+    async (ctx, db) => {
+      const workerResult = await fetchJson(`${ctx.workerUrl}/?limit=2&imageLookups=2&_=${Date.now()}`);
+
+      assert(workerResult.articleSummarySkippedByLimitArticleCount === 1, 'Worker did not leave one article pending after translation budget overflow.', workerResult);
+      assert(workerResult.articleSummaryPublishOk === true, 'Worker did not publish the fully translated article.', workerResult);
+      assert(db.articles.filter((article) => article.status === 'published').length === 1, 'Exactly one article should publish before recovery.', db.articles);
+      assert(db.articles.filter((article) => article.status === 'translation_pending').length === 1, 'Exactly one article should remain pending before recovery.', db.articles);
+      assertPublishRequestsIncludeLanguages(db);
+
+      const recoveryResult = await fetchJson(`${ctx.workerUrl}/translate-backlog?_=${Date.now()}`);
+
+      assert(recoveryResult.articleSummaryPublishOk === true, 'Recovery did not publish the budget-deferred article.', recoveryResult);
+      assertAllArticlesPublished(db, 2);
+      assertAllSummaryLanguagesSaved(db, ctx);
+    },
+  );
+}
+
+async function runBackendTranslationProviderFailureRecoveryScenario() {
+  await withBackendTranslationHarness(
+    buildBackendTranslationScenario('backend_postgres_primary translation provider failure recovery', {
+      worker: 8827,
+      supabase: 8952,
+      backendApi: 8954,
+      ai: 8950,
+      rss: 8951,
+    }, {
+      articleCount: 1,
+      failTranslations: true,
+    }),
+    async (ctx, db) => {
+      const workerResult = await fetchJson(`${ctx.workerUrl}/?limit=1&imageLookups=1&_=${Date.now()}`);
+
+      assert(workerResult.articleSummaryFailedTaskCount >= SUMMARY_LANGUAGES.length, 'Worker did not report failed translation tasks.', workerResult);
+      assert(db.articles.length === 1, 'Accepted article was not saved during provider failure.', db.articles);
+      assert(db.articles[0].status === 'translation_pending', 'Provider failure should leave the article hidden.', db.articles[0]);
+      assert(db.backendPublishRequests.length === 0, 'Worker should not call backend publish when no article is fully translated.', db.backendPublishRequests);
+
+      ctx.failTranslations = false;
+      const recoveryResult = await fetchJson(`${ctx.workerUrl}/translate-backlog?_=${Date.now()}`);
+
+      assert(recoveryResult.articleSummaryPublishOk === true, 'Recovery did not publish after translation provider recovered.', recoveryResult);
+      assertPublishRequestsIncludeLanguages(db);
+      assertAllArticlesPublished(db, 1);
+      assertAllSummaryLanguagesSaved(db, ctx);
+    },
+  );
+}
+
+async function runBackendPublishGuardBlockRecoveryScenario() {
+  await withBackendTranslationHarness(
+    buildBackendTranslationScenario('backend_postgres_primary guarded publish block recovery', {
+      worker: 8837,
+      supabase: 8962,
+      backendApi: 8964,
+      ai: 8960,
+      rss: 8961,
+    }, {
+      articleCount: 1,
+      dropSummaryLanguageOnce: 'el',
+      optimisticSummaryLookupOnce: true,
+    }),
+    async (ctx, db) => {
+      const workerResult = await fetchJson(`${ctx.workerUrl}/?limit=1&imageLookups=1&_=${Date.now()}`);
+
+      assert(workerResult.articleSummaryPublishOk === false, 'Worker treated backend ok=false publish guard response as success.', workerResult);
+      assert(db.backendPublishGuardBlockedResponses.length === 1, 'Mock backend publish guard did not block the incomplete article.', db);
+      assert(
+        db.backendPublishGuardBlockedResponses[0].missingTranslations.some((missingTranslation) => missingTranslation.language_code === 'el'),
+        'Publish guard response did not identify the missing language code.',
+        db.backendPublishGuardBlockedResponses[0],
+      );
+      assert(db.articles[0].status === 'translation_pending', 'Guard-blocked article should remain hidden.', db.articles[0]);
+      assertPublishRequestsIncludeLanguages(db);
+
+      const recoveryResult = await fetchJson(`${ctx.workerUrl}/translate-backlog?_=${Date.now()}`);
+
+      assert(recoveryResult.articleSummaryPublishOk === true, 'Recovery did not publish after missing guard language was restored.', recoveryResult);
+      assertAllArticlesPublished(db, 1);
+      assertAllSummaryLanguagesSaved(db, ctx);
+    },
+  );
+}
+
 async function runWriterPauseScenario() {
   const ctx = buildContext({
     name: 'production writer pause skips manual and scheduled refresh',
@@ -872,6 +1231,9 @@ for (const scenario of scenarios) {
   await runScenario(scenario);
 }
 
+await runBackendTranslationBudgetRecoveryScenario();
+await runBackendTranslationProviderFailureRecoveryScenario();
+await runBackendPublishGuardBlockRecoveryScenario();
 await runWriterPauseScenario();
 
 console.log('\n✅ Database provider mode smoke tests passed.');
