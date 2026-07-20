@@ -133,6 +133,7 @@ type AiArticleDecision = {
 };
 
 type SummaryLanguageCode = 'fr' | 'ja' | 'de-CH' | 'de' | 'el';
+type PublicFeedLanguageCode = 'en' | SummaryLanguageCode;
 
 type LocalizedSummaryDecision = {
 	language_code: SummaryLanguageCode;
@@ -162,10 +163,15 @@ type PublicFeedEdgeSnapshotArticle = {
 	ai_summary: string | null;
 	category: string | null;
 	positivity_score: number | null;
+	language_code?: PublicFeedLanguageCode;
+	requested_language_code?: PublicFeedLanguageCode;
+	translation_available?: boolean;
 };
 
 type PublicFeedEdgeSnapshot = {
 	version: number;
+	languageCode: PublicFeedLanguageCode;
+	requestedLanguageCode: PublicFeedLanguageCode;
 	updatedAt: string;
 	refreshedAt: string | null;
 	shardIndex: number;
@@ -626,6 +632,13 @@ type ExistingSummaryLanguageRow = {
 	language_code: string;
 };
 
+type ArticleSummaryLocalizationRow = {
+	original_url: string;
+	language_code: string;
+	title: string | null;
+	summary: string | null;
+};
+
 type WorkerDatabaseClient = {
 	readonly provider: WorkerDatabaseProvider;
 	readonly providerMode: DatabaseProviderMode;
@@ -634,7 +647,7 @@ type WorkerDatabaseClient = {
 	loadReviewedUrlRows(args: { candidateUrls: string[] }): Promise<ReviewedUrlRow[]>;
 	loadPublishedArticleUrlRows(args: { candidateUrls: string[] }): Promise<PublishedArticleUrlRow[]>;
 	loadBackpressureArticleCount(): Promise<BackpressureDbCounts>;
-	loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]>;
+	loadPublicFeedSnapshotRowsForEdge(limit: number, languageCode: PublicFeedLanguageCode): Promise<PublicFeedEdgeSnapshotArticle[]>;
 	loadExistingSummaryLanguageRows(args: {
 		originalUrls: string[];
 		languageCodes: SummaryLanguageCode[];
@@ -763,7 +776,7 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 		};
 	}
 
-	async loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
+	async loadPublicFeedSnapshotRowsForEdge(limit: number, languageCode: PublicFeedLanguageCode): Promise<PublicFeedEdgeSnapshotArticle[]> {
 		const requestUrl = new URL(this.url('public_feed_snapshot'));
 		requestUrl.searchParams.set('select', PUBLIC_FEED_EDGE_SNAPSHOT_SELECT);
 		requestUrl.searchParams.set('order', 'snapshot_rank.asc');
@@ -779,7 +792,27 @@ class SupabaseWorkerDatabaseClient implements WorkerDatabaseClient {
 			throw await createDatabaseOperationError(this.provider, 'loadPublicFeedSnapshotRowsForEdge', response);
 		}
 
-		return (await response.json()) as PublicFeedEdgeSnapshotArticle[];
+		const articles = (await response.json()) as PublicFeedEdgeSnapshotArticle[];
+
+		if (languageCode === 'en' || articles.length === 0) {
+			return buildLocalizedPublicFeedEdgeSnapshotArticles(articles, languageCode, []);
+		}
+
+		const originalUrls = Array.from(new Set(articles.map((article) => article.original_url).filter(Boolean)));
+
+		if (originalUrls.length === 0) {
+			return buildLocalizedPublicFeedEdgeSnapshotArticles(articles, languageCode, []);
+		}
+
+		const summaryRows = await this.readJson<ArticleSummaryLocalizationRow[]>(
+			'loadPublicFeedSnapshotRowsForEdge.articleSummaries',
+			`article_summaries?select=original_url,language_code,title,summary&original_url=${encodeURIComponent(
+				encodePostgrestInFilter(originalUrls),
+			)}&language_code=eq.${languageCode}&limit=${Math.max(originalUrls.length, 1)}`,
+			{ method: 'GET' },
+		);
+
+		return buildLocalizedPublicFeedEdgeSnapshotArticles(articles, languageCode, summaryRows);
 	}
 
 	async loadExistingSummaryLanguageRows(args: {
@@ -1001,11 +1034,13 @@ class BackendWorkerDatabaseClient implements WorkerDatabaseClient {
 		};
 	}
 
-	loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
+	loadPublicFeedSnapshotRowsForEdge(limit: number, languageCode: PublicFeedLanguageCode): Promise<PublicFeedEdgeSnapshotArticle[]> {
 		return this.postJson<PublicFeedEdgeSnapshotArticle[]>('load-public-feed-snapshot-rows', {
 			limit,
+			languageCode,
+			requestedLanguageCode: languageCode,
 			select: PUBLIC_FEED_EDGE_SNAPSHOT_SELECT,
-		});
+		}).then((articles) => articles.map((article) => normalizePublicFeedEdgeSnapshotArticleMetadata(article, languageCode)));
 	}
 
 	loadExistingSummaryLanguageRows(args: {
@@ -1167,9 +1202,9 @@ class ProviderModeWorkerDatabaseClient implements WorkerDatabaseClient {
 		return counts;
 	}
 
-	async loadPublicFeedSnapshotRowsForEdge(limit: number): Promise<PublicFeedEdgeSnapshotArticle[]> {
-		const rows = await this.primary.loadPublicFeedSnapshotRowsForEdge(limit);
-		await this.compareShadowRead('loadPublicFeedSnapshotRowsForEdge', rows, () => this.shadow!.loadPublicFeedSnapshotRowsForEdge(limit));
+	async loadPublicFeedSnapshotRowsForEdge(limit: number, languageCode: PublicFeedLanguageCode): Promise<PublicFeedEdgeSnapshotArticle[]> {
+		const rows = await this.primary.loadPublicFeedSnapshotRowsForEdge(limit, languageCode);
+		await this.compareShadowRead('loadPublicFeedSnapshotRowsForEdge', rows, () => this.shadow!.loadPublicFeedSnapshotRowsForEdge(limit, languageCode));
 		return rows;
 	}
 
@@ -1329,6 +1364,7 @@ const KV_RECENT_PROCESSED_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION = 1;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY = `public-feed:snapshot:v${PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION}:latest`;
+const PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES: PublicFeedLanguageCode[] = ['en', 'fr', 'ja', 'de-CH', 'de', 'el'];
 const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 120;
 const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 250;
 const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -1971,6 +2007,74 @@ function getPublicFeedEdgeSnapshotTtlSeconds(env: Env) {
 	);
 }
 
+function getPublicFeedEdgeSnapshotKvKey(languageCode: PublicFeedLanguageCode) {
+	return languageCode === 'en'
+		? PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY
+		: `public-feed:snapshot:v${PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION}:lang:${languageCode}:latest`;
+}
+
+function normalizePublicFeedEdgeSnapshotArticleMetadata(
+	article: PublicFeedEdgeSnapshotArticle,
+	requestedLanguageCode: PublicFeedLanguageCode,
+): PublicFeedEdgeSnapshotArticle {
+	const rowRequestedLanguageCode = normalizePublicFeedLanguageCode(article.requested_language_code ?? requestedLanguageCode);
+	const requested = rowRequestedLanguageCode === 'en' && requestedLanguageCode !== 'en' ? requestedLanguageCode : rowRequestedLanguageCode;
+	const rowLanguageCode = normalizePublicFeedLanguageCode(article.language_code ?? (requested === 'en' ? 'en' : null));
+	const languageCode = requested === 'en' ? 'en' : rowLanguageCode;
+	const translationAvailable = typeof article.translation_available === 'boolean'
+		? article.translation_available
+		: requested === 'en' || languageCode === requested;
+
+	return {
+		...article,
+		language_code: translationAvailable ? requested : 'en',
+		requested_language_code: requested,
+		translation_available: translationAvailable,
+	};
+}
+
+function buildLocalizedPublicFeedEdgeSnapshotArticles(
+	articles: PublicFeedEdgeSnapshotArticle[],
+	languageCode: PublicFeedLanguageCode,
+	summaryRows: ArticleSummaryLocalizationRow[],
+): PublicFeedEdgeSnapshotArticle[] {
+	if (languageCode === 'en') {
+		return articles.map((article) => normalizePublicFeedEdgeSnapshotArticleMetadata(article, 'en'));
+	}
+
+	const summariesByUrl = new Map<string, ArticleSummaryLocalizationRow>();
+
+	for (const row of summaryRows) {
+		if (row.original_url && normalizeSummaryLanguageCode(row.language_code) === languageCode) {
+			summariesByUrl.set(row.original_url, row);
+		}
+	}
+
+	return articles.map((article) => {
+		const summary = summariesByUrl.get(article.original_url);
+		const title = summary?.title?.trim() ?? '';
+		const summaryText = summary?.summary?.trim() ?? '';
+
+		if (title && summaryText) {
+			return {
+				...article,
+				title,
+				ai_summary: summaryText,
+				language_code: languageCode,
+				requested_language_code: languageCode,
+				translation_available: true,
+			};
+		}
+
+		return {
+			...article,
+			language_code: 'en',
+			requested_language_code: languageCode,
+			translation_available: false,
+		};
+	});
+}
+
 function getPublicFeedEdgeSnapshotAgeSeconds(snapshot: PublicFeedEdgeSnapshot | null) {
 	if (!snapshot?.updatedAt) {
 		return null;
@@ -1992,6 +2096,8 @@ function getPublicFeedEdgeSnapshotContentFingerprint(snapshot: PublicFeedEdgeSna
 
 	return JSON.stringify({
 		version: snapshot.version,
+		languageCode: snapshot.languageCode,
+		requestedLanguageCode: snapshot.requestedLanguageCode,
 		articleCount: snapshot.articleCount,
 		maxArticles: snapshot.maxArticles,
 		articles: snapshot.articles,
@@ -2004,7 +2110,7 @@ function buildPublicFeedEdgeSnapshotHeaders(snapshot: PublicFeedEdgeSnapshot | n
 		'Access-Control-Allow-Origin': '*',
 		'Access-Control-Allow-Methods': 'GET, OPTIONS',
 		'Access-Control-Allow-Headers': 'content-type, accept',
-		'Access-Control-Expose-Headers': 'X-NutsNews-Edge-Snapshot, X-NutsNews-Edge-Snapshot-Age-Seconds, X-NutsNews-Edge-Snapshot-Updated-At, X-NutsNews-Edge-Snapshot-Article-Count, X-NutsNews-Edge-Snapshot-Version',
+		'Access-Control-Expose-Headers': 'X-NutsNews-Edge-Snapshot, X-NutsNews-Edge-Snapshot-Age-Seconds, X-NutsNews-Edge-Snapshot-Updated-At, X-NutsNews-Edge-Snapshot-Article-Count, X-NutsNews-Edge-Snapshot-Version, X-NutsNews-Edge-Snapshot-Language',
 		'X-NutsNews-Edge-Snapshot': status,
 	};
 
@@ -2013,6 +2119,7 @@ function buildPublicFeedEdgeSnapshotHeaders(snapshot: PublicFeedEdgeSnapshot | n
 		headers['X-NutsNews-Edge-Snapshot-Updated-At'] = snapshot.updatedAt;
 		headers['X-NutsNews-Edge-Snapshot-Article-Count'] = String(snapshot.articleCount);
 		headers['X-NutsNews-Edge-Snapshot-Version'] = String(snapshot.version);
+		headers['X-NutsNews-Edge-Snapshot-Language'] = snapshot.languageCode;
 
 		if (typeof ageSeconds === 'number') {
 			headers['X-NutsNews-Edge-Snapshot-Age-Seconds'] = String(ageSeconds);
@@ -2058,15 +2165,17 @@ async function fetchPublicFeedSnapshotRowsForEdge(
 	env: Env,
 	config: RuntimeConfig,
 	limit: number,
+	languageCode: PublicFeedLanguageCode,
 ): Promise<PublicFeedEdgeSnapshotArticle[] | null> {
 	const startedAt = Date.now();
 
 	try {
-		const rows = await config.database.loadPublicFeedSnapshotRowsForEdge(limit);
+		const rows = await config.database.loadPublicFeedSnapshotRowsForEdge(limit, languageCode);
 
 		await logInfo(env, 'worker.public_feed_edge_snapshot.source_read_ok', 'Loaded public feed snapshot rows for KV edge snapshot', {
 			articleCount: rows.length,
 			limit,
+			languageCode,
 			providerMode: config.databaseProviderMode,
 			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
@@ -2078,6 +2187,7 @@ async function fetchPublicFeedSnapshotRowsForEdge(
 			status: getDatabaseOperationErrorStatus(error),
 			errorText: getDatabaseOperationErrorText(error),
 			errorMessage: getErrorMessage(error),
+			languageCode,
 			providerMode: config.databaseProviderMode,
 			databaseProvider: config.database.provider,
 			durationMs: Date.now() - startedAt,
@@ -2096,68 +2206,103 @@ async function publishPublicFeedEdgeSnapshotToKv(
 	}
 
 	const limit = getPublicFeedEdgeSnapshotLimit(env);
-	const articles = await fetchPublicFeedSnapshotRowsForEdge(env, config, limit);
+	let ok = true;
+	let englishArticleCount = 0;
 
-	if (!articles) {
-		return { ok: false, articleCount: 0 };
-	}
+	for (const languageCode of PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES) {
+		const articles = await fetchPublicFeedSnapshotRowsForEdge(env, config, limit, languageCode);
 
-	const snapshot: PublicFeedEdgeSnapshot = {
-		version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
-		updatedAt: new Date().toISOString(),
-		refreshedAt,
-		shardIndex: getShardIndex(env),
-		articleCount: articles.length,
-		maxArticles: limit,
-		articles,
-	};
+		if (!articles) {
+			ok = false;
+			continue;
+		}
 
-	const existingSnapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY);
-
-	if (
-		existingSnapshot?.version === PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION &&
-		getPublicFeedEdgeSnapshotContentFingerprint(existingSnapshot) === getPublicFeedEdgeSnapshotContentFingerprint(snapshot)
-	) {
-		getKvRuntimeState(env).counts.writeSkips += 1;
-		await logInfo(env, 'worker.public_feed_edge_snapshot.write_skipped_unchanged', 'Skipped unchanged public feed edge snapshot KV write', {
-			articleCount: snapshot.articleCount,
-			maxArticles: snapshot.maxArticles,
-			existingUpdatedAt: existingSnapshot.updatedAt,
+		const snapshot: PublicFeedEdgeSnapshot = {
+			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+			languageCode,
+			requestedLanguageCode: languageCode,
+			updatedAt: new Date().toISOString(),
 			refreshedAt,
-		});
-		return { ok: true, articleCount: snapshot.articleCount };
-	}
+			shardIndex: getShardIndex(env),
+			articleCount: articles.length,
+			maxArticles: limit,
+			articles: articles.map((article) => normalizePublicFeedEdgeSnapshotArticleMetadata(article, languageCode)),
+		};
 
-	const ok = await writeJsonToKv(
-		env,
-		PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY,
-		snapshot,
-		getPublicFeedEdgeSnapshotTtlSeconds(env),
-	);
+		if (languageCode === 'en') {
+			englishArticleCount = snapshot.articleCount;
+		}
 
-	if (ok) {
+		const kvKey = getPublicFeedEdgeSnapshotKvKey(languageCode);
+		const existingSnapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, kvKey);
+
+		if (
+			existingSnapshot?.version === PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION &&
+			getPublicFeedEdgeSnapshotContentFingerprint(existingSnapshot) === getPublicFeedEdgeSnapshotContentFingerprint(snapshot)
+		) {
+			getKvRuntimeState(env).counts.writeSkips += 1;
+			await logInfo(env, 'worker.public_feed_edge_snapshot.write_skipped_unchanged', 'Skipped unchanged public feed edge snapshot KV write', {
+				articleCount: snapshot.articleCount,
+				maxArticles: snapshot.maxArticles,
+				languageCode,
+				existingUpdatedAt: existingSnapshot.updatedAt,
+				refreshedAt,
+			});
+			continue;
+		}
+
+		const writeOk = await writeJsonToKv(
+			env,
+			kvKey,
+			snapshot,
+			getPublicFeedEdgeSnapshotTtlSeconds(env),
+		);
+
+		if (!writeOk) {
+			ok = false;
+			continue;
+		}
+
 		await logInfo(env, 'worker.public_feed_edge_snapshot.published', 'Published public feed edge snapshot to Cloudflare KV', {
 			articleCount: snapshot.articleCount,
 			maxArticles: snapshot.maxArticles,
+			languageCode,
 			updatedAt: snapshot.updatedAt,
 			refreshedAt: snapshot.refreshedAt,
 		});
 	}
 
-	return { ok, articleCount: snapshot.articleCount };
+	return { ok, articleCount: englishArticleCount };
 }
 
-async function readPublicFeedEdgeSnapshotFromKv(env: Env) {
-	const snapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY);
+async function readPublicFeedEdgeSnapshotFromKv(env: Env, languageCode: PublicFeedLanguageCode) {
+	const snapshot = await readJsonFromKv<PublicFeedEdgeSnapshot>(env, getPublicFeedEdgeSnapshotKvKey(languageCode));
 
-	if (!snapshot || snapshot.version !== PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION || !Array.isArray(snapshot.articles)) {
+	if (
+		!snapshot ||
+		snapshot.version !== PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION ||
+		!Array.isArray(snapshot.articles)
+	) {
 		return null;
 	}
 
-	return snapshot;
+	const snapshotLanguageCode = normalizePublicFeedLanguageCode(snapshot.languageCode ?? (languageCode === 'en' ? 'en' : null));
+
+	if (snapshotLanguageCode !== languageCode) {
+		return null;
+	}
+
+	const requestedLanguageCode = normalizePublicFeedLanguageCode(snapshot.requestedLanguageCode ?? snapshotLanguageCode);
+
+	return {
+		...snapshot,
+		languageCode: snapshotLanguageCode,
+		requestedLanguageCode,
+		articles: snapshot.articles.map((article) => normalizePublicFeedEdgeSnapshotArticleMetadata(article, requestedLanguageCode)),
+	};
 }
 
-function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeedEdgeSnapshot | null) {
+function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeedEdgeSnapshot | null, languageCode: PublicFeedLanguageCode) {
 	const kvBound = Boolean(env.NUTSNEWS_KV);
 
 	if (!kvBound) {
@@ -2173,6 +2318,8 @@ function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeed
 			articleCount: null,
 			maxArticles: getPublicFeedEdgeSnapshotLimit(env),
 			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+			languageCode,
+			requestedLanguageCode: languageCode,
 			shardIndex: getShardIndex(env),
 			message: 'NUTSNEWS_KV is not bound to this Worker. Regenerate Wrangler configs with NUTSNEWS_KV_NAMESPACE_ID, deploy the shard, then run one refresh to publish the edge snapshot.',
 		};
@@ -2191,8 +2338,10 @@ function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeed
 			articleCount: null,
 			maxArticles: getPublicFeedEdgeSnapshotLimit(env),
 			version: PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION,
+			languageCode,
+			requestedLanguageCode: languageCode,
 			shardIndex: getShardIndex(env),
-			message: 'NUTSNEWS_KV is bound, but no public feed edge snapshot has been written yet. Run a Worker refresh after the active database public_feed_snapshot has rows.',
+			message: `NUTSNEWS_KV is bound, but no ${languageCode} public feed edge snapshot has been written yet. Run a Worker refresh after the active database public_feed_snapshot has rows.`,
 		};
 	}
 
@@ -2208,15 +2357,21 @@ function buildPublicFeedEdgeSnapshotStatusPayload(env: Env, snapshot: PublicFeed
 		articleCount: snapshot.articleCount,
 		maxArticles: snapshot.maxArticles,
 		version: snapshot.version,
+		languageCode: snapshot.languageCode,
+		requestedLanguageCode: snapshot.requestedLanguageCode,
 		shardIndex: snapshot.shardIndex,
 		message: snapshot.articleCount > 0 ? null : 'The edge snapshot exists, but it contains zero articles.',
 	};
 }
 
 async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
+	const languageCode = normalizePublicFeedLanguageCode(
+		url.searchParams.get('lang') ?? url.searchParams.get('languageCode') ?? url.searchParams.get('language'),
+	);
+
 	if (url.pathname === '/public-feed-snapshot/status') {
-		const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);
-		const payload = buildPublicFeedEdgeSnapshotStatusPayload(env, snapshot);
+		const snapshot = await readPublicFeedEdgeSnapshotFromKv(env, languageCode);
+		const payload = buildPublicFeedEdgeSnapshotStatusPayload(env, snapshot, languageCode);
 		const headerStatus = snapshot ? 'hit' : env.NUTSNEWS_KV ? 'miss' : 'error';
 
 		return Response.json(payload, {
@@ -2225,7 +2380,7 @@ async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
 		});
 	}
 
-	const snapshot = await readPublicFeedEdgeSnapshotFromKv(env);
+	const snapshot = await readPublicFeedEdgeSnapshotFromKv(env, languageCode);
 
 	if (!snapshot) {
 		return Response.json(
@@ -2234,8 +2389,8 @@ async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
 				nextPage: null,
 				nextCursor: null,
 				dataSource: 'edge_feed_snapshot',
-				languageCode: 'en',
-				error: env.NUTSNEWS_KV ? 'Public feed edge snapshot is not available yet.' : 'NUTSNEWS_KV is not bound to this Worker.',
+				languageCode,
+				error: env.NUTSNEWS_KV ? `${languageCode} public feed edge snapshot is not available yet.` : 'NUTSNEWS_KV is not bound to this Worker.',
 			},
 			{
 				status: env.NUTSNEWS_KV ? 404 : 503,
@@ -2258,16 +2413,20 @@ async function servePublicFeedEdgeSnapshot(env: Env, url: URL) {
 			nextPage,
 			nextCursor: null,
 			dataSource: 'edge_feed_snapshot',
-			languageCode: 'en',
+			languageCode: snapshot.languageCode,
+			requestedLanguageCode: snapshot.requestedLanguageCode,
 			edgeSnapshot: {
 				status: 'hit',
 				updatedAt: snapshot.updatedAt,
 				ageSeconds,
 				articleCount: snapshot.articleCount,
 				version: snapshot.version,
+				languageCode: snapshot.languageCode,
 			},
 			snapshot: {
 				version: snapshot.version,
+				languageCode: snapshot.languageCode,
+				requestedLanguageCode: snapshot.requestedLanguageCode,
 				updatedAt: snapshot.updatedAt,
 				refreshedAt: snapshot.refreshedAt,
 				ageSeconds,
@@ -3000,6 +3159,20 @@ function normalizeSummaryLanguageCode(value: string): SummaryLanguageCode | null
 	}
 
 	return null;
+}
+
+function normalizePublicFeedLanguageCode(value?: string | null): PublicFeedLanguageCode {
+	const normalizedValue = String(value ?? '').trim();
+
+	if (!normalizedValue) {
+		return 'en';
+	}
+
+	if (normalizedValue.toLowerCase() === 'en' || normalizedValue.toLowerCase() === 'english') {
+		return 'en';
+	}
+
+	return normalizeSummaryLanguageCode(normalizedValue) ?? 'en';
 }
 
 function isSummaryLanguageCode(value: string): value is SummaryLanguageCode {
@@ -7911,6 +8084,13 @@ async function serveBackendShadowSmoke(request: Request, env: Env, requestId: st
 		});
 	}
 }
+
+export const __test = {
+	getPublicFeedEdgeSnapshotKvKey,
+	normalizePublicFeedLanguageCode,
+	publishPublicFeedEdgeSnapshotToKv,
+	servePublicFeedEdgeSnapshot,
+};
 
 export default {
 	async fetch(request: Request, env: Env) {
