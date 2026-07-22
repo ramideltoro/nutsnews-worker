@@ -2,6 +2,12 @@ import { logError, logInfo, logWarn } from "./logger";
 import { readCloudflareFailoverDnsState } from "./failoverDnsReadback.mjs";
 import { readLiveOriginReadinessState } from "./failoverLiveOriginReadiness.mjs";
 import {
+  buildFailoverDnsDecisionLogFields,
+  buildFailoverHealthCheckLogFields,
+  getFailoverDnsDecisionLogLevel,
+  getFailoverHealthCheckLogLevel,
+} from "./failoverWorkersLogs.mjs";
+import {
   handleFailoverControllerHealthRequest,
   handleFailoverControllerStatusRequest,
 } from "./failoverStatusEndpoint.mjs";
@@ -425,6 +431,37 @@ async function scheduleNextFailoverAlarm(storage: DurableObjectStorage, status: 
   }
 }
 
+async function logFailoverHealthCheck(env: Env, source: FailoverWakeSource, status: Record<string, unknown>) {
+  const fields = buildFailoverHealthCheckLogFields({ source, status });
+  const level = getFailoverHealthCheckLogLevel(status);
+  const message = "Failover controller VPS health check recorded";
+
+  if (level === "warn") {
+    await logWarn(env, "failover.health_check", message, fields);
+    return;
+  }
+
+  await logInfo(env, "failover.health_check", message, fields);
+}
+
+async function logFailoverDnsDecision(
+    env: Env,
+    source: FailoverWakeSource,
+    status: Record<string, unknown>,
+    dnsReadback: unknown,
+) {
+  const fields = buildFailoverDnsDecisionLogFields({ source, status, dnsReadback });
+  const level = getFailoverDnsDecisionLogLevel(fields);
+  const message = "Failover controller DNS decision recorded";
+
+  if (level === "warn") {
+    await logWarn(env, "failover.dns_decision", message, fields);
+    return;
+  }
+
+  await logInfo(env, "failover.dns_decision", message, fields);
+}
+
 function getFailoverStateStub(env: Env) {
   if (!env.FAILOVER_CONTROLLER_STATE) {
     return null;
@@ -604,6 +641,8 @@ export class FailoverControllerStateObject {
     );
 
     await scheduleNextFailoverAlarm(this.state.storage, liveOriginResult.status);
+    await logFailoverHealthCheck(this.env, source, liveOriginResult.status);
+    await logFailoverDnsDecision(this.env, source, liveOriginResult.status, dnsReadback);
 
     return {
       ...result,

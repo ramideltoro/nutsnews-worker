@@ -10,6 +10,7 @@
     "test:failover-live-origin-readiness": "node --test test/failover-live-origin-readiness.test.mjs",
     "test:failover-status-endpoint": "node --test test/failover-status-endpoint.test.mjs",
     "test:failover-state": "node --test test/failover-state.test.mjs",
+    "test:failover-workers-logs": "node --test test/failover-workers-logs.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
