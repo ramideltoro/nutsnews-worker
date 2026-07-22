@@ -6,6 +6,7 @@ import {
   normalizeFailoverDnsTarget,
   readCloudflareFailoverDnsConfig,
   readCloudflareFailoverDnsState,
+  writeCloudflareFailoverDnsTarget,
 } from "../src/failoverDnsReadback.mjs";
 import {
   assertNoSensitiveFailoverState,
@@ -78,6 +79,41 @@ function fetchRecords(recordsById) {
   };
 
   return { fetchImpl, requests };
+}
+
+function mutableCloudflareRecords(recordsById, { failPatch = false } = {}) {
+  const requests = [];
+  const records = new Map(Object.entries(recordsById));
+  const fetchImpl = async (url, init = {}) => {
+    requests.push({ url, init });
+    const id = String(url).split("/").at(-1);
+    const record = records.get(id);
+
+    if (!record) {
+      return Response.json({ success: false, errors: [{ code: 1000, message: "not found" }] }, { status: 404 });
+    }
+
+    if (init.method === "PATCH") {
+      if (failPatch) {
+        return Response.json(
+          { success: false, errors: [{ code: 10000, message: "do not leak sentinel-cloudflare-dns-api-token" }] },
+          { status: 403 },
+        );
+      }
+
+      const body = JSON.parse(init.body);
+      records.set(id, {
+        ...record,
+        content: body.content,
+      });
+
+      return Response.json({ success: true, result: { ...records.get(id), proxied: true } });
+    }
+
+    return Response.json(cloudflareRecord(record));
+  };
+
+  return { fetchImpl, requests, records };
 }
 
 test("normalizes DNS targets without relying on public DNS answers", () => {
@@ -177,4 +213,78 @@ test("DNS API failures are surfaced safely without leaking tokens or record cont
   assert.equal(JSON.stringify(result).includes(apiToken), false);
   assert.equal(JSON.stringify(result).includes("do not leak"), false);
   assertNoSensitiveFailoverState({ result, status: updated.status });
+});
+
+test("writes and verifies both Cloudflare DNS records for a manual Vercel target", async () => {
+  const { fetchImpl, requests } = mutableCloudflareRecords({
+    "apex-record-id": { name: "nutsnews.com", content: "vps.nutsnews.com" },
+    "www-record-id": { name: "www.nutsnews.com", content: "vps.nutsnews.com" },
+  });
+  const result = await writeCloudflareFailoverDnsTarget(baseEnv, {
+    target: "vercel",
+    expectedCurrent: {
+      apexTarget: "vps",
+      wwwTarget: "vps",
+    },
+    fetchImpl,
+    nowMs,
+  });
+  const patchRequests = requests.filter((request) => request.init.method === "PATCH");
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.afterReadback.apexTarget, "vercel");
+  assert.equal(result.afterReadback.wwwTarget, "vercel");
+  assert.equal(patchRequests.length, 2);
+  assert.ok(patchRequests.every((request) => JSON.parse(request.init.body).content === "cname.vercel-dns.com"));
+  assert.equal(JSON.stringify(result).includes(apiToken), false);
+  assert.ok(result.writes.every((write) => !Object.hasOwn(write, "content")));
+  assert.equal(Object.hasOwn(result.afterReadback.records.apex, "content"), false);
+  assert.equal(Object.hasOwn(result.afterReadback.records.www, "content"), false);
+  assertNoSensitiveFailoverState(result);
+});
+
+test("refuses DNS writes when fresh Cloudflare readback differs from expected dashboard state", async () => {
+  const { fetchImpl, requests } = mutableCloudflareRecords({
+    "apex-record-id": { name: "nutsnews.com", content: "cname.vercel-dns.com" },
+    "www-record-id": { name: "www.nutsnews.com", content: "cname.vercel-dns.com" },
+  });
+  const result = await writeCloudflareFailoverDnsTarget(baseEnv, {
+    target: "vps",
+    expectedCurrent: {
+      apexTarget: "vps",
+      wwwTarget: "vps",
+    },
+    fetchImpl,
+    nowMs,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "stale_dns_state");
+  assert.equal(result.statusCode, 409);
+  assert.equal(requests.some((request) => request.init.method === "PATCH"), false);
+  assertNoSensitiveFailoverState(result);
+});
+
+test("surfaces Cloudflare DNS write failures safely", async () => {
+  const { fetchImpl } = mutableCloudflareRecords({
+    "apex-record-id": { name: "nutsnews.com", content: "vps.nutsnews.com" },
+    "www-record-id": { name: "www.nutsnews.com", content: "vps.nutsnews.com" },
+  }, { failPatch: true });
+  const result = await writeCloudflareFailoverDnsTarget(baseEnv, {
+    target: "vercel",
+    expectedCurrent: {
+      apexTarget: "vps",
+      wwwTarget: "vps",
+    },
+    fetchImpl,
+    nowMs,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "cloudflare_dns_update_failed");
+  assert.equal(result.statusCode, 502);
+  assert.equal(JSON.stringify(result).includes(apiToken), false);
+  assert.equal(JSON.stringify(result).includes("do not leak"), false);
+  assertNoSensitiveFailoverState(result);
 });

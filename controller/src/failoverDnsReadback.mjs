@@ -34,12 +34,16 @@ export function normalizeFailoverDnsTarget(value) {
 }
 
 function parseTargetList(value, fallback) {
+  return new Set(parseTargetListValues(value, fallback));
+}
+
+function parseTargetListValues(value, fallback) {
   const targets = clean(value || fallback)
     .split(",")
     .map(normalizeFailoverDnsTarget)
     .filter(Boolean);
 
-  return new Set(targets);
+  return targets.length ? targets : [normalizeFailoverDnsTarget(fallback)];
 }
 
 function parseRecordsJson(value) {
@@ -130,10 +134,18 @@ export async function readCloudflareFailoverDnsConfig(env = {}) {
       env.NUTSNEWS_DNS_FAILOVER_VPS_TARGETS || env.NUTSNEWS_DNS_FAILOVER_VPS_TARGET,
       DEFAULT_DNS_READBACK_VPS_TARGET,
     ),
+    vpsTarget: parseTargetListValues(
+      env.NUTSNEWS_DNS_FAILOVER_VPS_TARGET || env.NUTSNEWS_DNS_FAILOVER_VPS_TARGETS,
+      DEFAULT_DNS_READBACK_VPS_TARGET,
+    )[0],
     vercelTargets: parseTargetList(
       env.NUTSNEWS_DNS_FAILOVER_VERCEL_TARGETS || env.NUTSNEWS_DNS_FAILOVER_VERCEL_TARGET,
       DEFAULT_DNS_READBACK_VERCEL_TARGET,
     ),
+    vercelTarget: parseTargetListValues(
+      env.NUTSNEWS_DNS_FAILOVER_VERCEL_TARGET || env.NUTSNEWS_DNS_FAILOVER_VERCEL_TARGETS,
+      DEFAULT_DNS_READBACK_VERCEL_TARGET,
+    )[0],
     timeoutMs: readBoundedInteger(
       env.NUTSNEWS_DNS_FAILOVER_DNS_API_TIMEOUT_MS,
       DEFAULT_DNS_READBACK_TIMEOUT_MS,
@@ -235,6 +247,93 @@ async function fetchCloudflareDnsRecord(config, configuredRecord, fetchImpl) {
   }
 }
 
+function targetContentFor(config, target) {
+  if (target === "vps") {
+    return config.vpsTarget || DEFAULT_DNS_READBACK_VPS_TARGET;
+  }
+
+  if (target === "vercel") {
+    return config.vercelTarget || DEFAULT_DNS_READBACK_VERCEL_TARGET;
+  }
+
+  return "";
+}
+
+function expectedTarget(value) {
+  const normalized = clean(value).toLowerCase();
+
+  return ["vps", "vercel", "unknown", "unmanaged"].includes(normalized) ? normalized : "unknown";
+}
+
+function expectedDnsStateMatches(readback, expectedCurrent = {}) {
+  return (
+    expectedTarget(expectedCurrent.apexTarget) === readback.apexTarget &&
+    expectedTarget(expectedCurrent.wwwTarget) === readback.wwwTarget
+  );
+}
+
+async function patchCloudflareDnsRecord(config, configuredRecord, target, fetchImpl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  const url = `${CLOUDFLARE_DNS_API_BASE_URL}/zones/${encodeURIComponent(config.zoneId)}/dns_records/${encodeURIComponent(configuredRecord.id)}`;
+
+  try {
+    const response = await fetchImpl(url, {
+      method: "PATCH",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": `Bearer ${config.apiToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        content: targetContentFor(config, target),
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: "cloudflare_dns_update_http_error",
+      };
+    }
+
+    const payload = await response.json().catch(() => null);
+    if (!payload || payload.success !== true) {
+      return {
+        ok: false,
+        status: response.status,
+        error: "cloudflare_dns_update_response_error",
+      };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: null,
+      error: sanitizeDnsReadbackError(error),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function safeWriteSummary(record, result) {
+  return Object.freeze({
+    ok: result.ok === true,
+    name: clean(record?.name),
+    type: clean(record?.type).toUpperCase() || null,
+    status: result.status ?? null,
+    error: result.error ?? null,
+  });
+}
+
 export async function readCloudflareFailoverDnsState(env = {}, options = {}) {
   const checkedAt = new Date(options.nowMs ?? Date.now()).toISOString();
   const config = await readCloudflareFailoverDnsConfig(env);
@@ -275,5 +374,119 @@ export async function readCloudflareFailoverDnsState(env = {}, options = {}) {
       apex: safeRecordSummary(config.apexRecord, apexResult.record, apexTarget, apexResult.ok, apexResult.status, apexResult.error),
       www: safeRecordSummary(config.wwwRecord, wwwResult.record, wwwTarget, wwwResult.ok, wwwResult.status, wwwResult.error),
     },
+  });
+}
+
+export async function writeCloudflareFailoverDnsTarget(env = {}, options = {}) {
+  const nowMs = options.nowMs ?? Date.now();
+  const config = await readCloudflareFailoverDnsConfig(env);
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const target = options.target === "vps" || options.target === "vercel" ? options.target : null;
+
+  if (!target) {
+    return Object.freeze({
+      ok: false,
+      changed: false,
+      error: "invalid_dns_target",
+      statusCode: 400,
+      beforeReadback: null,
+      afterReadback: null,
+      writes: [],
+    });
+  }
+
+  const beforeReadback = await readCloudflareFailoverDnsState(env, { fetchImpl, nowMs });
+
+  if (!config.configured) {
+    return Object.freeze({
+      ok: false,
+      changed: false,
+      error: "dns_write_not_configured",
+      statusCode: 503,
+      beforeReadback,
+      afterReadback: null,
+      writes: [],
+    });
+  }
+
+  if (!beforeReadback.ok) {
+    return Object.freeze({
+      ok: false,
+      changed: false,
+      error: "dns_readback_failed",
+      statusCode: 502,
+      beforeReadback,
+      afterReadback: null,
+      writes: [],
+    });
+  }
+
+  if (!expectedDnsStateMatches(beforeReadback, options.expectedCurrent)) {
+    return Object.freeze({
+      ok: false,
+      changed: false,
+      error: "stale_dns_state",
+      statusCode: 409,
+      beforeReadback,
+      afterReadback: null,
+      writes: [],
+    });
+  }
+
+  if (beforeReadback.apexTarget === target && beforeReadback.wwwTarget === target) {
+    return Object.freeze({
+      ok: true,
+      changed: false,
+      error: null,
+      statusCode: 200,
+      beforeReadback,
+      afterReadback: beforeReadback,
+      writes: [],
+    });
+  }
+
+  const [apexWrite, wwwWrite] = await Promise.all([
+    patchCloudflareDnsRecord(config, config.apexRecord, target, fetchImpl),
+    patchCloudflareDnsRecord(config, config.wwwRecord, target, fetchImpl),
+  ]);
+  const writes = Object.freeze([
+    safeWriteSummary(config.apexRecord, apexWrite),
+    safeWriteSummary(config.wwwRecord, wwwWrite),
+  ]);
+
+  if (!apexWrite.ok || !wwwWrite.ok) {
+    return Object.freeze({
+      ok: false,
+      changed: true,
+      error: "cloudflare_dns_update_failed",
+      statusCode: 502,
+      beforeReadback,
+      afterReadback: null,
+      writes,
+    });
+  }
+
+  const afterReadback = await readCloudflareFailoverDnsState(env, { fetchImpl, nowMs });
+
+  if (!afterReadback.ok || afterReadback.apexTarget !== target || afterReadback.wwwTarget !== target) {
+    return Object.freeze({
+      ok: false,
+      changed: true,
+      error: "dns_write_verification_failed",
+      statusCode: 502,
+      beforeReadback,
+      afterReadback,
+      writes,
+    });
+  }
+
+  return Object.freeze({
+    ok: true,
+    changed: true,
+    error: null,
+    statusCode: 200,
+    beforeReadback,
+    afterReadback,
+    writes,
   });
 }

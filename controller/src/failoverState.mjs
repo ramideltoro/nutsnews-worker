@@ -3,6 +3,7 @@ export const FAILOVER_CONTROLLER_DURABLE_OBJECT_NAME = "production-failover-cont
 export const FAILOVER_STATUS_STORAGE_KEY = "failover.status.v1";
 export const FAILOVER_HISTORY_STORAGE_KEY = "failover.check_history.v1";
 export const FAILOVER_DNS_ACTION_KEYS_STORAGE_KEY = "failover.dns_action_keys.v1";
+export const FAILOVER_AUDIT_STORAGE_KEY = "failover.audit_events.v1";
 
 export const FAILOVER_DNS_TARGETS = Object.freeze(["vps", "vercel"]);
 export const FAILOVER_DNS_TARGET_CLASSIFICATIONS = Object.freeze(["vps", "vercel", "unknown", "unmanaged"]);
@@ -67,6 +68,18 @@ export const FAILOVER_DNS_ACTIONS = Object.freeze([
   "reconcile_dns_to_vps",
   "reconcile_dns_to_vercel",
 ]);
+export const FAILOVER_MANUAL_ACTIONS = Object.freeze([
+  "enable_manual_lock",
+  "disable_manual_lock",
+  "force_dns_to_vercel",
+  "force_dns_to_vps",
+]);
+export const FAILOVER_AUDIT_RESULTS = Object.freeze([
+  "success",
+  "failed",
+  "refused",
+  "duplicate",
+]);
 export const FAILOVER_CONTROLLER_STATES = Object.freeze([
   "vps_primary_healthy",
   "vps_health_degraded",
@@ -87,6 +100,7 @@ export const FAILOVER_FAILURE_THRESHOLD = 3;
 export const FAILOVER_CONTROLLER_STALE_AFTER_SECONDS = 60;
 export const FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS = 300;
 export const FAILOVER_HISTORY_LIMIT = 20;
+export const FAILOVER_AUDIT_LIMIT = 30;
 
 function clean(value) {
   return String(value ?? "").trim();
@@ -190,6 +204,14 @@ function normalizeDnsAction(value, fallback = "none") {
   return isOneOf(value, FAILOVER_DNS_ACTIONS) ? value : fallback;
 }
 
+function normalizeManualAction(value, fallback = "force_dns_to_vercel") {
+  return isOneOf(value, FAILOVER_MANUAL_ACTIONS) ? value : fallback;
+}
+
+function normalizeAuditResult(value, fallback = "failed") {
+  return isOneOf(value, FAILOVER_AUDIT_RESULTS) ? value : fallback;
+}
+
 function normalizeStaleReason(value) {
   if (value === null || value === undefined || value === "") {
     return null;
@@ -216,10 +238,26 @@ function normalizeControllerVersion(value, fallback) {
   return /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/.test(candidate) ? candidate : fallback;
 }
 
+function normalizeActor(value) {
+  const candidate = clean(value).toLowerCase();
+
+  return /^[a-z0-9._%+-]{1,96}@[a-z0-9.-]{1,96}\.[a-z]{2,24}$/.test(candidate)
+    ? candidate
+    : "unknown-admin@example.invalid";
+}
+
 function normalizeIdentityValue(value, fallback = "unknown") {
   const candidate = clean(value);
 
   return /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/.test(candidate) ? candidate : fallback;
+}
+
+function normalizeAuditText(value, fallback = "none", maxLength = 240) {
+  const candidate = clean(value)
+    .replace(/\s+/gu, " ")
+    .slice(0, maxLength);
+
+  return candidate || fallback;
 }
 
 function normalizeReadinessCode(value, fallback = "unknown") {
@@ -478,6 +516,12 @@ export async function readFailoverCheckHistory(storage) {
   const history = await storageGet(storage, FAILOVER_HISTORY_STORAGE_KEY);
 
   return Array.isArray(history) ? history.slice(0, FAILOVER_HISTORY_LIMIT) : [];
+}
+
+export async function readFailoverAuditHistory(storage) {
+  const history = await storageGet(storage, FAILOVER_AUDIT_STORAGE_KEY);
+
+  return Array.isArray(history) ? history.slice(0, FAILOVER_AUDIT_LIMIT) : [];
 }
 
 function deriveActiveTargetFromActual(apexTarget, wwwTarget, fallback) {
@@ -783,6 +827,39 @@ export async function recordFailoverDnsAction(
   });
 }
 
+export async function recordFailoverAuditEvent(
+  storage,
+  event,
+  { nowMs = Date.now() } = {},
+) {
+  return withStorageTransaction(storage, async (transaction) => {
+    const createdAt = toIsoDateTime(event.createdAt, nowMs);
+    const auditEvent = Object.freeze({
+      id: normalizeIdentityValue(event.id || event.idempotencyKey || crypto.randomUUID(), "unknown"),
+      createdAt,
+      actor: normalizeActor(event.actor),
+      action: normalizeManualAction(event.action),
+      previousTarget: normalizeDnsTargetClassification(event.previousTarget),
+      newTarget: normalizeDnsTargetClassification(event.newTarget),
+      reason: normalizeAuditText(event.reason, "No reason provided."),
+      result: normalizeAuditResult(event.result),
+      message: normalizeAuditText(event.message, "No action detail.", 320),
+      manualLock: normalizeBoolean(event.manualLock),
+      idempotencyKey: normalizeIdentityValue(event.idempotencyKey || event.id || "unknown", "unknown"),
+    });
+    const history = [auditEvent, ...await readFailoverAuditHistory(transaction)]
+      .slice(0, FAILOVER_AUDIT_LIMIT);
+
+    assertNoSensitiveFailoverState(auditEvent);
+    await storagePut(transaction, FAILOVER_AUDIT_STORAGE_KEY, history);
+
+    return Object.freeze({
+      auditEvent,
+      history,
+    });
+  });
+}
+
 export function assertNoSensitiveFailoverState(value) {
   const serialized = JSON.stringify(value);
 
@@ -799,6 +876,7 @@ export function assertNoSensitiveFailoverState(value) {
     "cf-access-client-secret",
     "cf-access-token",
     "x-vercel-protection-bypass",
+    "sentinel-cloudflare-dns-api-token",
   ]) {
     if (serialized.toLowerCase().includes(forbidden.toLowerCase())) {
       throw new Error(`Failover state contains forbidden sensitive token: ${forbidden}`);
