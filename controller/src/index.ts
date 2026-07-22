@@ -12,6 +12,11 @@ import {
   writeFailoverHealthCheckAnalytics,
 } from "./failoverAnalyticsEngine.mjs";
 import {
+  buildFailoverAlertLogFields,
+  emitFailoverAlerts,
+  sendFailoverAlertWebhook,
+} from "./failoverAlerts.mjs";
+import {
   handleFailoverControllerHealthRequest,
   handleFailoverControllerStatusRequest,
 } from "./failoverStatusEndpoint.mjs";
@@ -64,6 +69,10 @@ type Env = {
   NUTSNEWS_FAILOVER_LIVE_ORIGIN_READINESS_TIMEOUT_MS?: string;
   NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS?: string;
   NUTSNEWS_FAILOVER_ANALYTICS_ENVIRONMENT?: string;
+  NUTSNEWS_FAILOVER_ALERT_RATE_LIMIT_SECONDS?: string;
+  NUTSNEWS_FAILOVER_STATUS_URL?: string;
+  NUTSNEWS_FAILOVER_ALERT_WEBHOOK_URL?: string | SecretBinding;
+  NUTSNEWS_FAILOVER_ALERT_WEBHOOK_TOKEN?: string | SecretBinding;
   FAILOVER_ANALYTICS?: AnalyticsEngineDataset;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
@@ -468,6 +477,18 @@ async function logFailoverDnsDecision(
   await logInfo(env, "failover.dns_decision", message, fields);
 }
 
+async function deliverControllerFailoverAlert(
+    env: Env,
+    alert: Record<string, unknown>,
+    alertConfig: Record<string, unknown>,
+) {
+  const message = typeof alert.title === "string" ? alert.title : "NutsNews failover alert";
+
+  await logWarn(env, "failover.alert", message, buildFailoverAlertLogFields(alert, alertConfig));
+
+  return sendFailoverAlertWebhook(alertConfig, alert);
+}
+
 function getFailoverStateStub(env: Env) {
   if (!env.FAILOVER_CONTROLLER_STATE) {
     return null;
@@ -590,7 +611,7 @@ export class FailoverControllerStateObject {
     }
 
     if (request.method === "POST" && url.pathname === "/internal/failover/dns-action") {
-      const body = await request.json().catch(() => ({}));
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
       const dnsActionStartedAt = Date.now();
       const result = await recordFailoverDnsAction(this.state.storage, body, {
         config,
@@ -604,6 +625,17 @@ export class FailoverControllerStateObject {
         duplicate: result.duplicate,
         durationMs: Date.now() - dnsActionStartedAt,
       });
+      if (!result.duplicate) {
+        await emitFailoverAlerts(this.env, this.state.storage, {
+          source: "dns_action",
+          status: result.status,
+          action: body,
+          nowMs: Date.now(),
+          failoverConfig: config,
+        }, {
+          deliverAlert: deliverControllerFailoverAlert,
+        });
+      }
 
       return Response.json(result);
     }
@@ -620,6 +652,17 @@ export class FailoverControllerStateObject {
     const nowMs = Date.now();
     const statusExists = await hasStoredFailoverStatus(this.state.storage);
     const currentStatus = await readFailoverStatus(this.state.storage, nowMs, config);
+
+    if (currentStatus.stale || currentStatus.controllerState === "stale") {
+      await emitFailoverAlerts(this.env, this.state.storage, {
+        source,
+        status: currentStatus,
+        nowMs,
+        failoverConfig: config,
+      }, {
+        deliverAlert: deliverControllerFailoverAlert,
+      });
+    }
 
     if (statusExists && !isFailoverCheckDue(currentStatus, nowMs)) {
       await scheduleNextFailoverAlarm(this.state.storage, currentStatus);
@@ -662,6 +705,14 @@ export class FailoverControllerStateObject {
       source,
       status: liveOriginResult.status,
       dnsReadback,
+    });
+    await emitFailoverAlerts(this.env, this.state.storage, {
+      source,
+      status: liveOriginResult.status,
+      nowMs,
+      failoverConfig: config,
+    }, {
+      deliverAlert: deliverControllerFailoverAlert,
     });
 
     return {
