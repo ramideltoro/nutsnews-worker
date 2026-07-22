@@ -12,6 +12,30 @@ export const FAILOVER_OBSERVED_DEPLOYMENT_TARGETS = Object.freeze([
   "unknown",
   "unexpected",
 ]);
+export const FAILOVER_LIVE_ORIGIN_CLASSIFICATIONS = Object.freeze([
+  "vps",
+  "vercel",
+  "unknown",
+  "unreachable",
+]);
+export const FAILOVER_LIVE_ORIGIN_DNS_STATES = Object.freeze([
+  "unknown",
+  "in_sync",
+  "propagating",
+  "mismatch",
+  "partial",
+  "unreachable",
+]);
+export const FAILOVER_LIVE_ORIGIN_CACHE_STATES = Object.freeze([
+  "unknown",
+  "fresh",
+  "stale",
+]);
+export const FAILOVER_LIVE_ORIGIN_ERROR_CODES = Object.freeze([
+  "timeout",
+  "network_error",
+  "http_status_unreachable",
+]);
 export const FAILOVER_HEALTH_RESULTS = Object.freeze([
   "unknown",
   "reachable",
@@ -61,6 +85,7 @@ export const FAILOVER_STALE_REASONS = Object.freeze([
 export const FAILOVER_CHECK_INTERVAL_SECONDS = 15;
 export const FAILOVER_FAILURE_THRESHOLD = 3;
 export const FAILOVER_CONTROLLER_STALE_AFTER_SECONDS = 60;
+export const FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS = 300;
 export const FAILOVER_HISTORY_LIMIT = 20;
 
 function clean(value) {
@@ -137,6 +162,26 @@ export function normalizeObservedDeploymentTarget(value) {
   return isOneOf(value, FAILOVER_OBSERVED_DEPLOYMENT_TARGETS) ? value : "unexpected";
 }
 
+function normalizeLiveOrigin(value, fallback = "unknown") {
+  return isOneOf(value, FAILOVER_LIVE_ORIGIN_CLASSIFICATIONS) ? value : fallback;
+}
+
+function normalizeLiveOriginDnsState(value, fallback = "unknown") {
+  return isOneOf(value, FAILOVER_LIVE_ORIGIN_DNS_STATES) ? value : fallback;
+}
+
+function normalizeLiveOriginCacheState(value, fallback = "unknown") {
+  return isOneOf(value, FAILOVER_LIVE_ORIGIN_CACHE_STATES) ? value : fallback;
+}
+
+function normalizeLiveOriginError(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  return isOneOf(value, FAILOVER_LIVE_ORIGIN_ERROR_CODES) ? value : "network_error";
+}
+
 function normalizeHealthResult(value, fallback = "unknown") {
   return isOneOf(value, FAILOVER_HEALTH_RESULTS) ? value : fallback;
 }
@@ -171,6 +216,102 @@ function normalizeControllerVersion(value, fallback) {
   return /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/.test(candidate) ? candidate : fallback;
 }
 
+function normalizeIdentityValue(value, fallback = "unknown") {
+  const candidate = clean(value);
+
+  return /^[A-Za-z0-9][A-Za-z0-9._:@/-]{2,127}$/.test(candidate) ? candidate : fallback;
+}
+
+function normalizeReadinessCode(value, fallback = "unknown") {
+  const candidate = clean(value);
+
+  return /^[a-z][a-z0-9_]{1,63}$/.test(candidate) ? candidate : fallback;
+}
+
+function normalizeHttpStatus(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : null;
+}
+
+function createDefaultLiveOriginHostReadiness(hostname, checkedAt) {
+  return Object.freeze({
+    checkedAt,
+    hostname,
+    ok: false,
+    origin: "unknown",
+    status: null,
+    latencyMs: null,
+    deploymentTarget: "unknown",
+    sourceCommit: "unknown",
+    buildId: "unknown",
+    readinessCode: "unknown",
+    runtimeEnv: "unknown",
+    sideEffectsMode: "unknown",
+    databaseProviderMode: "unknown",
+    productionWritesPaused: null,
+    cacheState: "unknown",
+    error: null,
+  });
+}
+
+function sanitizeLiveOriginHostReadiness(value, hostname, fallbackCheckedAt) {
+  if (!value || typeof value !== "object") {
+    return createDefaultLiveOriginHostReadiness(hostname, fallbackCheckedAt);
+  }
+
+  const checkedAt = toIsoDateTime(value.checkedAt, Date.parse(fallbackCheckedAt));
+
+  return Object.freeze({
+    checkedAt,
+    hostname: normalizeIdentityValue(value.hostname, hostname),
+    ok: normalizeBoolean(value.ok),
+    origin: normalizeLiveOrigin(value.origin),
+    status: normalizeHttpStatus(value.status),
+    latencyMs: value.latencyMs === null || value.latencyMs === undefined
+      ? null
+      : normalizeNumber(value.latencyMs, null),
+    deploymentTarget: normalizeIdentityValue(value.deploymentTarget),
+    sourceCommit: normalizeIdentityValue(value.sourceCommit),
+    buildId: normalizeIdentityValue(value.buildId),
+    readinessCode: normalizeReadinessCode(value.readinessCode),
+    runtimeEnv: normalizeIdentityValue(value.runtimeEnv),
+    sideEffectsMode: normalizeReadinessCode(value.sideEffectsMode),
+    databaseProviderMode: normalizeReadinessCode(value.databaseProviderMode),
+    productionWritesPaused: typeof value.productionWritesPaused === "boolean"
+      ? value.productionWritesPaused
+      : null,
+    cacheState: normalizeLiveOriginCacheState(value.cacheState),
+    error: normalizeLiveOriginError(value.error),
+  });
+}
+
+function createDefaultLiveOriginReadiness(nowMs = Date.now()) {
+  const checkedAt = new Date(nowMs).toISOString();
+
+  return Object.freeze({
+    checkedAt,
+    dnsState: "unknown",
+    apex: createDefaultLiveOriginHostReadiness("nutsnews.com", checkedAt),
+    www: createDefaultLiveOriginHostReadiness("www.nutsnews.com", checkedAt),
+  });
+}
+
+function sanitizeLiveOriginReadiness(value, nowMs = Date.now()) {
+  if (!value || typeof value !== "object") {
+    return createDefaultLiveOriginReadiness(nowMs);
+  }
+
+  const checkedAt = toIsoDateTime(value.checkedAt, nowMs);
+
+  return Object.freeze({
+    checkedAt,
+    dnsState: normalizeLiveOriginDnsState(value.dnsState),
+    apex: sanitizeLiveOriginHostReadiness(value.apex, "nutsnews.com", checkedAt),
+    www: sanitizeLiveOriginHostReadiness(value.www, "www.nutsnews.com", checkedAt),
+  });
+}
+
 export function readFailoverConfig(env = {}) {
   return Object.freeze({
     checkIntervalSeconds: readPositiveInteger(
@@ -189,6 +330,10 @@ export function readFailoverConfig(env = {}) {
       env.NUTSNEWS_FAILOVER_CONTROLLER_STALE_AFTER_SECONDS,
       FAILOVER_CONTROLLER_STALE_AFTER_SECONDS,
     ),
+    liveOriginPropagationWindowSeconds: readPositiveInteger(
+      env.NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS,
+      FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS,
+    ),
   });
 }
 
@@ -204,6 +349,7 @@ export function createDefaultFailoverStatus(nowMs = Date.now(), config = readFai
     actualApexDnsTarget: "unknown",
     actualWwwDnsTarget: "unknown",
     observedDeploymentTarget: "unknown",
+    liveOriginReadiness: createDefaultLiveOriginReadiness(nowMs),
     lastHealthResult: "unknown",
     lastVpsCheckAt: null,
     lastVpsReachable: false,
@@ -241,6 +387,7 @@ export function sanitizeFailoverStatus(value, nowMs = Date.now(), config = readF
     actualApexDnsTarget: normalizeDnsTargetClassification(value.actualApexDnsTarget),
     actualWwwDnsTarget: normalizeDnsTargetClassification(value.actualWwwDnsTarget),
     observedDeploymentTarget: normalizeObservedDeploymentTarget(value.observedDeploymentTarget ?? "unknown"),
+    liveOriginReadiness: sanitizeLiveOriginReadiness(value.liveOriginReadiness, nowMs),
     lastHealthResult: normalizeHealthResult(value.lastHealthResult),
     lastVpsCheckAt: nullableIsoDateTime(value.lastVpsCheckAt),
     lastVpsReachable: normalizeBoolean(value.lastVpsReachable),
@@ -339,6 +486,46 @@ function deriveActiveTargetFromActual(apexTarget, wwwTarget, fallback) {
   }
 
   return fallback;
+}
+
+function deriveLiveOriginDnsState(status, liveOriginReadiness, nowMs, config) {
+  const observations = [
+    {
+      actual: status.actualApexDnsTarget,
+      observed: liveOriginReadiness.apex.origin,
+    },
+    {
+      actual: status.actualWwwDnsTarget,
+      observed: liveOriginReadiness.www.origin,
+    },
+  ];
+
+  if (observations.some(({ observed }) => observed === "unreachable")) {
+    return "unreachable";
+  }
+
+  const comparable = observations.filter(
+    ({ actual, observed }) => isOneOf(actual, FAILOVER_DNS_TARGETS) && isOneOf(observed, FAILOVER_DNS_TARGETS),
+  );
+
+  if (comparable.length === 0) {
+    return "unknown";
+  }
+
+  const hasMismatch = comparable.some(({ actual, observed }) => actual !== observed);
+
+  if (!hasMismatch) {
+    return comparable.length === observations.length ? "in_sync" : "partial";
+  }
+
+  const lastDnsChangeAtMs = Date.parse(String(status.lastDnsChangeAt || ""));
+  const propagationWindowMs = config.liveOriginPropagationWindowSeconds * 1000;
+
+  if (Number.isFinite(lastDnsChangeAtMs) && nowMs - lastDnsChangeAtMs <= propagationWindowMs) {
+    return "propagating";
+  }
+
+  return "mismatch";
 }
 
 export function isFailoverCheckDue(status, nowMs = Date.now()) {
@@ -511,6 +698,42 @@ export async function recordFailoverDnsReadback(
   });
 }
 
+export async function recordFailoverLiveOriginReadiness(
+  storage,
+  liveOriginReadiness,
+  { config = readFailoverConfig(), nowMs = Date.now() } = {},
+) {
+  return withStorageTransaction(storage, async (transaction) => {
+    const currentStatus = await readFailoverStatus(transaction, nowMs, config);
+    const checkedAt = toIsoDateTime(liveOriginReadiness.checkedAt, nowMs);
+    const sanitizedReadiness = sanitizeLiveOriginReadiness(liveOriginReadiness, nowMs);
+    const nextReadiness = Object.freeze({
+      ...sanitizedReadiness,
+      checkedAt,
+      dnsState: deriveLiveOriginDnsState(currentStatus, sanitizedReadiness, nowMs, config),
+    });
+    const nextStatus = {
+      ...currentStatus,
+      generatedAt: checkedAt,
+      liveOriginReadiness: nextReadiness,
+      stale: false,
+      staleReason: null,
+      controllerVersion: config.controllerVersion,
+    };
+    const derivedStatus = Object.freeze({
+      ...nextStatus,
+      controllerState: deriveControllerState(nextStatus),
+    });
+
+    assertNoSensitiveFailoverState(derivedStatus);
+    await storagePut(transaction, FAILOVER_STATUS_STORAGE_KEY, derivedStatus);
+
+    return Object.freeze({
+      status: derivedStatus,
+    });
+  });
+}
+
 export async function recordFailoverDnsAction(
   storage,
   action,
@@ -571,6 +794,10 @@ export function assertNoSensitiveFailoverState(value) {
     "vpsOriginIp",
     "authorization",
     "bearer ",
+    "cookie",
+    "set-cookie",
+    "cf-access-client-secret",
+    "cf-access-token",
     "x-vercel-protection-bypass",
   ]) {
     if (serialized.toLowerCase().includes(forbidden.toLowerCase())) {
