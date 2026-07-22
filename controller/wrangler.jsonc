@@ -9,6 +9,20 @@
   "observability": {
     "enabled": true
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FAILOVER_CONTROLLER_STATE",
+        "class_name": "FailoverControllerStateObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-failover-controller-state",
+      "new_sqlite_classes": ["FailoverControllerStateObject"]
+    }
+  ],
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
@@ -18,6 +32,9 @@
     "SHARD_WORKER_PREFIX": "nutsnews-worker",
     "SHARD_WORKER_SUBDOMAIN": "nutsnews",
     "MAX_AI_REVIEWS_PER_SHARD": "3",
-    "TRANSLATION_BACKLOG_ENABLED": "true"
+    "TRANSLATION_BACKLOG_ENABLED": "true",
+    "NUTSNEWS_FAILOVER_HEALTH_CHECK_INTERVAL_SECONDS": "15",
+    "NUTSNEWS_FAILOVER_CONSECUTIVE_VPS_FAILURES": "3",
+    "NUTSNEWS_FAILOVER_CONTROLLER_VERSION": "controller-failover-storage-v1"
   }
 }
