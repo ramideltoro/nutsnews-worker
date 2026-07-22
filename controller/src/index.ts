@@ -1,4 +1,5 @@
 import { logError, logInfo, logWarn } from "./logger";
+import { readCloudflareFailoverDnsState } from "./failoverDnsReadback.mjs";
 import {
   handleFailoverControllerHealthRequest,
   handleFailoverControllerStatusRequest,
@@ -12,6 +13,7 @@ import {
   readFailoverConfig,
   readFailoverStatus,
   recordFailoverDnsAction,
+  recordFailoverDnsReadback,
   recordFailoverHealthCheck,
 } from "./failoverState.mjs";
 
@@ -35,6 +37,16 @@ type Env = {
   NUTSNEWS_FAILOVER_CONTROLLER_STALE_AFTER_SECONDS?: string;
   NUTSNEWS_FAILOVER_STATUS_HMAC_SECRET?: string | SecretBinding;
   NUTSNEWS_FAILOVER_STATUS_SIGNATURE_TTL_SECONDS?: string;
+  NUTSNEWS_DNS_FAILOVER_DNS_API_TOKEN?: string | SecretBinding;
+  NUTSNEWS_DNS_FAILOVER_ZONE_ID?: string | SecretBinding;
+  NUTSNEWS_DNS_FAILOVER_RECORDS_JSON?: string | SecretBinding;
+  NUTSNEWS_DNS_FAILOVER_APEX_HOSTNAME?: string;
+  NUTSNEWS_DNS_FAILOVER_WWW_HOSTNAME?: string;
+  NUTSNEWS_DNS_FAILOVER_VPS_TARGET?: string;
+  NUTSNEWS_DNS_FAILOVER_VPS_TARGETS?: string;
+  NUTSNEWS_DNS_FAILOVER_VERCEL_TARGET?: string;
+  NUTSNEWS_DNS_FAILOVER_VERCEL_TARGETS?: string;
+  NUTSNEWS_DNS_FAILOVER_DNS_API_TIMEOUT_MS?: string;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
@@ -560,16 +572,29 @@ export class FailoverControllerStateObject {
       };
     }
 
-    const check = await checkVpsReadiness(this.env);
+    const [check, dnsReadback] = await Promise.all([
+      checkVpsReadiness(this.env),
+      readCloudflareFailoverDnsState(this.env, { nowMs }),
+    ]);
     const result = await recordFailoverHealthCheck(this.state.storage, check, {
       config,
       nowMs,
       source,
     });
+    const statusResult = dnsReadback.configured
+      ? await recordFailoverDnsReadback(this.state.storage, dnsReadback, {
+        config,
+        nowMs,
+      })
+      : result;
 
-    await scheduleNextFailoverAlarm(this.state.storage, result.status);
+    await scheduleNextFailoverAlarm(this.state.storage, statusResult.status);
 
-    return result;
+    return {
+      ...result,
+      status: statusResult.status,
+      dnsReadback,
+    };
   }
 }
 
