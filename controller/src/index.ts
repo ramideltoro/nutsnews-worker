@@ -1,5 +1,9 @@
 import { logError, logInfo, logWarn } from "./logger";
 import {
+  handleFailoverControllerHealthRequest,
+  handleFailoverControllerStatusRequest,
+} from "./failoverStatusEndpoint.mjs";
+import {
   FAILOVER_CONTROLLER_DURABLE_OBJECT_NAME,
   hasStoredFailoverStatus,
   isFailoverCheckDue,
@@ -28,6 +32,9 @@ type Env = {
   NUTSNEWS_FAILOVER_CONTROLLER_VERSION?: string;
   NUTSNEWS_FAILOVER_VPS_READINESS_URL?: string;
   NUTSNEWS_FAILOVER_VPS_READINESS_TIMEOUT_MS?: string;
+  NUTSNEWS_FAILOVER_CONTROLLER_STALE_AFTER_SECONDS?: string;
+  NUTSNEWS_FAILOVER_STATUS_HMAC_SECRET?: string | SecretBinding;
+  NUTSNEWS_FAILOVER_STATUS_SIGNATURE_TTL_SECONDS?: string;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
@@ -462,6 +469,38 @@ async function wakeFailoverStateOwner(
   }
 }
 
+async function readFailoverStatusSnapshot(env: Env) {
+  const stub = getFailoverStateStub(env);
+
+  if (!stub) {
+    return { ok: false, statusCode: 503, error: "failover_state_unbound" };
+  }
+
+  try {
+    const response = await stub.fetch("https://failover-controller.internal/internal/failover/state", {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      return { ok: false, statusCode: response.status, error: "failover_state_unavailable" };
+    }
+
+    const payload = await response.json() as { status?: unknown };
+
+    return { ok: true, status: payload.status };
+  } catch (error) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "failover_state_unavailable",
+      detail: serializeUnknown(error),
+    };
+  }
+}
+
 export class FailoverControllerStateObject {
   private state: DurableObjectState;
   private env: Env;
@@ -542,6 +581,16 @@ export default {
 
     if (url.pathname === "/favicon.ico") {
       return new Response(null, { status: 204 });
+    }
+
+    if (url.pathname === "/healthz") {
+      return handleFailoverControllerHealthRequest(request, env);
+    }
+
+    if (url.pathname === "/status") {
+      return handleFailoverControllerStatusRequest(request, env, {
+        readStatusSnapshot: () => readFailoverStatusSnapshot(env),
+      });
     }
 
     await logInfo(

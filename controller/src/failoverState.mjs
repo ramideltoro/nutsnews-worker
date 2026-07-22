@@ -185,6 +185,10 @@ export function readFailoverConfig(env = {}) {
       env.NUTSNEWS_FAILOVER_CONTROLLER_VERSION,
       "controller-failover-storage-v1",
     ),
+    staleAfterSeconds: readPositiveInteger(
+      env.NUTSNEWS_FAILOVER_CONTROLLER_STALE_AFTER_SECONDS,
+      FAILOVER_CONTROLLER_STALE_AFTER_SECONDS,
+    ),
   });
 }
 
@@ -260,6 +264,39 @@ export function sanitizeFailoverStatus(value, nowMs = Date.now(), config = readF
   });
 }
 
+export function applyFailoverStatusFreshness(status, nowMs = Date.now(), config = readFailoverConfig()) {
+  const staleAfterMs = config.staleAfterSeconds * 1000;
+  const generatedAtMs = Date.parse(String(status.generatedAt || ""));
+  const nextCheckDueMs = Date.parse(String(status.nextCheckDueAt || ""));
+  let staleReason = status.stale ? normalizeStaleReason(status.staleReason) ?? "status_update_overdue" : null;
+
+  if (Number.isFinite(generatedAtMs) && generatedAtMs - nowMs > staleAfterMs) {
+    staleReason = "clock_skew_detected";
+  } else if (Number.isFinite(generatedAtMs) && nowMs - generatedAtMs > staleAfterMs) {
+    staleReason = "status_update_overdue";
+  } else if (Number.isFinite(nextCheckDueMs) && nowMs - nextCheckDueMs > staleAfterMs) {
+    staleReason = "next_check_due_missed";
+  }
+
+  if (!staleReason) {
+    return status.stale || status.staleReason
+      ? Object.freeze({
+        ...status,
+        stale: false,
+        staleReason: null,
+        controllerState: deriveControllerState({ ...status, stale: false, staleReason: null }),
+      })
+      : status;
+  }
+
+  return Object.freeze({
+    ...status,
+    stale: true,
+    staleReason,
+    controllerState: "stale",
+  });
+}
+
 async function storageGet(storage, key) {
   return storage.get(key);
 }
@@ -277,7 +314,11 @@ async function withStorageTransaction(storage, callback) {
 }
 
 export async function readFailoverStatus(storage, nowMs = Date.now(), config = readFailoverConfig()) {
-  return sanitizeFailoverStatus(await storageGet(storage, FAILOVER_STATUS_STORAGE_KEY), nowMs, config);
+  return applyFailoverStatusFreshness(
+    sanitizeFailoverStatus(await storageGet(storage, FAILOVER_STATUS_STORAGE_KEY), nowMs, config),
+    nowMs,
+    config,
+  );
 }
 
 export async function hasStoredFailoverStatus(storage) {
