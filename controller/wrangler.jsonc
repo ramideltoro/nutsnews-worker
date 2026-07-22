@@ -13,6 +13,12 @@
       "head_sampling_rate": 1
     }
   },
+  "analytics_engine_datasets": [
+    {
+      "binding": "FAILOVER_ANALYTICS",
+      "dataset": "nutsnews_failover_controller"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -50,6 +56,7 @@
     "NUTSNEWS_FAILOVER_APEX_READINESS_URL": "https://nutsnews.com/readyz",
     "NUTSNEWS_FAILOVER_WWW_READINESS_URL": "https://www.nutsnews.com/readyz",
     "NUTSNEWS_FAILOVER_LIVE_ORIGIN_READINESS_TIMEOUT_MS": "5000",
-    "NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS": "300"
+    "NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS": "300",
+    "NUTSNEWS_FAILOVER_ANALYTICS_ENVIRONMENT": "production"
   }
 }

@@ -8,6 +8,10 @@ import {
   getFailoverHealthCheckLogLevel,
 } from "./failoverWorkersLogs.mjs";
 import {
+  writeFailoverDnsTargetChangeAnalytics,
+  writeFailoverHealthCheckAnalytics,
+} from "./failoverAnalyticsEngine.mjs";
+import {
   handleFailoverControllerHealthRequest,
   handleFailoverControllerStatusRequest,
 } from "./failoverStatusEndpoint.mjs";
@@ -59,6 +63,8 @@ type Env = {
   NUTSNEWS_FAILOVER_WWW_READINESS_URL?: string;
   NUTSNEWS_FAILOVER_LIVE_ORIGIN_READINESS_TIMEOUT_MS?: string;
   NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS?: string;
+  NUTSNEWS_FAILOVER_ANALYTICS_ENVIRONMENT?: string;
+  FAILOVER_ANALYTICS?: AnalyticsEngineDataset;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
@@ -585,9 +591,18 @@ export class FailoverControllerStateObject {
 
     if (request.method === "POST" && url.pathname === "/internal/failover/dns-action") {
       const body = await request.json().catch(() => ({}));
+      const dnsActionStartedAt = Date.now();
       const result = await recordFailoverDnsAction(this.state.storage, body, {
         config,
         nowMs: Date.now(),
+      });
+
+      writeFailoverDnsTargetChangeAnalytics(this.env, {
+        source: "dns_action",
+        status: result.status,
+        action: body,
+        duplicate: result.duplicate,
+        durationMs: Date.now() - dnsActionStartedAt,
       });
 
       return Response.json(result);
@@ -643,6 +658,11 @@ export class FailoverControllerStateObject {
     await scheduleNextFailoverAlarm(this.state.storage, liveOriginResult.status);
     await logFailoverHealthCheck(this.env, source, liveOriginResult.status);
     await logFailoverDnsDecision(this.env, source, liveOriginResult.status, dnsReadback);
+    writeFailoverHealthCheckAnalytics(this.env, {
+      source,
+      status: liveOriginResult.status,
+      dnsReadback,
+    });
 
     return {
       ...result,
