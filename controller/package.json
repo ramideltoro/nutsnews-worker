@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "test:failover-alerts": "node --test test/failover-alerts.test.mjs",
     "test:failover-dns-readback": "node --test test/failover-dns-readback.test.mjs",
     "test:failover-live-origin-readiness": "node --test test/failover-live-origin-readiness.test.mjs",
     "test:failover-status-endpoint": "node --test test/failover-status-endpoint.test.mjs",
