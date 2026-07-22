@@ -1,5 +1,6 @@
 import { logError, logInfo, logWarn } from "./logger";
 import { readCloudflareFailoverDnsState } from "./failoverDnsReadback.mjs";
+import { readLiveOriginReadinessState } from "./failoverLiveOriginReadiness.mjs";
 import {
   handleFailoverControllerHealthRequest,
   handleFailoverControllerStatusRequest,
@@ -15,6 +16,7 @@ import {
   recordFailoverDnsAction,
   recordFailoverDnsReadback,
   recordFailoverHealthCheck,
+  recordFailoverLiveOriginReadiness,
 } from "./failoverState.mjs";
 
 type SecretBinding = {
@@ -47,6 +49,10 @@ type Env = {
   NUTSNEWS_DNS_FAILOVER_VERCEL_TARGET?: string;
   NUTSNEWS_DNS_FAILOVER_VERCEL_TARGETS?: string;
   NUTSNEWS_DNS_FAILOVER_DNS_API_TIMEOUT_MS?: string;
+  NUTSNEWS_FAILOVER_APEX_READINESS_URL?: string;
+  NUTSNEWS_FAILOVER_WWW_READINESS_URL?: string;
+  NUTSNEWS_FAILOVER_LIVE_ORIGIN_READINESS_TIMEOUT_MS?: string;
+  NUTSNEWS_FAILOVER_LIVE_ORIGIN_PROPAGATION_WINDOW_SECONDS?: string;
   BETTER_STACK_SOURCE_TOKEN?: string | SecretBinding;
   BETTER_STACK_INGESTING_HOST?: string | SecretBinding;
 };
@@ -572,28 +578,38 @@ export class FailoverControllerStateObject {
       };
     }
 
-    const [check, dnsReadback] = await Promise.all([
+    const [check, dnsReadback, liveOriginReadiness] = await Promise.all([
       checkVpsReadiness(this.env),
       readCloudflareFailoverDnsState(this.env, { nowMs }),
+      readLiveOriginReadinessState(this.env, { nowMs }),
     ]);
     const result = await recordFailoverHealthCheck(this.state.storage, check, {
       config,
       nowMs,
       source,
     });
-    const statusResult = dnsReadback.configured
-      ? await recordFailoverDnsReadback(this.state.storage, dnsReadback, {
+    if (dnsReadback.configured) {
+      await recordFailoverDnsReadback(this.state.storage, dnsReadback, {
         config,
         nowMs,
-      })
-      : result;
+      });
+    }
+    const liveOriginResult = await recordFailoverLiveOriginReadiness(
+      this.state.storage,
+      liveOriginReadiness,
+      {
+        config,
+        nowMs,
+      },
+    );
 
-    await scheduleNextFailoverAlarm(this.state.storage, statusResult.status);
+    await scheduleNextFailoverAlarm(this.state.storage, liveOriginResult.status);
 
     return {
       ...result,
-      status: statusResult.status,
+      status: liveOriginResult.status,
       dnsReadback,
+      liveOriginReadiness,
     };
   }
 }
