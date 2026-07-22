@@ -333,6 +333,14 @@ export async function readFailoverCheckHistory(storage) {
   return Array.isArray(history) ? history.slice(0, FAILOVER_HISTORY_LIMIT) : [];
 }
 
+function deriveActiveTargetFromActual(apexTarget, wwwTarget, fallback) {
+  if (apexTarget === wwwTarget && isOneOf(apexTarget, FAILOVER_DNS_TARGETS)) {
+    return apexTarget;
+  }
+
+  return fallback;
+}
+
 export function isFailoverCheckDue(status, nowMs = Date.now()) {
   const nextCheckDueMs = Date.parse(String(status.nextCheckDueAt ?? ""));
 
@@ -349,10 +357,9 @@ function deriveControllerState(status) {
   }
 
   if (
-    status.actualApexDnsTarget !== "unknown" &&
-    status.actualWwwDnsTarget !== "unknown" &&
-    (status.actualApexDnsTarget !== status.activeDnsTarget ||
-      status.actualWwwDnsTarget !== status.activeDnsTarget)
+    [status.actualApexDnsTarget, status.actualWwwDnsTarget]
+      .filter((target) => target !== "unknown")
+      .some((target) => target !== status.desiredDnsTarget)
   ) {
     return "dns_drift";
   }
@@ -463,6 +470,43 @@ export async function recordFailoverHealthCheck(
       checked: true,
       status: nextStatus,
       history,
+    });
+  });
+}
+
+export async function recordFailoverDnsReadback(
+  storage,
+  readback,
+  { config = readFailoverConfig(), nowMs = Date.now() } = {},
+) {
+  return withStorageTransaction(storage, async (transaction) => {
+    const currentStatus = await readFailoverStatus(transaction, nowMs, config);
+    const checkedAt = toIsoDateTime(readback.checkedAt, nowMs);
+    const actualApexDnsTarget = normalizeDnsTargetClassification(readback.apexTarget);
+    const actualWwwDnsTarget = normalizeDnsTargetClassification(readback.wwwTarget);
+    const nextStatus = {
+      ...currentStatus,
+      generatedAt: checkedAt,
+      activeDnsTarget: deriveActiveTargetFromActual(
+        actualApexDnsTarget,
+        actualWwwDnsTarget,
+        currentStatus.activeDnsTarget,
+      ),
+      actualApexDnsTarget,
+      actualWwwDnsTarget,
+      stale: false,
+      staleReason: null,
+      controllerVersion: config.controllerVersion,
+    };
+    const derivedStatus = Object.freeze({
+      ...nextStatus,
+      controllerState: deriveControllerState(nextStatus),
+    });
+
+    await storagePut(transaction, FAILOVER_STATUS_STORAGE_KEY, derivedStatus);
+
+    return Object.freeze({
+      status: derivedStatus,
     });
   });
 }
