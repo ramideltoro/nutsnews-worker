@@ -13,12 +13,6 @@
       "head_sampling_rate": 1
     }
   },
-  "analytics_engine_datasets": [
-    {
-      "binding": "FAILOVER_ANALYTICS",
-      "dataset": "nutsnews_failover_controller"
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {

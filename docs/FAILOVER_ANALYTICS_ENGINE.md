@@ -4,6 +4,21 @@ The failover controller writes queryable health and DNS target-change metrics to
 
 Workers Analytics Engine creates the table after the first write. Cloudflare stores Analytics Engine data for three months. Writes use one index, seventeen blobs, and twelve doubles, below the documented limits of twenty blobs, twenty doubles, and one index per data point.
 
+## Activation Gate
+
+Cloudflare account-level Workers Analytics Engine must be enabled before the production controller can deploy with an Analytics Engine binding. Until that account feature is enabled, the controller skips metric writes because `FAILOVER_ANALYTICS` is unbound; this keeps failover decisions and deployments from depending on analytics ingestion.
+
+After enabling Workers Analytics Engine for the Cloudflare account, add this binding to `controller/wrangler.jsonc` and rerun `npx wrangler types`:
+
+```jsonc
+"analytics_engine_datasets": [
+  {
+    "binding": "FAILOVER_ANALYTICS",
+    "dataset": "nutsnews_failover_controller"
+  }
+]
+```
+
 ## Sampling Policy
 
 The controller uses `index1 = nutsnews-failover:<environment>` so failover metrics stay grouped by environment. The current 15-second health-check cadence is low volume, but operator queries still use `_sample_interval` because Workers Analytics Engine can sample at write or read time.
