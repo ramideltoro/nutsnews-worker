@@ -6,9 +6,11 @@ import {
   FAILOVER_FAILURE_THRESHOLD,
   FAILOVER_HISTORY_LIMIT,
   assertNoSensitiveFailoverState,
+  readFailoverAuditHistory,
   readFailoverCheckHistory,
   readFailoverConfig,
   readFailoverStatus,
+  recordFailoverAuditEvent,
   recordFailoverDnsAction,
   recordFailoverHealthCheck,
 } from "../src/failoverState.mjs";
@@ -310,4 +312,66 @@ test("manual lock state is persisted by DNS state actions", async () => {
   assert.equal(locked.status.controllerState, "manual_lock");
   assert.equal(status.manualLock, true);
   assert.equal(status.desiredDnsTarget, "vercel");
+});
+
+test("manual lock prevents automatic failback while health checks continue", async () => {
+  const storage = new MemoryStorage();
+  const changedAt = "2026-07-22T04:12:00.000Z";
+  const healthyAt = "2026-07-22T04:12:15.000Z";
+
+  await recordFailoverDnsAction(storage, {
+    idempotencyKey: "manual-lock-vercel",
+    changedAt,
+    activeDnsTarget: "vercel",
+    desiredDnsTarget: "vercel",
+    reason: "manual_lock_enabled",
+    manualLock: true,
+  }, {
+    config,
+    nowMs: Date.parse(changedAt),
+  });
+
+  const result = await recordFailoverHealthCheck(storage, reachableCheck(healthyAt), {
+    config,
+    nowMs: Date.parse(healthyAt),
+    source: "alarm",
+  });
+  const history = await readFailoverCheckHistory(storage);
+
+  assert.equal(result.checked, true);
+  assert.equal(result.status.lastVpsReachable, true);
+  assert.equal(result.status.manualLock, true);
+  assert.equal(result.status.desiredDnsTarget, "vercel");
+  assert.equal(result.status.controllerState, "manual_lock");
+  assert.equal(history.length, 1);
+});
+
+test("manual failover audit events persist safe actor, target, reason, and result", async () => {
+  const storage = new MemoryStorage();
+  const eventAt = "2026-07-22T04:13:00.000Z";
+
+  const result = await recordFailoverAuditEvent(storage, {
+    id: "audit-1",
+    idempotencyKey: "manual-action-1",
+    createdAt: eventAt,
+    actor: "Admin@Example.COM",
+    action: "force_dns_to_vercel",
+    previousTarget: "vps",
+    newTarget: "vercel",
+    reason: "Operator requested failover during VPS maintenance.",
+    result: "success",
+    message: "Cloudflare DNS verified on vercel.",
+    manualLock: false,
+  }, {
+    nowMs: Date.parse(eventAt),
+  });
+  const history = await readFailoverAuditHistory(storage);
+
+  assert.equal(result.auditEvent.actor, "admin@example.com");
+  assert.equal(result.auditEvent.previousTarget, "vps");
+  assert.equal(result.auditEvent.newTarget, "vercel");
+  assert.equal(result.auditEvent.result, "success");
+  assert.equal(history.length, 1);
+  assert.deepEqual(history[0], result.auditEvent);
+  assertNoSensitiveFailoverState(history);
 });

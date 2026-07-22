@@ -21,10 +21,15 @@ import {
   handleFailoverControllerStatusRequest,
 } from "./failoverStatusEndpoint.mjs";
 import {
+  executeManualFailoverAction,
+  handleFailoverControllerActionRequest,
+} from "./failoverManualActions.mjs";
+import {
   FAILOVER_CONTROLLER_DURABLE_OBJECT_NAME,
   hasStoredFailoverStatus,
   isFailoverCheckDue,
   normalizeObservedDeploymentTarget,
+  readFailoverAuditHistory,
   readFailoverCheckHistory,
   readFailoverConfig,
   readFailoverStatus,
@@ -54,6 +59,8 @@ type Env = {
   NUTSNEWS_FAILOVER_CONTROLLER_STALE_AFTER_SECONDS?: string;
   NUTSNEWS_FAILOVER_STATUS_HMAC_SECRET?: string | SecretBinding;
   NUTSNEWS_FAILOVER_STATUS_SIGNATURE_TTL_SECONDS?: string;
+  NUTSNEWS_FAILOVER_ACTION_HMAC_SECRET?: string | SecretBinding;
+  NUTSNEWS_FAILOVER_ACTION_SIGNATURE_TTL_SECONDS?: string;
   NUTSNEWS_DNS_FAILOVER_DNS_API_TOKEN?: string | SecretBinding;
   NUTSNEWS_DNS_FAILOVER_ZONE_ID?: string | SecretBinding;
   NUTSNEWS_DNS_FAILOVER_RECORDS_JSON?: string | SecretBinding;
@@ -583,6 +590,72 @@ async function readFailoverStatusSnapshot(env: Env) {
   }
 }
 
+async function readFailoverAuditSnapshot(env: Env) {
+  const stub = getFailoverStateStub(env);
+
+  if (!stub) {
+    return { ok: false, statusCode: 503, error: "failover_state_unbound" };
+  }
+
+  try {
+    const response = await stub.fetch("https://failover-controller.internal/internal/failover/audit", {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      return { ok: false, statusCode: response.status, error: "failover_audit_unavailable" };
+    }
+
+    const payload = await response.json() as { auditEvents?: unknown };
+
+    return {
+      ok: true,
+      auditEvents: Array.isArray(payload.auditEvents) ? payload.auditEvents : [],
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "failover_audit_unavailable",
+      detail: serializeUnknown(error),
+    };
+  }
+}
+
+async function performManualFailoverAction(env: Env, body: unknown) {
+  const stub = getFailoverStateStub(env);
+
+  if (!stub) {
+    return { ok: false, statusCode: 503, error: "failover_state_unbound", message: "Failover state storage is unavailable." };
+  }
+
+  try {
+    const response = await stub.fetch("https://failover-controller.internal/internal/failover/manual-action", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body ?? {}),
+    });
+    const payload = await response.json() as Record<string, unknown>;
+
+    return {
+      ...payload,
+      statusCode: response.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      statusCode: 503,
+      error: "manual_action_unavailable",
+      message: "Failover manual action runner is unavailable.",
+    };
+  }
+}
+
 export class FailoverControllerStateObject {
   private state: DurableObjectState;
   private env: Env;
@@ -608,6 +681,45 @@ export class FailoverControllerStateObject {
       const history = await readFailoverCheckHistory(this.state.storage);
 
       return Response.json({ status, history });
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/failover/audit") {
+      const auditEvents = await readFailoverAuditHistory(this.state.storage);
+
+      return Response.json({ auditEvents });
+    }
+
+    if (request.method === "POST" && url.pathname === "/internal/failover/manual-action") {
+      const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const actionStartedAt = Date.now();
+      const result = await executeManualFailoverAction(this.state.storage, this.env, body);
+
+      if (result.ok && result.status) {
+        writeFailoverDnsTargetChangeAnalytics(this.env, {
+          source: "manual_action",
+          status: result.status,
+          action: {
+            reason: result.status.lastDnsChangeReason,
+            source: "manual_action",
+            durationMs: Date.now() - actionStartedAt,
+          },
+          duplicate: result.result === "duplicate",
+          durationMs: Date.now() - actionStartedAt,
+        });
+        if (result.result !== "duplicate") {
+          await emitFailoverAlerts(this.env, this.state.storage, {
+            source: "manual_action",
+            status: result.status,
+            action: { reason: result.status.lastDnsChangeReason },
+            nowMs: Date.now(),
+            failoverConfig: config,
+          }, {
+            deliverAlert: deliverControllerFailoverAlert,
+          });
+        }
+      }
+
+      return Response.json(result, { status: result.statusCode || (result.ok ? 200 : 400) });
     }
 
     if (request.method === "POST" && url.pathname === "/internal/failover/dns-action") {
@@ -741,6 +853,13 @@ export default {
     if (url.pathname === "/status") {
       return handleFailoverControllerStatusRequest(request, env, {
         readStatusSnapshot: () => readFailoverStatusSnapshot(env),
+      });
+    }
+
+    if (url.pathname === "/actions" || url.pathname === "/actions/audit") {
+      return handleFailoverControllerActionRequest(request, env, {
+        readAuditSnapshot: () => readFailoverAuditSnapshot(env),
+        performManualAction: (body: unknown) => performManualFailoverAction(env, body),
       });
     }
 
