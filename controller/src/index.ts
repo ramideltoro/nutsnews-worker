@@ -577,9 +577,13 @@ async function readFailoverStatusSnapshot(env: Env) {
       return { ok: false, statusCode: response.status, error: "failover_state_unavailable" };
     }
 
-    const payload = await response.json() as { status?: unknown };
+    const payload = await response.json() as { status?: unknown; history?: unknown };
 
-    return { ok: true, status: payload.status };
+    return {
+      ok: true,
+      status: payload.status,
+      history: Array.isArray(payload.history) ? payload.history : [],
+    };
   } catch (error) {
     return {
       ok: false,

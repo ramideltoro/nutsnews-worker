@@ -91,6 +91,34 @@ const healthyVpsStatus = Object.freeze({
   controllerVersion: "test-controller-v1",
 });
 
+const healthyHistoryRow = Object.freeze({
+  checkedAt: "2026-07-22T04:19:55.000Z",
+  source: "scheduled_watchdog",
+  healthResult: "reachable",
+  vpsReachable: true,
+  vpsStatus: 200,
+  vpsLatencyMs: 42,
+  observedDeploymentTarget: "production-vps",
+  consecutiveVpsFailures: 0,
+  activeDnsTarget: "vps",
+  desiredDnsTarget: "vps",
+  errorCode: null,
+});
+
+const failedHistoryRow = Object.freeze({
+  checkedAt: "2026-07-22T04:19:40.000Z",
+  source: "manual_fetch",
+  healthResult: "timeout",
+  vpsReachable: false,
+  vpsStatus: "timeout",
+  vpsLatencyMs: 5000,
+  observedDeploymentTarget: "unknown",
+  consecutiveVpsFailures: 1,
+  activeDnsTarget: "vps",
+  desiredDnsTarget: "vps",
+  errorCode: "timeout",
+});
+
 async function signedRequest(path = "/status", method = "GET", signatureOverride = null) {
   const request = new Request(`https://controller.nutsnews.workers.dev${path}`, { method });
   const signature = signatureOverride ?? await createFailoverStatusSignature({
@@ -105,10 +133,10 @@ async function signedRequest(path = "/status", method = "GET", signatureOverride
   return request;
 }
 
-async function statusResponse(status, request = null, customEnv = env) {
+async function statusResponse(status, request = null, customEnv = env, snapshot = {}) {
   return handleFailoverControllerStatusRequest(request ?? await signedRequest(), customEnv, {
     nowMs,
-    readStatusSnapshot: async () => ({ ok: true, status }),
+    readStatusSnapshot: async () => ({ ok: true, status, ...snapshot }),
   });
 }
 
@@ -165,10 +193,76 @@ test("GET /status returns the public-safe healthy VPS-primary status contract", 
   const payload = await readJson(response);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(payload, healthyVpsStatus);
+  assert.deepEqual(payload, { ...healthyVpsStatus, healthHistory: [] });
   assert.equal(response.headers.get("x-nutsnews-failover-status-mode"), "dashboard");
   assert.equal(response.headers.get("cache-control")?.includes("no-store"), true);
   assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status exposes recent public-safe health history", async () => {
+  const response = await statusResponse(healthyVpsStatus, null, env, {
+    history: [
+      {
+        ...healthyHistoryRow,
+        source: "SCHEDULED_WATCHDOG",
+        errorCode: "do-not-leak-sentinel-token",
+      },
+      failedHistoryRow,
+      {
+        checkedAt: "not-a-date",
+        source: "cloudflareApiToken",
+        healthResult: "reachable",
+      },
+    ],
+  });
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.healthHistory, [
+    {
+      ...healthyHistoryRow,
+      source: "scheduled_watchdog",
+      errorCode: null,
+    },
+    failedHistoryRow,
+  ]);
+  assert.equal(JSON.stringify(payload).includes("do-not-leak"), false);
+  assert.equal(JSON.stringify(payload).includes("cloudflareApiToken"), false);
+  assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status returns empty health history when controller has no recent rows", async () => {
+  const response = await statusResponse(healthyVpsStatus, null, env, { history: [] });
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.healthHistory, []);
+  assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status returns empty health history for old snapshots that omit history", async () => {
+  const response = await statusResponse(healthyVpsStatus);
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.healthHistory, []);
+  assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status reports unavailable history when failover state cannot be read", async () => {
+  const response = await handleFailoverControllerStatusRequest(await signedRequest(), env, {
+    nowMs,
+    readStatusSnapshot: async () => ({
+      ok: false,
+      statusCode: 503,
+      error: "failover_state_unavailable",
+    }),
+  });
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 503);
+  assert.equal(payload.error, "failover_state_unavailable");
+  assert.equal(Object.hasOwn(payload, "healthHistory"), false);
 });
 
 test("GET /status reports stale controller state from old generatedAt timestamps", async () => {

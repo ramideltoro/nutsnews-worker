@@ -1,4 +1,9 @@
 import {
+  FAILOVER_DNS_TARGET_CLASSIFICATIONS,
+  FAILOVER_HEALTH_RESULTS,
+  FAILOVER_HISTORY_LIMIT,
+  FAILOVER_OBSERVED_DEPLOYMENT_TARGETS,
+  FAILOVER_VPS_STATUS_CODES,
   applyFailoverStatusFreshness,
   assertNoSensitiveFailoverState,
   readFailoverConfig,
@@ -180,6 +185,113 @@ function getStatusMode(request) {
   return mode === "dashboard" ? "dashboard" : null;
 }
 
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOneOf(value, allowed) {
+  return allowed.includes(value);
+}
+
+function nullableIsoDateTime(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const parsed = Date.parse(String(value));
+
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function normalizeNumber(value, fallback, minimum = 0) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed < minimum) {
+    return fallback;
+  }
+
+  return Math.floor(parsed);
+}
+
+function normalizeHistorySource(value) {
+  const candidate = clean(value).toLowerCase();
+
+  return /^[a-z][a-z0-9_:-]{1,63}$/.test(candidate) ? candidate : "unknown";
+}
+
+function normalizeHistoryCode(value) {
+  const candidate = clean(value).toLowerCase();
+
+  return /^[a-z][a-z0-9_]{1,63}$/.test(candidate) ? candidate : null;
+}
+
+function normalizeHistoryTarget(value) {
+  return isOneOf(value, FAILOVER_DNS_TARGET_CLASSIFICATIONS) ? value : "unknown";
+}
+
+function normalizeHistoryHealthResult(value) {
+  return isOneOf(value, FAILOVER_HEALTH_RESULTS) ? value : "unknown";
+}
+
+function normalizeHistoryObservedDeploymentTarget(value) {
+  return isOneOf(value, FAILOVER_OBSERVED_DEPLOYMENT_TARGETS) ? value : "unexpected";
+}
+
+function normalizeHistoryVpsStatus(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) {
+    return value;
+  }
+
+  return isOneOf(value, FAILOVER_VPS_STATUS_CODES) ? value : "network_error";
+}
+
+function sanitizeHealthHistoryRow(value) {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const checkedAt = nullableIsoDateTime(value.checkedAt);
+  if (!checkedAt) {
+    return null;
+  }
+
+  const healthResult = normalizeHistoryHealthResult(value.healthResult);
+  const fallbackErrorCode = healthResult === "reachable" || healthResult === "unknown" ? null : healthResult;
+
+  return Object.freeze({
+    checkedAt,
+    source: normalizeHistorySource(value.source),
+    healthResult,
+    vpsReachable: typeof value.vpsReachable === "boolean"
+      ? value.vpsReachable
+      : healthResult === "reachable",
+    vpsStatus: normalizeHistoryVpsStatus(value.vpsStatus),
+    vpsLatencyMs: value.vpsLatencyMs === null || value.vpsLatencyMs === undefined
+      ? null
+      : normalizeNumber(value.vpsLatencyMs, null),
+    observedDeploymentTarget: normalizeHistoryObservedDeploymentTarget(value.observedDeploymentTarget),
+    consecutiveVpsFailures: normalizeNumber(value.consecutiveVpsFailures, 0),
+    activeDnsTarget: normalizeHistoryTarget(value.activeDnsTarget),
+    desiredDnsTarget: normalizeHistoryTarget(value.desiredDnsTarget),
+    errorCode: normalizeHistoryCode(value.errorCode) ?? fallbackErrorCode,
+  });
+}
+
+function sanitizeHealthHistory(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((row) => sanitizeHealthHistoryRow(row))
+    .filter((row) => row !== null)
+    .slice(0, FAILOVER_HISTORY_LIMIT);
+}
+
 function toDashboardStatus(value, env, nowMs) {
   const config = readFailoverConfig(env);
   const status = applyFailoverStatusFreshness(
@@ -233,8 +345,14 @@ export async function handleFailoverControllerStatusRequest(request, env, option
       { status: snapshot?.statusCode || 503 },
     );
   }
+  const payload = Object.freeze({
+    ...toDashboardStatus(snapshot.status, env, nowMs),
+    healthHistory: sanitizeHealthHistory(snapshot.history),
+  });
 
-  return Response.json(toDashboardStatus(snapshot.status, env, nowMs), {
+  assertNoSensitiveFailoverState(payload);
+
+  return Response.json(payload, {
     headers: noStoreHeaders({
       "X-NutsNews-Failover-Status-Mode": mode,
       "Vary": `${FAILOVER_STATUS_SIGNATURE_HEADER}, ${FAILOVER_STATUS_TIMESTAMP_HEADER}`,
