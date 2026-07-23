@@ -81,6 +81,15 @@ function readinessResponse({
   );
 }
 
+function redirectResponse(location, status = 308) {
+  return new Response(null, {
+    status,
+    headers: {
+      Location: location,
+    },
+  });
+}
+
 function fetchReadinessByHost(recordsByHost) {
   const requests = [];
   const fetchImpl = async (url, init) => {
@@ -147,6 +156,59 @@ test("records cache-busted apex and www live readiness serving VPS", async () =>
   assert.equal(updated.status.liveOriginReadiness.apex.sideEffectsMode, "enabled");
   assert.equal(updated.status.liveOriginReadiness.apex.databaseProviderMode, "backend_postgres_primary");
   assert.equal(updated.status.liveOriginReadiness.apex.cacheState, "fresh");
+  assertNoSensitiveFailoverState(updated.status);
+});
+
+test("records safe apex canonical readiness redirects as healthy www readiness", async () => {
+  const { fetchImpl, requests } = fetchReadinessByHost({
+    "nutsnews.com": () => redirectResponse("https://www.nutsnews.com/readyz"),
+    "www.nutsnews.com": () => readinessResponse({ deploymentTarget: "production-vps" }),
+  });
+  const liveReadiness = await readLiveOriginReadinessState(baseEnv, {
+    fetchImpl,
+    nowMs,
+    cacheBustToken: "test-cache-bust",
+  });
+  const storage = new MemoryStorage();
+  await persistDnsTargets(storage, "vps", "vps");
+  const updated = await recordFailoverLiveOriginReadiness(storage, liveReadiness, { config, nowMs });
+  const requestedHosts = requests.map((request) => new URL(String(request.url)).hostname);
+
+  assert.equal(requests.length, 3);
+  assert.equal(requestedHosts.filter((hostname) => hostname === "nutsnews.com").length, 1);
+  assert.equal(requestedHosts.filter((hostname) => hostname === "www.nutsnews.com").length, 2);
+  assert.ok(requests.every((request) => new URL(String(request.url)).searchParams.has("nutsnews-failover-readiness")));
+  assert.equal(updated.status.liveOriginReadiness.dnsState, "in_sync");
+  assert.equal(updated.status.liveOriginReadiness.apex.hostname, "nutsnews.com");
+  assert.equal(updated.status.liveOriginReadiness.apex.ok, true);
+  assert.equal(updated.status.liveOriginReadiness.apex.origin, "vps");
+  assert.equal(updated.status.liveOriginReadiness.apex.status, 200);
+  assert.equal(updated.status.liveOriginReadiness.apex.error, null);
+  assert.equal(updated.status.liveOriginReadiness.www.ok, true);
+  assertNoSensitiveFailoverState(updated.status);
+});
+
+test("keeps noncanonical apex readiness redirects as HTTP failures", async () => {
+  const { fetchImpl, requests } = fetchReadinessByHost({
+    "nutsnews.com": () => redirectResponse("https://status.example.invalid/readyz"),
+    "www.nutsnews.com": () => readinessResponse({ deploymentTarget: "production-vps" }),
+  });
+  const liveReadiness = await readLiveOriginReadinessState(baseEnv, {
+    fetchImpl,
+    nowMs,
+    cacheBustToken: "test-cache-bust",
+  });
+  const storage = new MemoryStorage();
+  await persistDnsTargets(storage, "vps", "vps");
+  const updated = await recordFailoverLiveOriginReadiness(storage, liveReadiness, { config, nowMs });
+
+  assert.equal(requests.length, 2);
+  assert.equal(updated.status.liveOriginReadiness.dnsState, "partial");
+  assert.equal(updated.status.liveOriginReadiness.apex.ok, false);
+  assert.equal(updated.status.liveOriginReadiness.apex.origin, "unknown");
+  assert.equal(updated.status.liveOriginReadiness.apex.status, 308);
+  assert.equal(updated.status.liveOriginReadiness.apex.error, "http_status_unreachable");
+  assert.equal(updated.status.liveOriginReadiness.www.ok, true);
   assertNoSensitiveFailoverState(updated.status);
 });
 

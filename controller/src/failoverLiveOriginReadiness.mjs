@@ -40,6 +40,21 @@ function withCacheBust(rawUrl, cacheBustToken) {
   return url.toString();
 }
 
+function readinessRequestOptions(signal) {
+  return {
+    method: "GET",
+    redirect: "manual",
+    headers: {
+      "Accept": "application/json",
+      "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
+      "Pragma": "no-cache",
+      "User-Agent": "NutsNewsFailoverController/1.0",
+      "X-NutsNews-Failover-Readiness": "live-origin",
+    },
+    signal,
+  };
+}
+
 function sanitizeText(value, fallback = "unknown") {
   const candidate = clean(value);
 
@@ -147,6 +162,37 @@ function emptyObservation(hostname, checkedAt, error, latencyMs) {
   });
 }
 
+function getSafeCanonicalApexRedirectUrl(response, requestUrl, config) {
+  if (response.status !== 308) {
+    return null;
+  }
+
+  const location = clean(response.headers.get("location"));
+
+  if (!location) {
+    return null;
+  }
+
+  try {
+    const redirectUrl = new URL(location, requestUrl);
+    const expectedUrl = new URL(config.wwwUrl);
+
+    if (
+      redirectUrl.protocol === "https:" &&
+      !redirectUrl.username &&
+      !redirectUrl.password &&
+      redirectUrl.origin === expectedUrl.origin &&
+      redirectUrl.pathname === expectedUrl.pathname
+    ) {
+      return redirectUrl.toString();
+    }
+  } catch {
+    // Fall through to preserving the original HTTP failure.
+  }
+
+  return null;
+}
+
 async function checkLiveOriginReadiness(config, key, options) {
   const checkedAt = new Date(options.nowMs ?? Date.now()).toISOString();
   const startedAt = Date.now();
@@ -158,18 +204,19 @@ async function checkLiveOriginReadiness(config, key, options) {
   const fetchImpl = options.fetchImpl ?? fetch;
 
   try {
-    const response = await fetchImpl(requestUrl, {
-      method: "GET",
-      redirect: "manual",
-      headers: {
-        "Accept": "application/json",
-        "Cache-Control": "no-store, no-cache, max-age=0, must-revalidate",
-        "Pragma": "no-cache",
-        "User-Agent": "NutsNewsFailoverController/1.0",
-        "X-NutsNews-Failover-Readiness": "live-origin",
-      },
-      signal: controller.signal,
-    });
+    let response = await fetchImpl(requestUrl, readinessRequestOptions(controller.signal));
+
+    if (key === "apex") {
+      const canonicalRedirectUrl = getSafeCanonicalApexRedirectUrl(response, requestUrl, config);
+
+      if (canonicalRedirectUrl) {
+        response = await fetchImpl(
+          withCacheBust(canonicalRedirectUrl, options.cacheBustToken ?? `${options.nowMs ?? startedAt}`),
+          readinessRequestOptions(controller.signal),
+        );
+      }
+    }
+
     const latencyMs = Math.max(0, Date.now() - startedAt);
     const payload = await parseReadinessPayload(response);
     const deploymentTarget = sanitizeText(
