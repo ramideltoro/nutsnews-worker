@@ -1,4 +1,6 @@
 import {
+  FAILOVER_DNS_HISTORY_ACTIONS,
+  FAILOVER_DNS_HISTORY_RESULTS,
   FAILOVER_DNS_TARGET_CLASSIFICATIONS,
   FAILOVER_HEALTH_RESULTS,
   FAILOVER_HISTORY_LIMIT,
@@ -229,6 +231,14 @@ function normalizeHistoryTarget(value) {
   return isOneOf(value, FAILOVER_DNS_TARGET_CLASSIFICATIONS) ? value : "unknown";
 }
 
+function normalizeHistoryDnsAction(value) {
+  return isOneOf(value, FAILOVER_DNS_HISTORY_ACTIONS) ? value : "no_op";
+}
+
+function normalizeHistoryDnsResult(value) {
+  return isOneOf(value, FAILOVER_DNS_HISTORY_RESULTS) ? value : "unknown";
+}
+
 function normalizeHistoryHealthResult(value) {
   return isOneOf(value, FAILOVER_HEALTH_RESULTS) ? value : "unknown";
 }
@@ -292,6 +302,42 @@ function sanitizeHealthHistory(value) {
     .slice(0, FAILOVER_HISTORY_LIMIT);
 }
 
+function sanitizeDnsHistoryRow(value) {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const changedAt = nullableIsoDateTime(value.changedAt);
+  if (!changedAt) {
+    return null;
+  }
+
+  return Object.freeze({
+    changedAt,
+    dnsAction: normalizeHistoryDnsAction(value.dnsAction),
+    previousTarget: normalizeHistoryTarget(value.previousTarget),
+    newTarget: normalizeHistoryTarget(value.newTarget),
+    activeDnsTarget: normalizeHistoryTarget(value.activeDnsTarget),
+    desiredDnsTarget: normalizeHistoryTarget(value.desiredDnsTarget),
+    actualApexDnsTarget: normalizeHistoryTarget(value.actualApexDnsTarget),
+    actualWwwDnsTarget: normalizeHistoryTarget(value.actualWwwDnsTarget),
+    result: normalizeHistoryDnsResult(value.result),
+    skipReason: normalizeHistoryCode(value.skipReason),
+    errorCode: normalizeHistoryCode(value.errorCode),
+  });
+}
+
+function sanitizeDnsHistory(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((row) => sanitizeDnsHistoryRow(row))
+    .filter((row) => row !== null)
+    .slice(0, FAILOVER_HISTORY_LIMIT);
+}
+
 function toDashboardStatus(value, env, nowMs) {
   const config = readFailoverConfig(env);
   const status = applyFailoverStatusFreshness(
@@ -348,6 +394,7 @@ export async function handleFailoverControllerStatusRequest(request, env, option
   const payload = Object.freeze({
     ...toDashboardStatus(snapshot.status, env, nowMs),
     healthHistory: sanitizeHealthHistory(snapshot.history),
+    dnsHistory: sanitizeDnsHistory(snapshot.dnsHistory),
   });
 
   assertNoSensitiveFailoverState(payload);

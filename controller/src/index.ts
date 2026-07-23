@@ -31,6 +31,7 @@ import {
   normalizeObservedDeploymentTarget,
   readFailoverAuditHistory,
   readFailoverCheckHistory,
+  readFailoverDnsHistory,
   readFailoverConfig,
   readFailoverStatus,
   recordFailoverDnsAction,
@@ -577,12 +578,13 @@ async function readFailoverStatusSnapshot(env: Env) {
       return { ok: false, statusCode: response.status, error: "failover_state_unavailable" };
     }
 
-    const payload = await response.json() as { status?: unknown; history?: unknown };
+    const payload = await response.json() as { status?: unknown; history?: unknown; dnsHistory?: unknown };
 
     return {
       ok: true,
       status: payload.status,
       history: Array.isArray(payload.history) ? payload.history : [],
+      dnsHistory: Array.isArray(payload.dnsHistory) ? payload.dnsHistory : [],
     };
   } catch (error) {
     return {
@@ -683,8 +685,9 @@ export class FailoverControllerStateObject {
     if (request.method === "GET" && url.pathname === "/internal/failover/state") {
       const status = await readFailoverStatus(this.state.storage, Date.now(), config);
       const history = await readFailoverCheckHistory(this.state.storage);
+      const dnsHistory = await readFailoverDnsHistory(this.state.storage);
 
-      return Response.json({ status, history });
+      return Response.json({ status, history, dnsHistory });
     }
 
     if (request.method === "GET" && url.pathname === "/internal/failover/audit") {

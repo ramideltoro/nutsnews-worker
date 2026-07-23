@@ -8,10 +8,12 @@ import {
   assertNoSensitiveFailoverState,
   readFailoverAuditHistory,
   readFailoverCheckHistory,
+  readFailoverDnsHistory,
   readFailoverConfig,
   readFailoverStatus,
   recordFailoverAuditEvent,
   recordFailoverDnsAction,
+  recordFailoverDnsReadback,
   recordFailoverHealthCheck,
 } from "../src/failoverState.mjs";
 
@@ -255,6 +257,98 @@ test("DNS action records are idempotent by action key", async () => {
   assert.equal(duplicateAction.duplicate, true);
   assert.equal(duplicateAction.status.activeDnsTarget, "vercel");
   assert.equal(duplicateAction.status.lastDnsChangeReason, "failover_to_vercel");
+});
+
+test("DNS history records readback decisions and manual DNS actions safely", async () => {
+  const storage = new MemoryStorage();
+  const noOpAt = "2026-07-22T04:09:00.000Z";
+  const driftAt = "2026-07-22T04:09:15.000Z";
+  const errorAt = "2026-07-22T04:09:30.000Z";
+  const failureStartAt = "2026-07-22T04:09:45.000Z";
+  const pendingFailoverAt = "2026-07-22T04:10:30.000Z";
+  const manualAt = "2026-07-22T04:10:45.000Z";
+
+  await recordFailoverDnsReadback(storage, {
+    checkedAt: noOpAt,
+    ok: true,
+    apexTarget: "vps",
+    wwwTarget: "vps",
+  }, {
+    config,
+    nowMs: Date.parse(noOpAt),
+  });
+  await recordFailoverDnsReadback(storage, {
+    checkedAt: driftAt,
+    ok: true,
+    apexTarget: "vercel",
+    wwwTarget: "vps",
+  }, {
+    config,
+    nowMs: Date.parse(driftAt),
+  });
+  await recordFailoverDnsReadback(storage, {
+    checkedAt: errorAt,
+    ok: false,
+    error: "cloudflare_dns_api_error",
+    apexTarget: "unknown",
+    wwwTarget: "unknown",
+    cloudflareApiToken: "do-not-leak-token",
+  }, {
+    config,
+    nowMs: Date.parse(errorAt),
+  });
+
+  for (let index = 0; index < FAILOVER_FAILURE_THRESHOLD; index += 1) {
+    const checkedAt = new Date(Date.parse(failureStartAt) + index * 15_000).toISOString();
+    await recordFailoverHealthCheck(storage, failureCheck(checkedAt), {
+      config,
+      force: index === 0,
+      nowMs: Date.parse(checkedAt),
+      source: "alarm",
+    });
+  }
+
+  await recordFailoverDnsReadback(storage, {
+    checkedAt: pendingFailoverAt,
+    ok: true,
+    apexTarget: "vps",
+    wwwTarget: "vps",
+  }, {
+    config,
+    nowMs: Date.parse(pendingFailoverAt),
+  });
+  await recordFailoverDnsAction(storage, {
+    idempotencyKey: "manual-dns-history-1",
+    changedAt: manualAt,
+    activeDnsTarget: "vercel",
+    desiredDnsTarget: "vercel",
+    reason: "manual_failover_to_vercel",
+  }, {
+    config,
+    nowMs: Date.parse(manualAt),
+  });
+
+  const history = await readFailoverDnsHistory(storage);
+
+  assert.deepEqual(history.map((row) => row.dnsAction), [
+    "manual_failover_to_vercel",
+    "failover_to_vercel",
+    "dns_api_error",
+    "drift_detected",
+    "no_op",
+  ]);
+  assert.equal(history[0].result, "success");
+  assert.equal(history[0].previousTarget, "vps");
+  assert.equal(history[0].newTarget, "vercel");
+  assert.equal(history[1].result, "skipped");
+  assert.equal(history[1].skipReason, "dns_write_not_implemented_for_observation_only_controller");
+  assert.equal(history[2].result, "failed");
+  assert.equal(history[2].errorCode, "cloudflare_dns_api_error");
+  assert.equal(history[3].skipReason, "actual_dns_target_differs_from_desired_target");
+  assert.equal(history[4].result, "success");
+  assert.equal(history[4].skipReason, "active_dns_target_matches_desired_target");
+  assert.equal(JSON.stringify(history).includes("do-not-leak"), false);
+  assertNoSensitiveFailoverState(history);
 });
 
 test("concurrent duplicate DNS actions persist one state transition", async () => {

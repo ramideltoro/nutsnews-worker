@@ -2,6 +2,7 @@ export const FAILOVER_STATUS_SCHEMA_VERSION = "nutsnews.failover.status.v1";
 export const FAILOVER_CONTROLLER_DURABLE_OBJECT_NAME = "production-failover-controller-state";
 export const FAILOVER_STATUS_STORAGE_KEY = "failover.status.v1";
 export const FAILOVER_HISTORY_STORAGE_KEY = "failover.check_history.v1";
+export const FAILOVER_DNS_HISTORY_STORAGE_KEY = "failover.dns_history.v1";
 export const FAILOVER_DNS_ACTION_KEYS_STORAGE_KEY = "failover.dns_action_keys.v1";
 export const FAILOVER_AUDIT_STORAGE_KEY = "failover.audit_events.v1";
 
@@ -67,6 +68,29 @@ export const FAILOVER_DNS_ACTIONS = Object.freeze([
   "manual_lock_disabled",
   "reconcile_dns_to_vps",
   "reconcile_dns_to_vercel",
+]);
+export const FAILOVER_DNS_HISTORY_ACTIONS = Object.freeze([
+  "no_op",
+  "dns_readback",
+  "failover_to_vercel",
+  "failback_to_vps",
+  "manual_failover_to_vercel",
+  "manual_failback_to_vps",
+  "manual_lock_enabled",
+  "manual_lock_disabled",
+  "manual_lock_skip",
+  "dns_api_error",
+  "drift_detected",
+  "reconcile_dns_to_vps",
+  "reconcile_dns_to_vercel",
+]);
+export const FAILOVER_DNS_HISTORY_RESULTS = Object.freeze([
+  "success",
+  "failed",
+  "skipped",
+  "refused",
+  "duplicate",
+  "unknown",
 ]);
 export const FAILOVER_MANUAL_ACTIONS = Object.freeze([
   "enable_manual_lock",
@@ -204,12 +228,26 @@ function normalizeDnsAction(value, fallback = "none") {
   return isOneOf(value, FAILOVER_DNS_ACTIONS) ? value : fallback;
 }
 
+function normalizeDnsHistoryAction(value, fallback = "no_op") {
+  return isOneOf(value, FAILOVER_DNS_HISTORY_ACTIONS) ? value : fallback;
+}
+
+function normalizeDnsHistoryResult(value, fallback = "unknown") {
+  return isOneOf(value, FAILOVER_DNS_HISTORY_RESULTS) ? value : fallback;
+}
+
 function normalizeManualAction(value, fallback = "force_dns_to_vercel") {
   return isOneOf(value, FAILOVER_MANUAL_ACTIONS) ? value : fallback;
 }
 
 function normalizeAuditResult(value, fallback = "failed") {
   return isOneOf(value, FAILOVER_AUDIT_RESULTS) ? value : fallback;
+}
+
+function normalizeHistoryCode(value, fallback = null) {
+  const candidate = clean(value).toLowerCase();
+
+  return /^[a-z][a-z0-9_]{1,63}$/.test(candidate) ? candidate : fallback;
 }
 
 function normalizeStaleReason(value) {
@@ -518,6 +556,12 @@ export async function readFailoverCheckHistory(storage) {
   return Array.isArray(history) ? history.slice(0, FAILOVER_HISTORY_LIMIT) : [];
 }
 
+export async function readFailoverDnsHistory(storage) {
+  const history = await storageGet(storage, FAILOVER_DNS_HISTORY_STORAGE_KEY);
+
+  return Array.isArray(history) ? history.slice(0, FAILOVER_HISTORY_LIMIT) : [];
+}
+
 export async function readFailoverAuditHistory(storage) {
   const history = await storageGet(storage, FAILOVER_AUDIT_STORAGE_KEY);
 
@@ -614,6 +658,12 @@ function appendHistory(history, row) {
   return [row, ...history].slice(0, FAILOVER_HISTORY_LIMIT);
 }
 
+function hasDnsDrift(status) {
+  return [status.actualApexDnsTarget, status.actualWwwDnsTarget]
+    .filter((target) => target !== "unknown")
+    .some((target) => target !== status.desiredDnsTarget);
+}
+
 function createHistoryRow(status, check, source) {
   return Object.freeze({
     checkedAt: status.lastVpsCheckAt,
@@ -626,6 +676,75 @@ function createHistoryRow(status, check, source) {
     activeDnsTarget: status.activeDnsTarget,
     desiredDnsTarget: status.desiredDnsTarget,
     source: clean(source || check.source || "unknown").slice(0, 64),
+  });
+}
+
+function deriveDnsReadbackHistoryDecision(status, readback) {
+  if (status.manualLock) {
+    return {
+      dnsAction: "manual_lock_skip",
+      result: "skipped",
+      skipReason: "manual_lock_enabled",
+      errorCode: null,
+    };
+  }
+
+  if (readback?.ok !== true) {
+    return {
+      dnsAction: "dns_api_error",
+      result: "failed",
+      skipReason: "dns_readback_failed",
+      errorCode: normalizeHistoryCode(readback?.error || "cloudflare_dns_api_error", "cloudflare_dns_api_error"),
+    };
+  }
+
+  if (status.desiredDnsTarget !== status.activeDnsTarget && isOneOf(status.desiredDnsTarget, FAILOVER_DNS_TARGETS)) {
+    return {
+      dnsAction: status.desiredDnsTarget === "vercel" ? "failover_to_vercel" : "failback_to_vps",
+      result: "skipped",
+      skipReason: "dns_write_not_implemented_for_observation_only_controller",
+      errorCode: null,
+    };
+  }
+
+  if (hasDnsDrift(status)) {
+    return {
+      dnsAction: "drift_detected",
+      result: "skipped",
+      skipReason: "actual_dns_target_differs_from_desired_target",
+      errorCode: null,
+    };
+  }
+
+  return {
+    dnsAction: "no_op",
+    result: "success",
+    skipReason: "active_dns_target_matches_desired_target",
+    errorCode: null,
+  };
+}
+
+function createDnsHistoryRow(status, {
+  changedAt = status.generatedAt,
+  previousTarget = status.activeDnsTarget,
+  newTarget = status.activeDnsTarget,
+  dnsAction = "no_op",
+  result = "unknown",
+  skipReason = null,
+  errorCode = null,
+} = {}) {
+  return Object.freeze({
+    changedAt,
+    dnsAction: normalizeDnsHistoryAction(dnsAction),
+    previousTarget: normalizeDnsTargetClassification(previousTarget),
+    newTarget: normalizeDnsTargetClassification(newTarget),
+    activeDnsTarget: normalizeDnsTargetClassification(status.activeDnsTarget),
+    desiredDnsTarget: normalizeDnsTargetClassification(status.desiredDnsTarget),
+    actualApexDnsTarget: normalizeDnsTargetClassification(status.actualApexDnsTarget),
+    actualWwwDnsTarget: normalizeDnsTargetClassification(status.actualWwwDnsTarget),
+    result: normalizeDnsHistoryResult(result),
+    skipReason: normalizeHistoryCode(skipReason),
+    errorCode: normalizeHistoryCode(errorCode),
   });
 }
 
@@ -733,11 +852,23 @@ export async function recordFailoverDnsReadback(
       ...nextStatus,
       controllerState: deriveControllerState(nextStatus),
     });
+    const decision = deriveDnsReadbackHistoryDecision(derivedStatus, readback);
+    const history = appendHistory(
+      await readFailoverDnsHistory(transaction),
+      createDnsHistoryRow(derivedStatus, {
+        changedAt: checkedAt,
+        previousTarget: currentStatus.activeDnsTarget,
+        newTarget: derivedStatus.activeDnsTarget,
+        ...decision,
+      }),
+    );
 
     await storagePut(transaction, FAILOVER_STATUS_STORAGE_KEY, derivedStatus);
+    await storagePut(transaction, FAILOVER_DNS_HISTORY_STORAGE_KEY, history);
 
     return Object.freeze({
       status: derivedStatus,
+      history,
     });
   });
 }
@@ -815,14 +946,26 @@ export async function recordFailoverDnsAction(
     const nextRecentKeys = idempotencyKey
       ? [idempotencyKey, ...safeRecentKeys].slice(0, FAILOVER_HISTORY_LIMIT)
       : safeRecentKeys;
+    const history = appendHistory(
+      await readFailoverDnsHistory(transaction),
+      createDnsHistoryRow(derivedStatus, {
+        changedAt,
+        previousTarget: currentStatus.activeDnsTarget,
+        newTarget: derivedStatus.activeDnsTarget,
+        dnsAction: nextStatus.lastDnsChangeReason,
+        result: "success",
+      }),
+    );
 
     await storagePut(transaction, FAILOVER_STATUS_STORAGE_KEY, derivedStatus);
     await storagePut(transaction, FAILOVER_DNS_ACTION_KEYS_STORAGE_KEY, nextRecentKeys);
+    await storagePut(transaction, FAILOVER_DNS_HISTORY_STORAGE_KEY, history);
 
     return Object.freeze({
       duplicate: false,
       status: derivedStatus,
       recentKeys: nextRecentKeys,
+      history,
     });
   });
 }
