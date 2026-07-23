@@ -119,6 +119,34 @@ const failedHistoryRow = Object.freeze({
   errorCode: "timeout",
 });
 
+const noOpDnsHistoryRow = Object.freeze({
+  changedAt: "2026-07-22T04:19:55.000Z",
+  dnsAction: "no_op",
+  previousTarget: "vps",
+  newTarget: "vps",
+  activeDnsTarget: "vps",
+  desiredDnsTarget: "vps",
+  actualApexDnsTarget: "vps",
+  actualWwwDnsTarget: "vps",
+  result: "success",
+  skipReason: "active_dns_target_matches_desired_target",
+  errorCode: null,
+});
+
+const driftDnsHistoryRow = Object.freeze({
+  changedAt: "2026-07-22T04:19:40.000Z",
+  dnsAction: "drift_detected",
+  previousTarget: "vps",
+  newTarget: "vps",
+  activeDnsTarget: "vps",
+  desiredDnsTarget: "vps",
+  actualApexDnsTarget: "vercel",
+  actualWwwDnsTarget: "vps",
+  result: "skipped",
+  skipReason: "actual_dns_target_differs_from_desired_target",
+  errorCode: null,
+});
+
 async function signedRequest(path = "/status", method = "GET", signatureOverride = null) {
   const request = new Request(`https://controller.nutsnews.workers.dev${path}`, { method });
   const signature = signatureOverride ?? await createFailoverStatusSignature({
@@ -193,7 +221,7 @@ test("GET /status returns the public-safe healthy VPS-primary status contract", 
   const payload = await readJson(response);
 
   assert.equal(response.status, 200);
-  assert.deepEqual(payload, { ...healthyVpsStatus, healthHistory: [] });
+  assert.deepEqual(payload, { ...healthyVpsStatus, healthHistory: [], dnsHistory: [] });
   assert.equal(response.headers.get("x-nutsnews-failover-status-mode"), "dashboard");
   assert.equal(response.headers.get("cache-control")?.includes("no-store"), true);
   assertNoSensitiveFailoverState(payload);
@@ -237,6 +265,7 @@ test("GET /status returns empty health history when controller has no recent row
 
   assert.equal(response.status, 200);
   assert.deepEqual(payload.healthHistory, []);
+  assert.deepEqual(payload.dnsHistory, []);
   assertNoSensitiveFailoverState(payload);
 });
 
@@ -246,6 +275,48 @@ test("GET /status returns empty health history for old snapshots that omit histo
 
   assert.equal(response.status, 200);
   assert.deepEqual(payload.healthHistory, []);
+  assert.deepEqual(payload.dnsHistory, []);
+  assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status exposes recent public-safe DNS history", async () => {
+  const response = await statusResponse(healthyVpsStatus, null, env, {
+    dnsHistory: [
+      {
+        ...noOpDnsHistoryRow,
+        dnsAction: "dns-readback-not-safe",
+        errorCode: "do-not-leak-sentinel-token",
+      },
+      driftDnsHistoryRow,
+      {
+        changedAt: "not-a-date",
+        dnsAction: "dns_api_error",
+        cloudflareRecordId: "do-not-leak-record-id",
+      },
+    ],
+  });
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.dnsHistory, [
+    {
+      ...noOpDnsHistoryRow,
+      dnsAction: "no_op",
+      errorCode: null,
+    },
+    driftDnsHistoryRow,
+  ]);
+  assert.equal(JSON.stringify(payload).includes("do-not-leak"), false);
+  assert.equal(JSON.stringify(payload).includes("cloudflareRecordId"), false);
+  assertNoSensitiveFailoverState(payload);
+});
+
+test("GET /status returns empty DNS history when controller has no recent rows", async () => {
+  const response = await statusResponse(healthyVpsStatus, null, env, { dnsHistory: [] });
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.dnsHistory, []);
   assertNoSensitiveFailoverState(payload);
 });
 
