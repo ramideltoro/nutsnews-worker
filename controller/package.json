@@ -14,6 +14,7 @@
     "test:failover-state": "node --test test/failover-state.test.mjs",
     "test:failover-analytics-engine": "node --test test/failover-analytics-engine.test.mjs",
     "test:failover-workers-logs": "node --test test/failover-workers-logs.test.mjs",
+    "test:ingestion-scheduling": "node --test test/ingestion-scheduling.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -1,0 +1,219 @@
+name: Controller Ingestion Scheduling Operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Read current status, build a value-free dry run, or apply the protected controller configuration.
+        required: true
+        default: status
+        type: choice
+        options:
+          - status
+          - plan
+          - apply
+      ingestion_scheduling_enabled:
+        description: Desired legacy ingestion scheduling state. Apply false is a cutover control and remains unauthorized until the downstream gates pass.
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      confirmation:
+        description: Use inspect-ingestion-scheduling, plan-ingestion-scheduling-<true|false>, or set-ingestion-scheduling-<true|false>.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controller-ingestion-scheduling-operations
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate typed operation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      expected_confirmation: ${{ steps.contract.outputs.expected_confirmation }}
+    steps:
+      - name: Validate operation contract
+        id: contract
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            status) expected="inspect-ingestion-scheduling" ;;
+            plan) expected="plan-ingestion-scheduling-$ENABLED" ;;
+            apply) expected="set-ingestion-scheduling-$ENABLED" ;;
+            *) echo "Unsupported action." >&2; exit 1 ;;
+          esac
+          if [ "$CONFIRMATION" != "$expected" ]; then
+            echo "Typed confirmation mismatch; expected $expected." >&2
+            exit 1
+          fi
+          if [ "$ACTION" = "apply" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Protected apply must be dispatched from main." >&2
+            exit 1
+          fi
+          echo "expected_confirmation=$expected" >> "$GITHUB_OUTPUT"
+
+  status:
+    name: Read scheduling status
+    if: ${{ inputs.action == 'status' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Capture value-free public status
+        run: >-
+          node controller/scripts/verify-ingestion-scheduling-status.mjs
+          "${{ inputs.ingestion_scheduling_enabled }}"
+          "$RUNNER_TEMP/controller-ingestion-scheduling-status.json"
+
+      - name: Upload status evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: controller-ingestion-scheduling-status-${{ github.run_id }}
+          path: ${{ runner.temp }}/controller-ingestion-scheduling-status.json
+          if-no-files-found: error
+          retention-days: 90
+
+  plan:
+    name: Build scheduling plan
+    if: ${{ inputs.action == 'plan' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: controller/package-lock.json
+
+      - name: Install controller dependencies
+        working-directory: controller
+        run: npm ci
+
+      - name: Test and render exact plan
+        shell: bash
+        env:
+          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
+        run: |
+          set -euo pipefail
+          npm --prefix controller run test:ingestion-scheduling
+          node controller/scripts/render-ingestion-scheduling-config.mjs "$ENABLED" controller/wrangler.ingestion-scheduling.generated.jsonc "$RUNNER_TEMP/controller-ingestion-scheduling-plan.json"
+          (
+            cd controller
+            npx wrangler deploy --dry-run -c wrangler.ingestion-scheduling.generated.jsonc --outdir "$RUNNER_TEMP/controller-build"
+          )
+          sha256sum "$RUNNER_TEMP/controller-ingestion-scheduling-plan.json" > "$RUNNER_TEMP/SHA256SUMS"
+
+      - name: Upload plan evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: controller-ingestion-scheduling-plan-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/controller-ingestion-scheduling-plan.json
+            ${{ runner.temp }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  apply:
+    name: Apply protected scheduling state
+    if: ${{ inputs.action == 'apply' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: controller/package-lock.json
+
+      - name: Install controller dependencies
+        working-directory: controller
+        run: npm ci
+
+      - name: Validate required Cloudflare credentials
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Test, render, dry run, and deploy controller
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
+        run: |
+          set -euo pipefail
+          npm --prefix controller run test:ingestion-scheduling
+          node controller/scripts/render-ingestion-scheduling-config.mjs "$ENABLED" controller/wrangler.ingestion-scheduling.generated.jsonc "$RUNNER_TEMP/controller-ingestion-scheduling-render.json"
+          (
+            cd controller
+            npx wrangler deploy --dry-run -c wrangler.ingestion-scheduling.generated.jsonc --outdir "$RUNNER_TEMP/controller-build"
+            npx wrangler deploy -c wrangler.ingestion-scheduling.generated.jsonc
+          )
+
+      - name: Verify deployed state and retained failover surfaces
+        env:
+          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
+        run: >-
+          node controller/scripts/verify-ingestion-scheduling-status.mjs
+          "$ENABLED"
+          "$RUNNER_TEMP/controller-ingestion-scheduling-apply.json"
+
+      - name: Build checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-render.json" \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-apply.json" \
+            > "$RUNNER_TEMP/SHA256SUMS"
+
+      - name: Upload immutable apply evidence
+        uses: actions/upload-artifact@v6
+        with:
+          name: controller-ingestion-scheduling-apply-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/controller-ingestion-scheduling-render.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-apply.json
+            ${{ runner.temp }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
