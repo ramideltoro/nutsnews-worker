@@ -107,9 +107,11 @@ if (
 }
 
 const expectedOrchestrationPattern =
-  contractKind === "backend_authorized"
-    ? new RegExp(`^backend-worker-uplift-${semanticAction}-[0-9]+-[0-9]+$`)
-    : /^legacy-worker-uplift-rollback-[0-9]+-[0-9]+$/;
+  contractKind === "legacy_rollback_compatibility"
+    ? /^legacy-worker-uplift-rollback-[0-9]+-[0-9]+$/
+    : semanticAction === "cutover"
+      ? /^backend-worker-uplift-cutover-[0-9]+-[0-9]+$/
+      : /^backend-worker-uplift-rollback-[0-9]+-[0-9]+$/;
 if (!expectedOrchestrationPattern.test(orchestrationId)) {
   throw new Error("transition orchestration ID does not match the semantic action");
 }

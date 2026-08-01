@@ -110,7 +110,7 @@ async function runAuthorization({
       return;
     }
     if (responseMode === "redirect") {
-      response.writeHead(302, { Location: request.url });
+      response.writeHead(302, { Location: "/fixed-redirect-target" });
       response.end();
       return;
     }

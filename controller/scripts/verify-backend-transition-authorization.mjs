@@ -17,9 +17,11 @@ if (
   process.exit(2);
 }
 
-const match = orchestrationId.match(
-  new RegExp(`^backend-worker-uplift-${action}-([0-9]+)-([0-9]+)$`),
-);
+const orchestrationPattern =
+  action === "cutover"
+    ? /^backend-worker-uplift-cutover-([0-9]+)-([0-9]+)$/
+    : /^backend-worker-uplift-rollback-([0-9]+)-([0-9]+)$/;
+const match = orchestrationId.match(orchestrationPattern);
 if (!match) throw new Error("backend orchestration ID is invalid");
 const backendRunId = Number(match[1]);
 const backendRunAttempt = Number(match[2]);
