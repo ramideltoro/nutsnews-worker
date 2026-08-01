@@ -1,8 +1,14 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { __test } from "../src/index";
+
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+});
 
 class MemoryKv {
 	readonly store = new Map<string, string>();
+	readonly putOptions = new Map<string, unknown>();
 
 	async get<T>(key: string, type?: "json"): Promise<T | string | null> {
 		const value = this.store.get(key);
@@ -14,8 +20,9 @@ class MemoryKv {
 		return type === "json" ? JSON.parse(value) as T : value;
 	}
 
-	async put(key: string, value: string): Promise<void> {
+	async put(key: string, value: string, options?: unknown): Promise<void> {
 		this.store.set(key, value);
+		this.putOptions.set(key, options);
 	}
 }
 
@@ -82,7 +89,6 @@ describe("localized public feed edge snapshots", () => {
 			NUTSNEWS_KV: kv,
 			FEED_SHARD_INDEX: "0",
 			PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT: "10",
-			PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS: "3600",
 		};
 		const config = {
 			databaseProviderMode: "backend_postgres_primary",
@@ -101,6 +107,8 @@ describe("localized public feed edge snapshots", () => {
 		expect(requestedLanguages).toEqual(["en", "fr", "ja", "de-CH", "de", "el"]);
 		expect(kv.store.has(__test.getPublicFeedEdgeSnapshotKvKey("en"))).toBe(true);
 		expect(kv.store.has(__test.getPublicFeedEdgeSnapshotKvKey("fr"))).toBe(true);
+		expect(kv.putOptions.get(__test.getPublicFeedEdgeSnapshotKvKey("en"))).toBeUndefined();
+		expect(kv.putOptions.get(__test.getPublicFeedEdgeSnapshotKvKey("fr"))).toBeUndefined();
 
 		const response = await __test.servePublicFeedEdgeSnapshot(
 			testEnv as any,
@@ -132,6 +140,59 @@ describe("localized public feed edge snapshots", () => {
 		expect(payload.languageCode).toBe("fr");
 		expect(payload.articles).toEqual([]);
 		expect(payload.error).toContain("fr public feed edge snapshot");
+	});
+});
+
+describe("post-publication cache invalidation", () => {
+	const testRevalidationSecret = ["cache", "fixture", "signing", "value", "only"].join("-");
+
+	it("signs the same canonical request payload as the Next.js endpoint", async () => {
+		await expect(__test.signPublicCacheRevalidation(
+			testRevalidationSecret,
+			"1753920000",
+			"feed-test",
+			["public-feed"],
+		)).resolves.toBe("41cff9c6274482ca2810f5ca3b17b0fb1636e185ca5c73db7e22fd90b8c42e5b");
+	});
+
+	it("retries a signed Next.js public-feed revalidation with a stable idempotency key", async () => {
+		const fetchMock = vi.fn()
+			.mockResolvedValueOnce(new Response("temporary", { status: 503 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ revalidated: true }), { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await __test.invalidateNextPublicFeedCaches({
+			NUTSNEWS_CACHE_REVALIDATION_URLS: "https://www.nutsnews.com/api/internal/cache/revalidate,ftp://invalid.example.test/revalidate",
+			NUTSNEWS_CACHE_REVALIDATION_SECRET: testRevalidationSecret,
+		} as any, "feed-idempotent-request");
+
+		expect(result).toEqual({ ok: true, configured: true, targetCount: 1 });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const [target, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+		expect(target).toBe("https://www.nutsnews.com/api/internal/cache/revalidate");
+		expect(init.method).toBe("POST");
+		expect(init.body).toBe(JSON.stringify({ tags: ["public-feed"] }));
+		const headers = new Headers(init.headers);
+		expect(headers.get("X-NutsNews-Request-Id")).toBe("feed-idempotent-request");
+		expect(headers.get("X-NutsNews-Timestamp")).toMatch(/^\d{10}$/);
+		expect(headers.get("X-NutsNews-Signature")).toMatch(/^sha256=[a-f0-9]{64}$/);
+	});
+
+	it("purges only the Cloudflare public-feed tag with a zone-scoped endpoint", async () => {
+		const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await __test.purgeCloudflarePublicFeedCache({
+			CLOUDFLARE_ZONE_ID: "0123456789abcdef0123456789abcdef",
+			CLOUDFLARE_CACHE_PURGE_API_TOKEN: "zone-scoped-test-token",
+		} as any, "feed-cloudflare-request");
+
+		expect(result).toEqual({ ok: true, configured: true, targetCount: 1 });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [target, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+		expect(target).toBe("https://api.cloudflare.com/client/v4/zones/0123456789abcdef0123456789abcdef/purge_cache");
+		expect(init.body).toBe(JSON.stringify({ tags: ["public-feed"] }));
+		expect(new Headers(init.headers).get("Authorization")).toBe("Bearer zone-scoped-test-token");
 	});
 });
 

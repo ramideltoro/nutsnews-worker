@@ -68,6 +68,8 @@ const kvPreviewNamespaceId = process.env.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID ?? kvN
 const includeUpstashRedisSecretBindings = process.env.ENABLE_UPSTASH_REDIS_SECRET_BINDING === 'true';
 const upstashRedisRestUrlSecretName = process.env.UPSTASH_REDIS_REST_URL_SECRET_NAME ?? 'UPSTASH_REDIS_REST_URL';
 const upstashRedisRestTokenSecretName = process.env.UPSTASH_REDIS_REST_TOKEN_SECRET_NAME ?? 'UPSTASH_REDIS_REST_TOKEN';
+const cacheRevalidationSecretName = process.env.NUTSNEWS_CACHE_REVALIDATION_SECRET_NAME ?? 'NUTSNEWS_CACHE_REVALIDATION_SECRET';
+const cloudflareCachePurgeTokenSecretName = process.env.CLOUDFLARE_CACHE_PURGE_API_TOKEN_SECRET_NAME ?? 'CLOUDFLARE_CACHE_PURGE_API_TOKEN';
 
 const defaultTranslationVars = {
 	ENABLED_SUMMARY_LANGUAGES: process.env.ENABLED_SUMMARY_LANGUAGES ?? 'fr,ja,de-CH,de,el',
@@ -100,7 +102,8 @@ const optionalShardVars = Object.fromEntries(
 		'NUTSNEWS_BACKEND_POSTGRES_PRIMARY_CONFIRMATION',
 		'KV_RECENT_PROCESSED_URL_LIMIT',
 		'PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT',
-		'PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS',
+		'NUTSNEWS_CACHE_REVALIDATION_URLS',
+		'CLOUDFLARE_ZONE_ID',
 		'RSS_FEED_FETCH_TIMEOUT_MS',
 		'ARTICLE_PAGE_FETCH_TIMEOUT_MS',
 		'LOCAL_AI_TIMEOUT_MS',
@@ -227,6 +230,16 @@ for (let index = 0; index < shardCount; index += 1) {
 				binding: 'BETTER_STACK_INGESTING_HOST',
 				store_id: secretsStoreId,
 				secret_name: 'BETTER_STACK_INGESTING_HOST',
+			},
+			{
+				binding: 'NUTSNEWS_CACHE_REVALIDATION_SECRET',
+				store_id: secretsStoreId,
+				secret_name: cacheRevalidationSecretName,
+			},
+			{
+				binding: 'CLOUDFLARE_CACHE_PURGE_API_TOKEN',
+				store_id: secretsStoreId,
+				secret_name: cloudflareCachePurgeTokenSecretName,
 			},
 		],
 	};

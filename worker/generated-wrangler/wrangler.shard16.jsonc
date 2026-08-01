@@ -12,54 +12,71 @@
     "enabled": true
   },
   "vars": {
+    "NUTSNEWS_DATABASE_PROVIDER_MODE": "supabase_primary",
     "FEED_SHARD_INDEX": "16",
     "FEEDS_PER_SHARD": "20",
     "ENABLED_SUMMARY_LANGUAGES": "fr,ja,de-CH,de,el",
     "SUMMARY_TRANSLATION_LIMIT": "5",
     "HOLD_ARTICLES_FOR_TRANSLATIONS": "true",
+    "RSS_FEED_FETCH_TIMEOUT_MS": "15000",
+    "ARTICLE_PAGE_FETCH_TIMEOUT_MS": "10000",
+    "LOCAL_AI_TIMEOUT_MS": "15000",
+    "OPENAI_TIMEOUT_MS": "30000",
     "AI_PROVIDER": "local",
     "LOCAL_AI_URL": "https://local-ai-ci.invalid",
     "LOCAL_AI_MODEL": "qwen2.5:3b",
     "AI_PROVIDER_FALLBACK_TO_OPENAI": "true",
-    "AI_REVIEW_CONCURRENCY": "1"
+    "AI_REVIEW_CONCURRENCY": "1",
+    "NUTSNEWS_CACHE_REVALIDATION_URLS": "https://www.nutsnews.com/api/internal/cache/revalidate,https://nutsnews.vercel.app/api/internal/cache/revalidate",
+    "CLOUDFLARE_ZONE_ID": "33333333333333333333333333333333"
   },
   "secrets_store_secrets": [
     {
-      "binding": "SUPABASE_URL",
-      "store_id": "ci-secrets-store-id",
-      "secret_name": "SUPABASE_URL"
-    },
-    {
-      "binding": "SUPABASE_SERVICE_ROLE_KEY",
-      "store_id": "ci-secrets-store-id",
-      "secret_name": "SUPABASE_SERVICE_ROLE_KEY"
-    },
-    {
       "binding": "OPENAI_API_KEY",
-      "store_id": "ci-secrets-store-id",
+      "store_id": "00000000000000000000000000000000",
       "secret_name": "OPENAI_API_KEY"
     },
     {
       "binding": "BETTER_STACK_SOURCE_TOKEN",
-      "store_id": "ci-secrets-store-id",
+      "store_id": "00000000000000000000000000000000",
       "secret_name": "BETTER_STACK_SOURCE_TOKEN"
     },
     {
       "binding": "BETTER_STACK_INGESTING_HOST",
-      "store_id": "ci-secrets-store-id",
+      "store_id": "00000000000000000000000000000000",
       "secret_name": "BETTER_STACK_INGESTING_HOST"
     },
     {
+      "binding": "NUTSNEWS_CACHE_REVALIDATION_SECRET",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "NUTSNEWS_CACHE_REVALIDATION_SECRET"
+    },
+    {
+      "binding": "CLOUDFLARE_CACHE_PURGE_API_TOKEN",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "CLOUDFLARE_CACHE_PURGE_API_TOKEN"
+    },
+    {
+      "binding": "SUPABASE_URL",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "SUPABASE_URL"
+    },
+    {
+      "binding": "SUPABASE_SERVICE_ROLE_KEY",
+      "store_id": "00000000000000000000000000000000",
+      "secret_name": "SUPABASE_SERVICE_ROLE_KEY"
+    },
+    {
       "binding": "LOCAL_AI_API_KEY",
-      "store_id": "ci-secrets-store-id",
+      "store_id": "00000000000000000000000000000000",
       "secret_name": "LOCAL_AI_API_KEY"
     }
   ],
   "kv_namespaces": [
     {
       "binding": "NUTSNEWS_KV",
-      "id": "ci-kv-namespace-id",
-      "preview_id": "ci-kv-namespace-id"
+      "id": "11111111111111111111111111111111",
+      "preview_id": "22222222222222222222222222222222"
     }
   ]
 }

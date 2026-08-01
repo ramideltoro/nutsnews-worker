@@ -22,4 +22,5 @@ This is the NutsNews Worker repository.
 - If using `gh pr create`, do not pass `--draft`.
 - If using a GitHub connector/API, set `draft: false`.
 - If a PR is accidentally created as draft, mark it ready before reporting completion.
-- Do not merge PRs unless Rami explicitly says to merge.
+- Once the intended scope is complete, required checks pass, no blocking review remains, and rollout prerequisites are satisfied, Codex may mark a pull request ready and merge it without separate approval.
+- Never merge a pull request with failing required checks, unresolved blocking review feedback, ambiguous scope, or unmet production-safety prerequisites.
