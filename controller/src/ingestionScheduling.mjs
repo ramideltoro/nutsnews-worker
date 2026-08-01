@@ -3,6 +3,9 @@ export const INGESTION_SCHEDULING_STATUS_SCHEMA_VERSION = 1;
 
 const ENABLED_VALUES = new Set(["1", "true", "on", "yes"]);
 const DISABLED_VALUES = new Set(["0", "false", "off", "no"]);
+const SOURCE_REVISION_PATTERN = /^[0-9a-f]{40}$/;
+const DEPLOYMENT_CORRELATION_PATTERN = /^[A-Za-z0-9._-]{1,100}$/;
+const CLOUDFLARE_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 function clean(value) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -14,10 +17,10 @@ export function readIngestionSchedulingPolicy(env = {}) {
 
   if (raw === undefined || raw === null || value === "") {
     return {
-      enabled: true,
+      enabled: false,
       configured: false,
-      valid: true,
-      source: "safe_default_enabled",
+      valid: false,
+      source: "safe_default_disabled",
     };
   }
 
@@ -40,15 +43,32 @@ export function readIngestionSchedulingPolicy(env = {}) {
   }
 
   return {
-    enabled: true,
+    enabled: false,
     configured: true,
     valid: false,
-    source: "invalid_safe_default_enabled",
+    source: "invalid_safe_default_disabled",
   };
 }
 
 export function buildIngestionSchedulingStatus(env = {}) {
   const policy = readIngestionSchedulingPolicy(env);
+  const sourceRevision = clean(env?.NUTSNEWS_CONTROLLER_SOURCE_REVISION);
+  const deploymentCorrelation =
+    typeof env?.NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION === "string"
+      ? env.NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION.trim()
+      : "";
+  const sourceRevisionValid =
+    SOURCE_REVISION_PATTERN.test(sourceRevision) && !/^0{40}$/.test(sourceRevision);
+  const deploymentCorrelationValid = DEPLOYMENT_CORRELATION_PATTERN.test(
+    deploymentCorrelation,
+  );
+  const cloudflareVersionId =
+    typeof env?.CF_VERSION_METADATA?.id === "string"
+      ? env.CF_VERSION_METADATA.id.trim()
+      : "";
+  const cloudflareVersionValid = CLOUDFLARE_VERSION_PATTERN.test(
+    cloudflareVersionId,
+  );
 
   return {
     schemaVersion: INGESTION_SCHEDULING_STATUS_SCHEMA_VERSION,
@@ -59,6 +79,12 @@ export function buildIngestionSchedulingStatus(env = {}) {
     configurationValid: policy.valid,
     configurationSource: policy.source,
     legacyProductionOwner: "ramideltoro/nutsnews-worker",
+    deploymentIdentity: {
+      valid: sourceRevisionValid && deploymentCorrelationValid,
+      sourceRevision: sourceRevisionValid ? sourceRevision : null,
+      correlation: deploymentCorrelationValid ? deploymentCorrelation : null,
+      cloudflareVersionId: cloudflareVersionValid ? cloudflareVersionId : null,
+    },
     disabledEffects: {
       shardRefreshDispatchEnabled: policy.enabled,
       translationBacklogDispatchEnabled: policy.enabled,

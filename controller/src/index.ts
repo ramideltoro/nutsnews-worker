@@ -50,6 +50,11 @@ type SecretBinding = {
 };
 
 type Env = {
+  CF_VERSION_METADATA?: {
+    id?: string;
+    tag?: string;
+    timestamp?: string;
+  };
   FAILOVER_CONTROLLER_STATE?: DurableObjectNamespace;
   SHARD_COUNT?: string;
   SHARD_RUN_INTERVAL_MINUTES?: string;
@@ -58,6 +63,8 @@ type Env = {
   MAX_AI_REVIEWS_PER_SHARD?: string;
   TRANSLATION_BACKLOG_ENABLED?: string;
   INGESTION_SCHEDULING_ENABLED?: string;
+  NUTSNEWS_CONTROLLER_SOURCE_REVISION?: string;
+  NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION?: string;
   NUTSNEWS_FAILOVER_HEALTH_CHECK_INTERVAL_SECONDS?: string;
   NUTSNEWS_FAILOVER_CONSECUTIVE_VPS_FAILURES?: string;
   NUTSNEWS_FAILOVER_CONTROLLER_VERSION?: string;

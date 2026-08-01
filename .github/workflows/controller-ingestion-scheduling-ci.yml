@@ -56,8 +56,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node controller/scripts/render-ingestion-scheduling-config.mjs true controller/wrangler.ingestion-enabled.generated.jsonc "$RUNNER_TEMP/enabled-report.json"
-          node controller/scripts/render-ingestion-scheduling-config.mjs false controller/wrangler.ingestion-disabled.generated.jsonc "$RUNNER_TEMP/disabled-report.json"
+          node controller/scripts/render-ingestion-scheduling-config.mjs true controller/wrangler.ingestion-enabled.generated.jsonc "$RUNNER_TEMP/enabled-report.json" "$GITHUB_SHA" "scheduling-ci-enabled-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          node controller/scripts/render-ingestion-scheduling-config.mjs false controller/wrangler.ingestion-disabled.generated.jsonc "$RUNNER_TEMP/disabled-report.json" "$GITHUB_SHA" "scheduling-ci-disabled-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           (
             cd controller
             npx wrangler deploy --dry-run -c wrangler.ingestion-enabled.generated.jsonc --outdir "$RUNNER_TEMP/enabled-build"
@@ -67,7 +67,7 @@ jobs:
       - name: Upload value-free dry-run evidence
         uses: actions/upload-artifact@v6
         with:
-          name: controller-ingestion-scheduling-ci-${{ github.run_id }}
+          name: controller-ingestion-scheduling-ci-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/enabled-report.json
             ${{ runner.temp }}/disabled-report.json

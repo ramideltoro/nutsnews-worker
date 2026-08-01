@@ -6,7 +6,7 @@ import path from "node:path";
 import process from "node:process";
 
 function usage() {
-  return "Usage: render-ingestion-scheduling-config.mjs <true|false> <output-path> [report-path]";
+  return "Usage: render-ingestion-scheduling-config.mjs <true|false> <output-path> <report-path> <source-revision> <deployment-correlation>";
 }
 
 function sha256(value) {
@@ -36,6 +36,7 @@ function protectedControllerScope(config) {
     workers_dev: config.workers_dev,
     preview_urls: config.preview_urls,
     observability: config.observability,
+    version_metadata: config.version_metadata,
     durable_objects: config.durable_objects,
     migrations: config.migrations,
     triggers: config.triggers,
@@ -44,8 +45,15 @@ function protectedControllerScope(config) {
   });
 }
 
-const [enabled, outputPath, reportPath] = process.argv.slice(2);
-if (!new Set(["true", "false"]).has(enabled) || !outputPath) {
+const [enabled, outputPath, reportPath, sourceRevision, deploymentCorrelation] =
+  process.argv.slice(2);
+if (
+  !new Set(["true", "false"]).has(enabled) ||
+  !outputPath ||
+  !reportPath ||
+  !/^[0-9a-f]{40}$/.test(sourceRevision ?? "") ||
+  !/^[A-Za-z0-9._-]{1,100}$/.test(deploymentCorrelation ?? "")
+) {
   console.error(usage());
   process.exit(2);
 }
@@ -61,6 +69,8 @@ if (!config.vars || typeof config.vars !== "object" || Array.isArray(config.vars
 }
 
 config.vars.INGESTION_SCHEDULING_ENABLED = enabled;
+config.vars.NUTSNEWS_CONTROLLER_SOURCE_REVISION = sourceRevision;
+config.vars.NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION = deploymentCorrelation;
 
 const protectedAfter = protectedControllerScope(config);
 if (JSON.stringify(protectedAfter) !== JSON.stringify(protectedBefore)) {
@@ -75,6 +85,9 @@ const report = {
   safeMetadataOnly: true,
   status: "pass",
   desiredIngestionSchedulingEnabled: enabled === "true",
+  controllerSourceRevision: sourceRevision,
+  deploymentCorrelation,
+  deploymentIdentityConfigured: true,
   sourceConfigSha256: sha256(inputText),
   renderedConfigSha256: sha256(outputText),
   protectedControllerScopeSha256: sha256(JSON.stringify(protectedBefore)),
@@ -84,6 +97,7 @@ const report = {
     mainModule: true,
     compatibility: true,
     observability: true,
+    versionMetadataBinding: true,
     durableObjectBindings: true,
     durableObjectMigrations: true,
     cronTriggers: true,
@@ -92,11 +106,9 @@ const report = {
   },
 };
 
-if (reportPath) {
-  fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-}
+fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, {
+  encoding: "utf8",
+  mode: 0o600,
+});
 
 console.log(JSON.stringify(report));

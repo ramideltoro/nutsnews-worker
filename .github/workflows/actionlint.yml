@@ -30,7 +30,7 @@ jobs:
 
       - name: Install actionlint
         env:
-          ACTIONLINT_VERSION: "1.7.7"
+          ACTIONLINT_VERSION: "1.7.12"
         run: |
           set -euo pipefail
           curl -sSL -o actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
@@ -43,4 +43,5 @@ jobs:
           find .github/workflows -type f \( -name "*.yml" -o -name "*.yaml" \) \
             ! -name "worker-controller-ci.yml" \
             ! -name "worker-pipeline.yml" \
-            -print0 | xargs -0 ./actionlint -color
+            -print0 | xargs -0 ./actionlint -color \
+              -ignore 'unexpected key "queue" for "concurrency" section'
