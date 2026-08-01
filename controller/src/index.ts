@@ -39,6 +39,11 @@ import {
   recordFailoverHealthCheck,
   recordFailoverLiveOriginReadiness,
 } from "./failoverState.mjs";
+import {
+  buildIngestionSchedulingStatus,
+  handleIngestionSchedulingStatusRequest,
+  runIngestionSchedulingCycle,
+} from "./ingestionScheduling.mjs";
 
 type SecretBinding = {
   get: () => Promise<string>;
@@ -52,6 +57,7 @@ type Env = {
   SHARD_WORKER_SUBDOMAIN?: string;
   MAX_AI_REVIEWS_PER_SHARD?: string;
   TRANSLATION_BACKLOG_ENABLED?: string;
+  INGESTION_SCHEDULING_ENABLED?: string;
   NUTSNEWS_FAILOVER_HEALTH_CHECK_INTERVAL_SECONDS?: string;
   NUTSNEWS_FAILOVER_CONSECUTIVE_VPS_FAILURES?: string;
   NUTSNEWS_FAILOVER_CONTROLLER_VERSION?: string;
@@ -870,6 +876,10 @@ export default {
       });
     }
 
+    if (url.pathname === "/ingestion-scheduling/status") {
+      return handleIngestionSchedulingStatusRequest(request, env);
+    }
+
     await logInfo(
         env,
         "controller.request_started",
@@ -883,17 +893,59 @@ export default {
     );
 
     try {
-      const failoverWake = await wakeFailoverStateOwner(env, requestId, "manual_fetch");
       const manualShardIndex = parseManualShard(url, env);
       const requestedMode = parseManualControllerMode(url);
       const shardIndex =
           manualShardIndex ?? getAutomaticShardIndex(env, Date.now());
+      const cycle = await runIngestionSchedulingCycle({
+        env,
+        source: "manual_fetch",
+        shardIndex,
+        requestedMode,
+        translationBacklogEnabled: isTranslationBacklogEnabled(env),
+        wakeFailover: () => wakeFailoverStateOwner(env, requestId, "manual_fetch"),
+        dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode),
+      });
+      const { failoverWake, result, translationBacklogResult, scheduling } = cycle;
 
-      const result = await runShard(env, shardIndex, requestId, requestedMode ?? "refresh");
-      const translationBacklogResult =
-          requestedMode === null && isTranslationBacklogEnabled(env)
-              ? await runShard(env, shardIndex, requestId, "translate-backlog")
-              : null;
+      if (cycle.status === "skipped_ingestion_disabled") {
+        await logWarn(
+            env,
+            "controller.ingestion_scheduling.skipped",
+            "Controller skipped manual ingestion while scheduling is disabled",
+            {
+              requestId,
+              source: cycle.source,
+              shardIndex,
+              requestedMode: cycle.requestedMode,
+              ingestionSchedulingEnabled: scheduling.enabled,
+              ingestionSchedulingConfigured: scheduling.configured,
+              ingestionSchedulingConfigurationValid: scheduling.configurationValid,
+              failoverStateBound: failoverWake.bound,
+              failoverStateWakeOk: failoverWake.ok,
+              failoverStateChecked: failoverWake.checked,
+            },
+        );
+
+        return Response.json(
+            {
+              message: "Legacy ingestion scheduling is disabled",
+              requestId,
+              skipped: true,
+              scheduling,
+              failoverState: {
+                bound: failoverWake.bound,
+                wakeOk: failoverWake.ok,
+                checked: failoverWake.checked,
+              },
+            },
+            { status: 423 },
+        );
+      }
+
+      if (result === null) {
+        throw new Error("Enabled ingestion cycle did not return a shard result.");
+      }
 
       const responseBody = {
         message: "NutsNews controller run complete",
@@ -904,6 +956,7 @@ export default {
         shardRunIntervalMinutes: getRunIntervalMinutes(env),
         maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
         requestId,
+        scheduling,
         result,
         translationBacklogResult,
       };
@@ -916,6 +969,9 @@ export default {
             requestId,
             controllerMode: manualShardIndex === null ? "automatic" : "manual",
             requestedMode: requestedMode ?? "refresh",
+            ingestionSchedulingEnabled: scheduling.enabled,
+            ingestionSchedulingConfigured: scheduling.configured,
+            ingestionSchedulingConfigurationValid: scheduling.configurationValid,
             failoverStateBound: failoverWake.bound,
             failoverStateWakeOk: failoverWake.ok,
             failoverStateChecked: failoverWake.checked,
@@ -966,27 +1022,55 @@ export default {
     const startedAt = Date.now();
     const requestId = createRequestId();
     const shardIndex = getAutomaticShardIndex(env, Date.now());
-    const failoverWake = await wakeFailoverStateOwner(env, requestId, "scheduled_watchdog");
+    const cycle = await runIngestionSchedulingCycle({
+      env,
+      source: "scheduled_watchdog",
+      shardIndex,
+      requestedMode: null,
+      translationBacklogEnabled: isTranslationBacklogEnabled(env),
+      wakeFailover: () => wakeFailoverStateOwner(env, requestId, "scheduled_watchdog"),
+      dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode),
+      onFailoverWake: ({ failoverWake, scheduling }: {
+        failoverWake: FailoverWakeResult;
+        scheduling: ReturnType<typeof buildIngestionSchedulingStatus>;
+      }) => logInfo(
+          env,
+          "controller.scheduled_started",
+          "NutsNews controller scheduled run started",
+          {
+            requestId,
+            shardIndex,
+            shardCount: getShardCount(env),
+            shardRunIntervalMinutes: getRunIntervalMinutes(env),
+            ingestionSchedulingEnabled: scheduling.enabled,
+            ingestionSchedulingConfigured: scheduling.configured,
+            ingestionSchedulingConfigurationValid: scheduling.configurationValid,
+            failoverStateBound: failoverWake.bound,
+            failoverStateWakeOk: failoverWake.ok,
+            failoverStateChecked: failoverWake.checked,
+          },
+      ),
+    });
+    const { failoverWake, result, translationBacklogResult, scheduling } = cycle;
 
-    await logInfo(
-        env,
-        "controller.scheduled_started",
-        "NutsNews controller scheduled run started",
-        {
-          requestId,
-          shardIndex,
-          shardCount: getShardCount(env),
-          shardRunIntervalMinutes: getRunIntervalMinutes(env),
-          failoverStateBound: failoverWake.bound,
-          failoverStateWakeOk: failoverWake.ok,
-          failoverStateChecked: failoverWake.checked,
-        },
-    );
-
-    const result = await runShard(env, shardIndex, requestId, "refresh");
-    const translationBacklogResult = isTranslationBacklogEnabled(env)
-        ? await runShard(env, shardIndex, requestId, "translate-backlog")
-        : null;
+    if (cycle.status === "skipped_ingestion_disabled") {
+      await logWarn(
+          env,
+          "controller.ingestion_scheduling.skipped",
+          "Controller skipped scheduled ingestion while scheduling is disabled",
+          {
+            requestId,
+            source: cycle.source,
+            shardIndex,
+            ingestionSchedulingEnabled: scheduling.enabled,
+            ingestionSchedulingConfigured: scheduling.configured,
+            ingestionSchedulingConfigurationValid: scheduling.configurationValid,
+            failoverStateBound: failoverWake.bound,
+            failoverStateWakeOk: failoverWake.ok,
+            failoverStateChecked: failoverWake.checked,
+          },
+      );
+    }
 
     await logInfo(
         env,
@@ -995,8 +1079,12 @@ export default {
         {
           requestId,
           shardIndex,
-          ok: result.ok,
-          status: result.status,
+          dispatchStatus: cycle.status,
+          ingestionSchedulingEnabled: scheduling.enabled,
+          ingestionSchedulingConfigured: scheduling.configured,
+          ingestionSchedulingConfigurationValid: scheduling.configurationValid,
+          ok: result?.ok ?? null,
+          status: result?.status ?? null,
           translationBacklogEnabled: isTranslationBacklogEnabled(env),
           translationBacklogOk: translationBacklogResult?.ok ?? null,
           translationBacklogStatus: translationBacklogResult?.status ?? null,
