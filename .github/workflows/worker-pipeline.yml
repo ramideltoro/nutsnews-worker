@@ -56,6 +56,8 @@ jobs:
       NUTSNEWS_SECRETS_STORE_ID: "00000000000000000000000000000000"
       NUTSNEWS_KV_NAMESPACE_ID: "11111111111111111111111111111111"
       NUTSNEWS_KV_PREVIEW_NAMESPACE_ID: "22222222222222222222222222222222"
+      NUTSNEWS_CACHE_REVALIDATION_URLS: https://www.nutsnews.com/api/internal/cache/revalidate,https://nutsnews.vercel.app/api/internal/cache/revalidate
+      CLOUDFLARE_ZONE_ID: "33333333333333333333333333333333"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -128,6 +130,10 @@ jobs:
       NUTSNEWS_SECRETS_STORE_ID: ${{ secrets.NUTSNEWS_SECRETS_STORE_ID }}
       NUTSNEWS_KV_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_NAMESPACE_ID }}
       NUTSNEWS_KV_PREVIEW_NAMESPACE_ID: ${{ secrets.NUTSNEWS_KV_PREVIEW_NAMESPACE_ID }}
+      NUTSNEWS_CACHE_REVALIDATION_URLS: ${{ vars.NUTSNEWS_CACHE_REVALIDATION_URLS || 'https://www.nutsnews.com/api/internal/cache/revalidate,https://nutsnews.vercel.app/api/internal/cache/revalidate' }}
+      NUTSNEWS_CACHE_REVALIDATION_SECRET_NAME: ${{ vars.NUTSNEWS_CACHE_REVALIDATION_SECRET_NAME || 'NUTSNEWS_CACHE_REVALIDATION_SECRET' }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.NUTSNEWS_CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_CACHE_PURGE_API_TOKEN_SECRET_NAME: ${{ vars.CLOUDFLARE_CACHE_PURGE_API_TOKEN_SECRET_NAME || 'CLOUDFLARE_CACHE_PURGE_API_TOKEN' }}
       LOCAL_AI_URL: ${{ secrets.LOCAL_AI_URL }}
       LOCAL_AI_API_KEY_SECRET_NAME: ${{ secrets.LOCAL_AI_API_KEY_SECRET_NAME || 'LOCAL_AI_API_KEY' }}
       AI_PROVIDER: local
@@ -168,7 +174,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID NUTSNEWS_SECRETS_STORE_ID NUTSNEWS_KV_NAMESPACE_ID LOCAL_AI_URL; do
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID NUTSNEWS_SECRETS_STORE_ID NUTSNEWS_KV_NAMESPACE_ID LOCAL_AI_URL NUTSNEWS_CACHE_REVALIDATION_URLS CLOUDFLARE_ZONE_ID; do
             if [ -z "${!name:-}" ]; then
               echo "Missing required GitHub secret: $name" >&2
               missing=1

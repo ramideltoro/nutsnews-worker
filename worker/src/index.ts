@@ -49,7 +49,10 @@ type Env = {
 	NUTSNEWS_KV?: KVNamespace;
 	KV_RECENT_PROCESSED_URL_LIMIT?: string;
 	PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT?: string;
-	PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS?: string;
+	NUTSNEWS_CACHE_REVALIDATION_URLS?: string;
+	NUTSNEWS_CACHE_REVALIDATION_SECRET?: MaybeSecretBinding;
+	CLOUDFLARE_ZONE_ID?: string;
+	CLOUDFLARE_CACHE_PURGE_API_TOKEN?: MaybeSecretBinding;
 	UPSTASH_REDIS_REST_URL?: MaybeSecretBinding;
 	UPSTASH_REDIS_REST_TOKEN?: MaybeSecretBinding;
 	UPSTASH_REDIS_ENABLED?: string;
@@ -1451,11 +1454,14 @@ const KV_RUN_STATE_TTL_SECONDS = 14 * 24 * 60 * 60;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION = 1;
 const PUBLIC_FEED_EDGE_SNAPSHOT_KV_KEY = `public-feed:snapshot:v${PUBLIC_FEED_EDGE_SNAPSHOT_KEY_VERSION}:latest`;
 const PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES: PublicFeedLanguageCode[] = ['en', 'fr', 'ja', 'de-CH', 'de', 'el'];
-const PUBLIC_FEED_SNAPSHOT_REFRESH_SUBREQUESTS = 2 + PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES.length * 3;
+const PUBLIC_CACHE_INVALIDATION_MAX_TARGETS = 2;
+const PUBLIC_CACHE_INVALIDATION_MAX_ATTEMPTS = 3;
+const PUBLIC_CACHE_INVALIDATION_SUBREQUESTS =
+	(PUBLIC_CACHE_INVALIDATION_MAX_TARGETS + 1) * PUBLIC_CACHE_INVALIDATION_MAX_ATTEMPTS;
+const PUBLIC_FEED_SNAPSHOT_REFRESH_SUBREQUESTS =
+	2 + PUBLIC_FEED_EDGE_SNAPSHOT_LANGUAGE_CODES.length * 3 + PUBLIC_CACHE_INVALIDATION_SUBREQUESTS;
 const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 120;
 const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT = 250;
-const DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60;
-const HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS = 30 * 24 * 60 * 60;
 const PUBLIC_FEED_EDGE_SNAPSHOT_SELECT = 'id,source,title,original_url,image_url,published_at,published_on_site_at,ai_summary,category,positivity_score';
 const DEFAULT_UPSTASH_REDIS_WORKER_LOCK_TTL_SECONDS = 10 * 60;
 const DEFAULT_UPSTASH_REDIS_AI_REVIEW_LOCK_TTL_SECONDS = 30 * 60;
@@ -1900,7 +1906,7 @@ async function readJsonFromKv<T>(env: Env, key: string): Promise<T | null> {
 	}
 }
 
-async function writeJsonToKv(env: Env, key: string, value: unknown, expirationTtl: number): Promise<boolean> {
+async function writeJsonToKv(env: Env, key: string, value: unknown, expirationTtl?: number): Promise<boolean> {
 	if (!env.NUTSNEWS_KV) {
 		return false;
 	}
@@ -1915,7 +1921,11 @@ async function writeJsonToKv(env: Env, key: string, value: unknown, expirationTt
 
 	try {
 		state.counts.writes += 1;
-		await env.NUTSNEWS_KV.put(key, serializedValue, { expirationTtl });
+		await env.NUTSNEWS_KV.put(
+			key,
+			serializedValue,
+			expirationTtl ? { expirationTtl } : undefined,
+		);
 		state.jsonReadCache.set(key, value);
 		return true;
 	} catch (error) {
@@ -2081,16 +2091,6 @@ function getPublicFeedEdgeSnapshotLimit(env: Env) {
 			5,
 		),
 		HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_LIMIT,
-	);
-}
-
-function getPublicFeedEdgeSnapshotTtlSeconds(env: Env) {
-	return Math.min(
-		Math.max(
-			Math.floor(getOptionalNumber(env.PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS, DEFAULT_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS)),
-			60 * 60,
-		),
-		HARD_MAX_PUBLIC_FEED_EDGE_SNAPSHOT_TTL_SECONDS,
 	);
 }
 
@@ -2342,7 +2342,6 @@ async function publishPublicFeedEdgeSnapshotToKv(
 			env,
 			kvKey,
 			snapshot,
-			getPublicFeedEdgeSnapshotTtlSeconds(env),
 		);
 
 		if (!writeOk) {
@@ -7090,6 +7089,199 @@ async function publishArticlesBatch(env: Env, config: RuntimeConfig, originalUrl
 
 	return true;
 }
+type PublicCacheInvalidationResult = {
+	ok: boolean;
+	configured: boolean;
+	targetCount: number;
+};
+
+function parseCacheRevalidationUrls(env: Env) {
+	const values = (env.NUTSNEWS_CACHE_REVALIDATION_URLS ?? '')
+		.split(',')
+		.map((value) => value.trim())
+		.filter(Boolean);
+	const urls: string[] = [];
+
+	for (const value of values) {
+		try {
+			const url = new URL(value);
+			if (url.protocol !== 'https:') continue;
+			url.hash = '';
+			urls.push(url.toString());
+		} catch {
+			// Invalid targets are ignored and surfaced through the configured count.
+		}
+	}
+
+	return [...new Set(urls)].slice(0, PUBLIC_CACHE_INVALIDATION_MAX_TARGETS);
+}
+
+async function signPublicCacheRevalidation(
+	secret: string,
+	timestamp: string,
+	requestId: string,
+	tags: readonly string[],
+) {
+	const encoder = new TextEncoder();
+	const key = await crypto.subtle.importKey(
+		'raw',
+		encoder.encode(secret),
+		{ name: 'HMAC', hash: 'SHA-256' },
+		false,
+		['sign'],
+	);
+	const signature = await crypto.subtle.sign(
+		'HMAC',
+		key,
+		encoder.encode(`${timestamp}.${requestId}.${tags.join(',')}`),
+	);
+
+	return Array.from(new Uint8Array(signature))
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+}
+
+async function retryCacheInvalidation(
+	operation: () => Promise<Response>,
+) {
+	let lastStatus: number | null = null;
+	let lastError: unknown = null;
+
+	for (let attempt = 1; attempt <= PUBLIC_CACHE_INVALIDATION_MAX_ATTEMPTS; attempt += 1) {
+		try {
+			const response = await operation();
+			lastStatus = response.status;
+			if (response.ok) return { ok: true, attempts: attempt, status: response.status };
+		} catch (error) {
+			lastError = error;
+		}
+
+		if (attempt < PUBLIC_CACHE_INVALIDATION_MAX_ATTEMPTS) {
+			await sleep(attempt * 250);
+		}
+	}
+
+	return {
+		ok: false,
+		attempts: PUBLIC_CACHE_INVALIDATION_MAX_ATTEMPTS,
+		status: lastStatus,
+		errorMessage: lastError ? getErrorMessage(lastError) : null,
+	};
+}
+
+async function invalidateNextPublicFeedCaches(
+	env: Env,
+	requestId: string,
+): Promise<PublicCacheInvalidationResult> {
+	const urls = parseCacheRevalidationUrls(env);
+	if (urls.length === 0) return { ok: true, configured: false, targetCount: 0 };
+
+	const secret = (await resolveValue(env.NUTSNEWS_CACHE_REVALIDATION_SECRET)).trim();
+	if (secret.length < 32) {
+		await logWarn(env, 'worker.cache.next_revalidation_unconfigured', 'Next.js cache revalidation targets exist but the signing secret is unavailable.', {
+			requestId,
+			targetCount: urls.length,
+		});
+		return { ok: false, configured: true, targetCount: urls.length };
+	}
+
+	const startedAt = Date.now();
+	const timestamp = String(Math.floor(Date.now() / 1_000));
+	const tags = ['public-feed'] as const;
+	const signature = await signPublicCacheRevalidation(secret, timestamp, requestId, tags);
+	let ok = true;
+
+	for (const url of urls) {
+		const result = await retryCacheInvalidation(() => fetch(url, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'X-NutsNews-Request-Id': requestId,
+				'X-NutsNews-Timestamp': timestamp,
+				'X-NutsNews-Signature': `sha256=${signature}`,
+			},
+			body: JSON.stringify({ tags }),
+		}));
+
+		ok = ok && result.ok;
+		await (result.ok ? logInfo : logWarn)(
+			env,
+			result.ok ? 'worker.cache.next_revalidation_succeeded' : 'worker.cache.next_revalidation_failed',
+			result.ok ? 'Revalidated a Next.js public feed cache target.' : 'Next.js public feed cache revalidation exhausted its retries.',
+			{
+				requestId,
+				targetHost: new URL(url).host,
+				attempts: result.attempts,
+				status: result.status,
+				errorMessage: result.errorMessage ?? null,
+				durationMs: Date.now() - startedAt,
+			},
+		);
+	}
+
+	return { ok, configured: true, targetCount: urls.length };
+}
+
+async function purgeCloudflarePublicFeedCache(
+	env: Env,
+	requestId: string,
+): Promise<PublicCacheInvalidationResult> {
+	const zoneId = env.CLOUDFLARE_ZONE_ID?.trim() ?? '';
+	const apiToken = (await resolveValue(env.CLOUDFLARE_CACHE_PURGE_API_TOKEN)).trim();
+	if (!zoneId && !apiToken) return { ok: true, configured: false, targetCount: 0 };
+	if (!/^[a-f0-9]{32}$/i.test(zoneId) || !apiToken) {
+		await logWarn(env, 'worker.cache.cloudflare_purge_unconfigured', 'Cloudflare cache purge credentials are incomplete.', { requestId });
+		return { ok: false, configured: true, targetCount: 1 };
+	}
+
+	const startedAt = Date.now();
+	const result = await retryCacheInvalidation(() => fetch(
+		`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`,
+		{
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${apiToken}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ tags: ['public-feed'] }),
+		},
+	));
+
+	await (result.ok ? logInfo : logWarn)(
+		env,
+		result.ok ? 'worker.cache.cloudflare_purge_succeeded' : 'worker.cache.cloudflare_purge_failed',
+		result.ok ? 'Purged the Cloudflare public-feed cache tag.' : 'Cloudflare public-feed cache purge exhausted its retries.',
+		{
+			requestId,
+			attempts: result.attempts,
+			status: result.status,
+			errorMessage: result.errorMessage ?? null,
+			durationMs: Date.now() - startedAt,
+		},
+	);
+
+	return { ok: result.ok, configured: true, targetCount: 1 };
+}
+
+async function invalidatePublishedPublicFeedCaches(env: Env, refreshedAt: string | null) {
+	const requestId = `feed-${(await sha256Hex(`${refreshedAt ?? 'unknown'}:${getShardIndex(env)}`)).slice(0, 32)}`;
+	const startedAt = Date.now();
+	const [next, cloudflare] = await Promise.all([
+		invalidateNextPublicFeedCaches(env, requestId),
+		purgeCloudflarePublicFeedCache(env, requestId),
+	]);
+
+	await logInfo(env, 'worker.cache.public_feed_invalidation_completed', 'Completed post-publication cache invalidation.', {
+		requestId,
+		refreshedAt,
+		next,
+		cloudflare,
+		ok: next.ok && cloudflare.ok,
+		durationMs: Date.now() - startedAt,
+	});
+
+	return { next, cloudflare };
+}
 
 async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promise<PublicFeedSnapshotRefreshResult> {
 	const startedAt = Date.now();
@@ -7108,6 +7300,10 @@ async function refreshPublicFeedSnapshot(env: Env, config: RuntimeConfig): Promi
 		const edgeSnapshotPublishResult = edgeSnapshotPublishingEnabled
 			? await publishPublicFeedEdgeSnapshotToKv(env, config, refreshedAt)
 			: { ok: true, articleCount: 0 };
+
+		if (edgeSnapshotPublishResult.ok) {
+			await invalidatePublishedPublicFeedCaches(env, refreshedAt);
+		}
 
 		return {
 			publicFeedSnapshotRefreshOk: true,
@@ -8610,6 +8806,9 @@ export const __test = {
 	getSummaryTranslationTaskBudgetForSubrequests,
 	normalizePublicFeedLanguageCode,
 	publishPublicFeedEdgeSnapshotToKv,
+	invalidateNextPublicFeedCaches,
+	purgeCloudflarePublicFeedCache,
+	signPublicCacheRevalidation,
 	publishArticlesBatch,
 	recordEstimatedSubrequests,
 	servePublicFeedEdgeSnapshot,
