@@ -22,7 +22,7 @@ jobs:
       NUTSNEWS_EDGE_SNAPSHOT_STATUS_URL: ${{ github.event.inputs.status_url || secrets.NUTSNEWS_EDGE_SNAPSHOT_STATUS_URL || 'https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
