@@ -1,36 +1,56 @@
 name: Controller Ingestion Scheduling Operations
+run-name: Controller scheduling ${{ inputs.action }} (${{ inputs.orchestration_id || 'manual-inspection' }})
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: Read current status, build a value-free dry run, or apply the protected controller configuration.
+        description: Inspect, plan, cut over by disabling legacy scheduling, or roll back by restoring it.
         required: true
         default: status
         type: choice
         options:
           - status
           - plan
+          - cutover
+          - rollback
           - apply
       ingestion_scheduling_enabled:
-        description: Desired legacy ingestion scheduling state. Apply false is a cutover control and remains unauthorized until the downstream gates pass.
-        required: true
-        default: "true"
+        description: Expected state for status/plan only. Protected cutover and rollback use fixed states and ignore this value.
+        required: false
+        default: "false"
         type: choice
         options:
           - "true"
           - "false"
       confirmation:
-        description: Use inspect-ingestion-scheduling, plan-ingestion-scheduling-<true|false>, or set-ingestion-scheduling-<true|false>.
+        description: Use the exact action-specific confirmation documented by the validation job.
         required: true
+        type: string
+      orchestration_id:
+        description: Unique backend cutover/rollback workflow correlation; required for protected transitions.
+        required: false
+        default: manual-inspection
+        type: string
+      expected_source_revision:
+        description: Exact 40-character nutsnews-worker commit expected to execute a protected transition.
+        required: false
+        default: ""
+        type: string
+      expected_backend_source_revision:
+        description: Exact backend orchestration commit; required for semantic cutover or rollback.
+        required: false
+        default: ""
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
   group: controller-ingestion-scheduling-operations
   cancel-in-progress: false
+  queue: max
 
 jobs:
   validate:
@@ -39,6 +59,11 @@ jobs:
     timeout-minutes: 5
     outputs:
       expected_confirmation: ${{ steps.contract.outputs.expected_confirmation }}
+      desired_enabled: ${{ steps.contract.outputs.desired_enabled }}
+      previous_enabled: ${{ steps.contract.outputs.previous_enabled }}
+      orchestration_id: ${{ steps.contract.outputs.orchestration_id }}
+      semantic_action: ${{ steps.contract.outputs.semantic_action }}
+      contract_kind: ${{ steps.contract.outputs.contract_kind }}
     steps:
       - name: Validate operation contract
         id: contract
@@ -47,23 +72,103 @@ jobs:
           ACTION: ${{ inputs.action }}
           ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
           CONFIRMATION: ${{ inputs.confirmation }}
+          ORCHESTRATION_ID: ${{ inputs.orchestration_id }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_source_revision }}
+          EXPECTED_BACKEND_SOURCE_REVISION: ${{ inputs.expected_backend_source_revision }}
         run: |
           set -euo pipefail
           case "$ACTION" in
-            status) expected="inspect-ingestion-scheduling" ;;
-            plan) expected="plan-ingestion-scheduling-$ENABLED" ;;
-            apply) expected="set-ingestion-scheduling-$ENABLED" ;;
+            status)
+              expected="inspect-ingestion-scheduling"
+              desired="$ENABLED"
+              previous=""
+              semantic_action=""
+              contract_kind="read_only"
+              ;;
+            plan)
+              expected="plan-ingestion-scheduling-$ENABLED"
+              desired="$ENABLED"
+              previous=""
+              semantic_action=""
+              contract_kind="read_only"
+              ;;
+            cutover)
+              expected="disable-legacy-for-worker-uplift-cutover"
+              desired="false"
+              previous="true"
+              semantic_action="cutover"
+              contract_kind="backend_authorized"
+              ;;
+            rollback)
+              expected="restore-legacy-for-worker-uplift-rollback"
+              desired="true"
+              previous="false"
+              semantic_action="rollback"
+              contract_kind="backend_authorized"
+              ;;
+            apply)
+              if [ "$ENABLED" != "true" ]; then
+                echo "Deprecated apply compatibility permits rollback enablement only." >&2
+                exit 1
+              fi
+              expected="set-ingestion-scheduling-true"
+              desired="true"
+              previous="false"
+              semantic_action="rollback"
+              contract_kind="legacy_rollback_compatibility"
+              ORCHESTRATION_ID="legacy-worker-uplift-rollback-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
             *) echo "Unsupported action." >&2; exit 1 ;;
+          esac
+          case "$desired" in
+            true|false) ;;
+            *) echo "Expected scheduling state must be true or false." >&2; exit 1 ;;
           esac
           if [ "$CONFIRMATION" != "$expected" ]; then
             echo "Typed confirmation mismatch; expected $expected." >&2
             exit 1
           fi
-          if [ "$ACTION" = "apply" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
-            echo "Protected apply must be dispatched from main." >&2
+          if { [ "$ACTION" = "cutover" ] || [ "$ACTION" = "rollback" ] || [ "$ACTION" = "apply" ]; } && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Protected cutover or rollback must be dispatched from main." >&2
             exit 1
           fi
-          echo "expected_confirmation=$expected" >> "$GITHUB_OUTPUT"
+          if [[ ! "$ORCHESTRATION_ID" =~ ^[A-Za-z0-9._-]{1,100}$ ]]; then
+            echo "Orchestration ID must be a bounded safe identifier." >&2
+            exit 1
+          fi
+          if [ "$ACTION" = "cutover" ] || [ "$ACTION" = "rollback" ]; then
+            expected_orchestration_prefix="backend-worker-uplift-$ACTION-"
+            if [[ ! "$ORCHESTRATION_ID" =~ ^${expected_orchestration_prefix}[0-9]+-[0-9]+$ ]]; then
+              echo "Protected transition orchestration ID is invalid." >&2
+              exit 1
+            fi
+            if [[ ! "$EXPECTED_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || [ "$EXPECTED_SOURCE_REVISION" != "$GITHUB_SHA" ]; then
+              echo "Protected transition source revision does not match the executing worker commit." >&2
+              exit 1
+            fi
+            if [[ ! "$EXPECTED_BACKEND_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Protected transition backend source revision is invalid." >&2
+              exit 1
+            fi
+          fi
+          if [ "$ACTION" = "apply" ]; then
+            compatibility_deadline="2026-08-03T21:00:00Z"
+            current_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if [[ "$current_time" > "$compatibility_deadline" ]] || \
+               [ "$GITHUB_ACTOR" != "ramideltoro" ] || \
+               [ "$GITHUB_TRIGGERING_ACTOR" != "ramideltoro" ]; then
+              echo "Deprecated rollback compatibility is expired or unauthorized." >&2
+              exit 1
+            fi
+          fi
+          {
+            echo "expected_confirmation=$expected"
+            echo "desired_enabled=$desired"
+            echo "previous_enabled=$previous"
+            echo "orchestration_id=$ORCHESTRATION_ID"
+            echo "semantic_action=$semantic_action"
+            echo "contract_kind=$contract_kind"
+          } >> "$GITHUB_OUTPUT"
 
   status:
     name: Read scheduling status
@@ -84,7 +189,7 @@ jobs:
       - name: Upload status evidence
         uses: actions/upload-artifact@v6
         with:
-          name: controller-ingestion-scheduling-status-${{ github.run_id }}
+          name: controller-ingestion-scheduling-status-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/controller-ingestion-scheduling-status.json
           if-no-files-found: error
           retention-days: 90
@@ -119,7 +224,12 @@ jobs:
         run: |
           set -euo pipefail
           npm --prefix controller run test:ingestion-scheduling
-          node controller/scripts/render-ingestion-scheduling-config.mjs "$ENABLED" controller/wrangler.ingestion-scheduling.generated.jsonc "$RUNNER_TEMP/controller-ingestion-scheduling-plan.json"
+          node controller/scripts/render-ingestion-scheduling-config.mjs \
+            "$ENABLED" \
+            controller/wrangler.ingestion-scheduling.generated.jsonc \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-plan.json" \
+            "$GITHUB_SHA" \
+            "scheduling-plan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           (
             cd controller
             npx wrangler deploy --dry-run -c wrangler.ingestion-scheduling.generated.jsonc --outdir "$RUNNER_TEMP/controller-build"
@@ -129,25 +239,42 @@ jobs:
       - name: Upload plan evidence
         uses: actions/upload-artifact@v6
         with:
-          name: controller-ingestion-scheduling-plan-${{ github.run_id }}
+          name: controller-ingestion-scheduling-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/controller-ingestion-scheduling-plan.json
             ${{ runner.temp }}/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
 
-  apply:
-    name: Apply protected scheduling state
-    if: ${{ inputs.action == 'apply' }}
+  transition:
+    name: Apply protected cutover or rollback state
+    if: ${{ inputs.action == 'cutover' || inputs.action == 'rollback' || inputs.action == 'apply' }}
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: production
+    concurrency:
+      group: nutsnews-controller-production-deploy
+      cancel-in-progress: false
+      queue: max
     env:
       WRANGLER_SEND_METRICS: "false"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Verify exact backend transition authorization
+        if: ${{ needs.validate.outputs.contract_kind == 'backend_authorized' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NUTSNEWS_BACKEND_ACTIONS_READ_TOKEN: ${{ secrets.NUTSNEWS_BACKEND_ACTIONS_READ_TOKEN }}
+        run: >-
+          node controller/scripts/verify-backend-transition-authorization.mjs
+          "${{ needs.validate.outputs.semantic_action }}"
+          "${{ needs.validate.outputs.orchestration_id }}"
+          "${{ inputs.expected_backend_source_revision }}"
+          "${{ github.sha }}"
+          "$RUNNER_TEMP/backend-transition-authorization-admission.json"
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -174,46 +301,276 @@ jobs:
             fi
           done
 
-      - name: Test, render, dry run, and deploy controller
+      - name: Capture stable pre-transition scheduling state
+        id: pre_transition
+        env:
+          NUTSNEWS_SCHEDULING_VERIFY_MAX_ATTEMPTS: "5"
+          NUTSNEWS_SCHEDULING_VERIFY_RETRY_DELAY_MS: "1000"
+          NUTSNEWS_SCHEDULING_VERIFY_REQUIRED_CONSECUTIVE_PASSES: "2"
+        run: >-
+          node controller/scripts/verify-ingestion-scheduling-status.mjs preserve
+          "$RUNNER_TEMP/controller-ingestion-scheduling-before.json"
+          https://nutsnews-controller.nutsnews.workers.dev
+          "$GITHUB_OUTPUT"
+
+      - name: Resolve apply or exact-state reconciliation
+        id: transition_plan
+        shell: bash
+        env:
+          CURRENT_ENABLED: ${{ steps.pre_transition.outputs.ingestion_scheduling_enabled }}
+          CURRENT_SOURCE_REVISION: ${{ steps.pre_transition.outputs.controller_source_revision }}
+          CURRENT_DEPLOYMENT_CORRELATION: ${{ steps.pre_transition.outputs.controller_deployment_correlation }}
+          DESIRED_ENABLED: ${{ needs.validate.outputs.desired_enabled }}
+          PREVIOUS_ENABLED: ${{ needs.validate.outputs.previous_enabled }}
+          EXPECTED_SOURCE_REVISION: ${{ github.sha }}
+          EXPECTED_DEPLOYMENT_CORRELATION: ${{ needs.validate.outputs.orchestration_id }}
+        run: |
+          set -euo pipefail
+          if [ "$CURRENT_ENABLED" = "$PREVIOUS_ENABLED" ]; then
+            transition_required="true"
+            resolution_mode="apply"
+          elif [ "$CURRENT_ENABLED" = "$DESIRED_ENABLED" ] && \
+               [ "$CURRENT_SOURCE_REVISION" = "$EXPECTED_SOURCE_REVISION" ] && \
+               [ "$CURRENT_DEPLOYMENT_CORRELATION" = "$EXPECTED_DEPLOYMENT_CORRELATION" ]; then
+            transition_required="false"
+            resolution_mode="reconcile_existing_state"
+          elif [ "$CURRENT_ENABLED" = "$DESIRED_ENABLED" ]; then
+            transition_required="true"
+            resolution_mode="rebind_desired_state"
+          else
+            echo "Current scheduling state is outside the authorized transition boundary." >&2
+            exit 1
+          fi
+          {
+            echo "transition_required=$transition_required"
+            echo "resolution_mode=$resolution_mode"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Test, render, and dry run exact controller
+        shell: bash
+        env:
+          ENABLED: ${{ needs.validate.outputs.desired_enabled }}
+          DEPLOYMENT_CORRELATION: ${{ needs.validate.outputs.orchestration_id }}
+        run: |
+          set -euo pipefail
+          npm --prefix controller run test:ingestion-scheduling
+          node controller/scripts/render-ingestion-scheduling-config.mjs \
+            "$ENABLED" \
+            controller/wrangler.ingestion-scheduling.generated.jsonc \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-render.json" \
+            "$GITHUB_SHA" \
+            "$DEPLOYMENT_CORRELATION"
+          (
+            cd controller
+            npx wrangler deploy --dry-run -c wrangler.ingestion-scheduling.generated.jsonc --outdir "$RUNNER_TEMP/controller-build"
+          )
+
+      - name: Revalidate exact transition authority at time of use
+        id: final_authority
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NUTSNEWS_BACKEND_ACTIONS_READ_TOKEN: ${{ secrets.NUTSNEWS_BACKEND_ACTIONS_READ_TOKEN }}
+          SEMANTIC_ACTION: ${{ needs.validate.outputs.semantic_action }}
+          CONTRACT_KIND: ${{ needs.validate.outputs.contract_kind }}
+          ORCHESTRATION_ID: ${{ needs.validate.outputs.orchestration_id }}
+          EXPECTED_BACKEND_SOURCE_REVISION: ${{ inputs.expected_backend_source_revision }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ] || \
+             [ "$GITHUB_ACTOR" != "ramideltoro" ] || \
+             [ "$GITHUB_TRIGGERING_ACTOR" != "ramideltoro" ]; then
+            echo "Transition actor, triggering actor, or source ref changed before use." >&2
+            exit 1
+          fi
+          main_rows="$(git ls-remote --refs origin refs/heads/main)"
+          if [ "$(printf '%s\n' "$main_rows" | sed '/^$/d' | wc -l | tr -d ' ')" != "1" ]; then
+            echo "Unable to resolve exactly one worker main revision." >&2
+            exit 1
+          fi
+          worker_main_sha="$(printf '%s\n' "$main_rows" | awk '{print $1}')"
+          if [[ ! "$worker_main_sha" =~ ^[0-9a-f]{40}$ ]] || [ "$worker_main_sha" != "$GITHUB_SHA" ]; then
+            echo "Executing worker revision is no longer current main." >&2
+            exit 1
+          fi
+          if [ "$CONTRACT_KIND" = "backend_authorized" ]; then
+            node controller/scripts/verify-backend-transition-authorization.mjs \
+              "$SEMANTIC_ACTION" \
+              "$ORCHESTRATION_ID" \
+              "$EXPECTED_BACKEND_SOURCE_REVISION" \
+              "$GITHUB_SHA" \
+              "$RUNNER_TEMP/transition-authorization.json"
+          elif [ "$CONTRACT_KIND" = "legacy_rollback_compatibility" ]; then
+            authority_deadline="2026-08-03T21:00:00Z"
+            authority_checked_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if [[ "$authority_checked_at" > "$authority_deadline" ]]; then
+              echo "Deprecated rollback compatibility expired before mutation." >&2
+              exit 1
+            fi
+            AUTHORITY_CHECKED_AT="$authority_checked_at" \
+            AUTHORITY_DEADLINE="$authority_deadline" \
+            WORKER_MAIN_SHA="$worker_main_sha" \
+            AUTHORIZATION_REPORT="$RUNNER_TEMP/transition-authorization.json" \
+              node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const report = {
+            schemaVersion: 1,
+            safeMetadataOnly: true,
+            status: "authorized",
+            checkedAt: process.env.AUTHORITY_CHECKED_AT,
+            action: "rollback",
+            invocationAction: "apply",
+            contractKind: "legacy_rollback_compatibility",
+            sourceRepository: process.env.GITHUB_REPOSITORY,
+            workflowRunId: process.env.GITHUB_RUN_ID,
+            workflowRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            expectedWorkerSourceRevision: process.env.GITHUB_SHA,
+            workerMainSourceRevision: process.env.WORKER_MAIN_SHA,
+            actor: process.env.GITHUB_ACTOR,
+            triggeringActor: process.env.GITHUB_TRIGGERING_ACTOR,
+            authorityDeadline: process.env.AUTHORITY_DEADLINE,
+            checks: {
+              rollbackOnly: true,
+              sourceRefMain: true,
+              sourceRevisionCurrent: true,
+              actorsAuthorized: true,
+              authorityUnexpired: true,
+            },
+            failedChecks: [],
+          };
+          fs.writeFileSync(
+            process.env.AUTHORIZATION_REPORT,
+            `${JSON.stringify(report, null, 2)}\n`,
+            { encoding: "utf8", mode: 0o600 },
+          );
+          console.log(JSON.stringify(report));
+          NODE
+          else
+            echo "Unsupported transition authorization contract." >&2
+            exit 1
+          fi
+
+      - name: Deploy exact controller transition
+        id: deploy_transition
+        if: ${{ steps.transition_plan.outputs.transition_required == 'true' }}
         shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
         run: |
-          set -euo pipefail
-          npm --prefix controller run test:ingestion-scheduling
-          node controller/scripts/render-ingestion-scheduling-config.mjs "$ENABLED" controller/wrangler.ingestion-scheduling.generated.jsonc "$RUNNER_TEMP/controller-ingestion-scheduling-render.json"
+          set +e
           (
             cd controller
-            npx wrangler deploy --dry-run -c wrangler.ingestion-scheduling.generated.jsonc --outdir "$RUNNER_TEMP/controller-build"
-            npx wrangler deploy -c wrangler.ingestion-scheduling.generated.jsonc
+            WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/controller-wrangler-deploy.ndjson" \
+              npx wrangler deploy -c wrangler.ingestion-scheduling.generated.jsonc
           )
+          deploy_status=$?
+          set -e
+          evidence_status=0
+          node controller/scripts/extract-wrangler-deploy-evidence.mjs \
+            "$RUNNER_TEMP/controller-wrangler-deploy.ndjson" \
+            "$RUNNER_TEMP/controller-wrangler-deploy.json" \
+            "$GITHUB_OUTPUT" || evidence_status=$?
+          if [ "$deploy_status" -ne 0 ]; then
+            exit "$deploy_status"
+          fi
+          exit "$evidence_status"
 
-      - name: Verify deployed state and retained failover surfaces
+      - name: Verify stable deployed or reconciled state
+        id: verify_transition
+        if: ${{ always() && steps.transition_plan.outcome == 'success' }}
         env:
-          ENABLED: ${{ inputs.ingestion_scheduling_enabled }}
+          ENABLED: ${{ needs.validate.outputs.desired_enabled }}
+          NUTSNEWS_EXPECTED_CONTROLLER_SOURCE_REVISION: ${{ github.sha }}
+          NUTSNEWS_EXPECTED_CONTROLLER_DEPLOYMENT_CORRELATION: ${{ needs.validate.outputs.orchestration_id }}
+          NUTSNEWS_EXPECTED_CONTROLLER_VERSION_ID: ${{ steps.deploy_transition.outputs.wrangler_version_id }}
+          NUTSNEWS_SCHEDULING_VERIFY_MAX_ATTEMPTS: "31"
+          NUTSNEWS_SCHEDULING_VERIFY_RETRY_DELAY_MS: "2000"
+          NUTSNEWS_SCHEDULING_VERIFY_REQUIRED_CONSECUTIVE_PASSES: "3"
         run: >-
           node controller/scripts/verify-ingestion-scheduling-status.mjs
           "$ENABLED"
           "$RUNNER_TEMP/controller-ingestion-scheduling-apply.json"
 
+      - name: Build source-bound semantic transition receipt
+        if: >-
+          ${{ always() &&
+              steps.transition_plan.outcome == 'success' &&
+              steps.final_authority.outcome == 'success' &&
+              steps.verify_transition.outcome == 'success' &&
+              (steps.deploy_transition.outcome == 'success' ||
+               steps.deploy_transition.outcome == 'skipped') }}
+        shell: bash
+        env:
+          SEMANTIC_ACTION: ${{ needs.validate.outputs.semantic_action }}
+          INVOCATION_ACTION: ${{ inputs.action }}
+          CONTRACT_KIND: ${{ needs.validate.outputs.contract_kind }}
+          ORCHESTRATION_ID: ${{ needs.validate.outputs.orchestration_id }}
+          RESOLUTION_MODE: ${{ steps.transition_plan.outputs.resolution_mode }}
+        run: |
+          set -euo pipefail
+          deployment_evidence="none"
+          if [ "$RESOLUTION_MODE" != "reconcile_existing_state" ]; then
+            deployment_evidence="$RUNNER_TEMP/controller-wrangler-deploy.json"
+          fi
+          transition_authorization="$RUNNER_TEMP/transition-authorization.json"
+          node controller/scripts/build-ingestion-scheduling-transition-receipt.mjs \
+            "$SEMANTIC_ACTION" \
+            "$INVOCATION_ACTION" \
+            "$CONTRACT_KIND" \
+            "$ORCHESTRATION_ID" \
+            "$GITHUB_SHA" \
+            "$RESOLUTION_MODE" \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-before.json" \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-render.json" \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-apply.json" \
+            controller/wrangler.ingestion-scheduling.generated.jsonc \
+            "$deployment_evidence" \
+            "$transition_authorization" \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-transition.json"
+
       - name: Build checksums
+        if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum \
-            "$RUNNER_TEMP/controller-ingestion-scheduling-render.json" \
-            "$RUNNER_TEMP/controller-ingestion-scheduling-apply.json" \
-            > "$RUNNER_TEMP/SHA256SUMS"
+          (
+            cd "$RUNNER_TEMP"
+            files=()
+            for candidate in \
+              backend-transition-authorization-admission.json \
+              transition-authorization.json \
+              controller-ingestion-scheduling-before.json \
+              controller-ingestion-scheduling-render.json \
+              controller-ingestion-scheduling-apply.json \
+              controller-ingestion-scheduling-transition.json \
+              controller-wrangler-deploy.ndjson \
+              controller-wrangler-deploy.json; do
+              if [ -f "$candidate" ]; then
+                files+=("$candidate")
+              fi
+            done
+            if [ "${#files[@]}" -eq 0 ]; then
+              echo "No transition evidence exists to checksum." >&2
+              exit 1
+            fi
+            sha256sum "${files[@]}" > SHA256SUMS
+          )
 
-      - name: Upload immutable apply evidence
+      - name: Upload immutable semantic transition evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@v6
         with:
-          name: controller-ingestion-scheduling-apply-${{ github.run_id }}
+          name: controller-ingestion-scheduling-${{ needs.validate.outputs.semantic_action }}-${{ needs.validate.outputs.orchestration_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/backend-transition-authorization-admission.json
+            ${{ runner.temp }}/transition-authorization.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-before.json
             ${{ runner.temp }}/controller-ingestion-scheduling-render.json
             ${{ runner.temp }}/controller-ingestion-scheduling-apply.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-transition.json
+            ${{ runner.temp }}/controller-wrangler-deploy.ndjson
+            ${{ runner.temp }}/controller-wrangler-deploy.json
             ${{ runner.temp }}/SHA256SUMS
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90

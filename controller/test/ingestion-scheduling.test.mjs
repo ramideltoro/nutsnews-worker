@@ -17,12 +17,12 @@ function wakeResult(overrides = {}) {
   };
 }
 
-test("missing configuration safely preserves enabled legacy scheduling", () => {
+test("missing configuration fails closed with legacy scheduling disabled", () => {
   assert.deepEqual(readIngestionSchedulingPolicy({}), {
-    enabled: true,
+    enabled: false,
     configured: false,
-    valid: true,
-    source: "safe_default_enabled",
+    valid: false,
+    source: "safe_default_disabled",
   });
 });
 
@@ -42,13 +42,13 @@ test("explicit enabled and disabled values are normalized", () => {
   }
 });
 
-test("invalid configuration fails safe to enabled without echoing its value", () => {
+test("invalid configuration fails closed without echoing its value", () => {
   const env = { INGESTION_SCHEDULING_ENABLED: "private-invalid-value" };
   const status = buildIngestionSchedulingStatus(env);
 
-  assert.equal(status.enabled, true);
+  assert.equal(status.enabled, false);
   assert.equal(status.configurationValid, false);
-  assert.equal(status.configurationSource, "invalid_safe_default_enabled");
+  assert.equal(status.configurationSource, "invalid_safe_default_disabled");
   assert.equal(JSON.stringify(status).includes(env.INGESTION_SCHEDULING_ENABLED), false);
 });
 
@@ -87,6 +87,35 @@ test("machine-readable status rejects mutating methods", async () => {
     ok: false,
     error: "method_not_allowed",
   });
+});
+
+test("status exposes only a validated bounded deployment identity", () => {
+  const valid = buildIngestionSchedulingStatus({
+    INGESTION_SCHEDULING_ENABLED: "false",
+    NUTSNEWS_CONTROLLER_SOURCE_REVISION: "a".repeat(40),
+    NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION: "worker-pipeline-12345-2",
+    CF_VERSION_METADATA: { id: "97108b3d-1111-2222-3333-444444444444" },
+  });
+  const invalid = buildIngestionSchedulingStatus({
+    INGESTION_SCHEDULING_ENABLED: "false",
+    NUTSNEWS_CONTROLLER_SOURCE_REVISION: "private-invalid-revision",
+    NUTSNEWS_CONTROLLER_DEPLOYMENT_CORRELATION: "private invalid correlation",
+    CF_VERSION_METADATA: { id: "private invalid version" },
+  });
+
+  assert.deepEqual(valid.deploymentIdentity, {
+    valid: true,
+    sourceRevision: "a".repeat(40),
+    correlation: "worker-pipeline-12345-2",
+    cloudflareVersionId: "97108b3d-1111-2222-3333-444444444444",
+  });
+  assert.deepEqual(invalid.deploymentIdentity, {
+    valid: false,
+    sourceRevision: null,
+    correlation: null,
+    cloudflareVersionId: null,
+  });
+  assert.equal(JSON.stringify(invalid).includes("private"), false);
 });
 
 test("enabled scheduled cycles wake failover before compatible shard dispatch", async () => {

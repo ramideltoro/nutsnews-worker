@@ -36,15 +36,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: worker-pipeline-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   ci:
     name: Worker pipeline tests
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    concurrency:
+      group: worker-pipeline-ci-${{ github.ref }}
+      cancel-in-progress: true
     env:
       AI_PROVIDER: local
       AI_PROVIDER_FALLBACK_TO_OPENAI: "true"
@@ -119,11 +118,15 @@ jobs:
     timeout-minutes: 45
     needs: ci
     if: >-
-      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) ||
-      (github.event_name == 'workflow_dispatch' &&
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
         ((inputs.database_provider_mode == 'backend_postgres_primary' && inputs.provider_switch_confirmation == 'enable-backend-postgres-primary') ||
          (inputs.database_provider_mode == 'supabase_primary' && inputs.provider_switch_confirmation == 'deploy-supabase-primary')))
     environment: production
+    concurrency:
+      group: nutsnews-controller-production-deploy
+      cancel-in-progress: false
+      queue: max
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -212,6 +215,45 @@ jobs:
             fi
           fi
 
+      - name: Capture explicit live scheduling state
+        id: live_scheduling
+        shell: bash
+        env:
+          NUTSNEWS_SCHEDULING_VERIFY_MAX_ATTEMPTS: "5"
+          NUTSNEWS_SCHEDULING_VERIFY_RETRY_DELAY_MS: "1000"
+          NUTSNEWS_SCHEDULING_VERIFY_REQUIRED_CONSECUTIVE_PASSES: "2"
+        run: |
+          set -euo pipefail
+          node controller/scripts/verify-ingestion-scheduling-status.mjs \
+            preserve \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-before.json" \
+            https://nutsnews-controller.nutsnews.workers.dev \
+            "$GITHUB_OUTPUT"
+
+      - name: Render and dry-run controller with preserved scheduling state
+        shell: bash
+        env:
+          PRESERVED_INGESTION_SCHEDULING_ENABLED: ${{ steps.live_scheduling.outputs.ingestion_scheduling_enabled }}
+        run: |
+          set -euo pipefail
+          case "$PRESERVED_INGESTION_SCHEDULING_ENABLED" in
+            true|false) ;;
+            *) echo "Live scheduling state was not a strict boolean." >&2; exit 1 ;;
+          esac
+          node controller/scripts/render-ingestion-scheduling-config.mjs \
+            "$PRESERVED_INGESTION_SCHEDULING_ENABLED" \
+            controller/wrangler.ingestion-preserved.generated.jsonc \
+            "$RUNNER_TEMP/controller-ingestion-scheduling-render.json" \
+            "$GITHUB_SHA" \
+            "worker-pipeline-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          (
+            cd controller
+            npx wrangler deploy \
+              --dry-run \
+              -c wrangler.ingestion-preserved.generated.jsonc \
+              --outdir "$RUNNER_TEMP/controller-build"
+          )
+
       - name: Generate and verify production Wrangler configs
         working-directory: worker
         run: npm run check:local-ai-config
@@ -220,5 +262,73 @@ jobs:
         run: node scripts/deploy_worker_shards.mjs
 
       - name: Deploy Controller to Cloudflare
-        working-directory: controller
-        run: npx wrangler deploy
+        id: deploy_controller
+        shell: bash
+        run: |
+          set +e
+          (
+            cd controller
+            WRANGLER_OUTPUT_FILE_PATH="$RUNNER_TEMP/controller-wrangler-deploy.ndjson" \
+              npx wrangler deploy -c wrangler.ingestion-preserved.generated.jsonc
+          )
+          deploy_status=$?
+          set -e
+          evidence_status=0
+          node controller/scripts/extract-wrangler-deploy-evidence.mjs \
+            "$RUNNER_TEMP/controller-wrangler-deploy.ndjson" \
+            "$RUNNER_TEMP/controller-wrangler-deploy.json" \
+            "$GITHUB_OUTPUT" || evidence_status=$?
+          if [ "$deploy_status" -ne 0 ]; then
+            exit "$deploy_status"
+          fi
+          exit "$evidence_status"
+
+      - name: Verify controller retained the captured scheduling state
+        env:
+          PRESERVED_INGESTION_SCHEDULING_ENABLED: ${{ steps.live_scheduling.outputs.ingestion_scheduling_enabled }}
+          NUTSNEWS_EXPECTED_CONTROLLER_SOURCE_REVISION: ${{ github.sha }}
+          NUTSNEWS_EXPECTED_CONTROLLER_DEPLOYMENT_CORRELATION: worker-pipeline-${{ github.run_id }}-${{ github.run_attempt }}
+          NUTSNEWS_EXPECTED_CONTROLLER_VERSION_ID: ${{ steps.deploy_controller.outputs.wrangler_version_id }}
+          NUTSNEWS_SCHEDULING_VERIFY_MAX_ATTEMPTS: "31"
+          NUTSNEWS_SCHEDULING_VERIFY_RETRY_DELAY_MS: "2000"
+          NUTSNEWS_SCHEDULING_VERIFY_REQUIRED_CONSECUTIVE_PASSES: "3"
+        run: >-
+          node controller/scripts/verify-ingestion-scheduling-status.mjs
+          "$PRESERVED_INGESTION_SCHEDULING_ENABLED"
+          "$RUNNER_TEMP/controller-ingestion-scheduling-after.json"
+
+      - name: Build value-free controller deployment checksums
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          files=()
+          for candidate in \
+            controller-ingestion-scheduling-before.json \
+            controller-ingestion-scheduling-render.json \
+            controller-ingestion-scheduling-after.json \
+            controller-wrangler-deploy.ndjson \
+            controller-wrangler-deploy.json; do
+            if [ -f "$candidate" ]; then
+              files+=("$candidate")
+            fi
+          done
+          if [ "${#files[@]}" -gt 0 ]; then
+            sha256sum "${files[@]}" > controller-ingestion-scheduling-SHA256SUMS
+          fi
+
+      - name: Upload scheduling-preservation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: controller-ingestion-scheduling-preserve-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/controller-ingestion-scheduling-before.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-render.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-after.json
+            ${{ runner.temp }}/controller-ingestion-scheduling-SHA256SUMS
+            ${{ runner.temp }}/controller-wrangler-deploy.ndjson
+            ${{ runner.temp }}/controller-wrangler-deploy.json
+          if-no-files-found: warn
+          retention-days: 90

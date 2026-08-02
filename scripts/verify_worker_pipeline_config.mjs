@@ -7,6 +7,12 @@ function assertIncludes(label, text, needle) {
   }
 }
 
+function assertExcludes(label, text, needle) {
+  if (text.includes(needle)) {
+    throw new Error(`${label} contains forbidden text: ${needle}`);
+  }
+}
+
 function assertFile(path) {
   if (!fs.existsSync(path)) {
     throw new Error(`Missing required file: ${path}`);
@@ -40,7 +46,7 @@ for (const fragment of [
   'needs: ci',
   "github.event_name == 'push'",
   "github.ref == 'refs/heads/main'",
-  "github.ref == 'refs/heads/master'",
+  "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
   'CLOUDFLARE_API_TOKEN',
   'CLOUDFLARE_ACCOUNT_ID',
   'NUTSNEWS_SECRETS_STORE_ID',
@@ -66,9 +72,19 @@ for (const fragment of [
   'node scripts/assert_worker_local_ai_lock.mjs',
   'node scripts/worker_offline_e2e_regression.mjs',
   'node scripts/deploy_worker_shards.mjs',
-  'npx wrangler deploy',
+  'preserve',
+  'nutsnews-controller-production-deploy',
+  'queue: max',
+  'wrangler.ingestion-preserved.generated.jsonc',
 ]) {
   assertIncludes(workflowPath, workflow, fragment);
+}
+
+for (const forbiddenFragment of [
+  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')",
+  'run: npx wrangler deploy\n',
+]) {
+  assertExcludes(workflowPath, workflow, forbiddenFragment);
 }
 
 for (const protectedPath of [
