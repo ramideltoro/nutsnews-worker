@@ -11,6 +11,11 @@ function clean(value) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
+function getPositiveInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function readIngestionSchedulingPolicy(env = {}) {
   const raw = env?.[INGESTION_SCHEDULING_BINDING];
   const value = clean(raw);
@@ -69,6 +74,11 @@ export function buildIngestionSchedulingStatus(env = {}) {
   const cloudflareVersionValid = CLOUDFLARE_VERSION_PATTERN.test(
     cloudflareVersionId,
   );
+  const activeShardCount = getPositiveInteger(env?.SHARD_COUNT, 25);
+  const shardRunIntervalMinutes = getPositiveInteger(
+    env?.SHARD_RUN_INTERVAL_MINUTES,
+    5,
+  );
 
   return {
     schemaVersion: INGESTION_SCHEDULING_STATUS_SCHEMA_VERSION,
@@ -79,6 +89,11 @@ export function buildIngestionSchedulingStatus(env = {}) {
     configurationValid: policy.valid,
     configurationSource: policy.source,
     legacyProductionOwner: "ramideltoro/nutsnews-worker",
+    dispatchCadence: {
+      activeShardCount,
+      shardRunIntervalMinutes,
+      fullCycleMinutes: activeShardCount * shardRunIntervalMinutes,
+    },
     deploymentIdentity: {
       valid: sourceRevisionValid && deploymentCorrelationValid,
       sourceRevision: sourceRevisionValid ? sourceRevision : null,

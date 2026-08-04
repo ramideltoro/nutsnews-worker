@@ -6,6 +6,21 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+describe("controller run source telemetry", () => {
+	it("marks only controller-shaped dispatches as scheduled", () => {
+		expect(__test.getWorkerFetchRunSource(new Request("https://worker.example/", {
+			headers: {
+				"User-Agent": "NutsNewsController/1.0",
+				"X-NutsNews-Run-Source": "scheduled",
+			},
+		}))).toBe("scheduled");
+
+		expect(__test.getWorkerFetchRunSource(new Request("https://worker.example/", {
+			headers: { "X-NutsNews-Run-Source": "scheduled" },
+		}))).toBe("manual");
+	});
+});
+
 class MemoryKv {
 	readonly store = new Map<string, string>();
 	readonly putOptions = new Map<string, unknown>();

@@ -8667,6 +8667,13 @@ function constantTimeStringEquals(left: string, right: string) {
 	return mismatch === 0;
 }
 
+function getWorkerFetchRunSource(request: Request): 'manual' | 'scheduled' {
+	return request.headers.get('User-Agent') === 'NutsNewsController/1.0'
+		&& request.headers.get('X-NutsNews-Run-Source') === 'scheduled'
+		? 'scheduled'
+		: 'manual';
+}
+
 function smokeJson(body: Record<string, unknown>, status = 200) {
 	return Response.json(body, {
 		status,
@@ -8801,6 +8808,7 @@ export const __test = {
 	createSubrequestBudget,
 	estimateRefreshSubrequestsBeforeSummary,
 	getArticlePublishTranslationReadiness,
+	getWorkerFetchRunSource,
 	getPublicFeedEdgeSnapshotKvKey,
 	getSummaryTranslationBuildSubrequestCost,
 	getSummaryTranslationTaskBudgetForSubrequests,
@@ -8895,8 +8903,11 @@ export default {
 			throw new Error('NutsNews Worker Sentry test error');
 		}
 
-		await logInfo(env, 'worker.request.started', 'Worker manual request started', {
+		const runSource = getWorkerFetchRunSource(request);
+
+		await logInfo(env, 'worker.request.started', 'Worker request started', {
 			requestId,
+			runSource,
 			method: request.method,
 			path: url.pathname,
 			query: url.search,
@@ -8906,7 +8917,7 @@ export default {
 		const requestMode = parseWorkerRequestMode(url);
 
 		if (isProductionWritesPaused(env)) {
-			return Response.json(buildProductionWritesPausedResponse(env, requestId, 'manual', requestMode), {
+			return Response.json(buildProductionWritesPausedResponse(env, requestId, runSource, requestMode), {
 				status: 423,
 			});
 		}
@@ -8926,7 +8937,7 @@ export default {
 
 			await flushBetterStackLogs(env, {
 				requestId,
-				runSource: 'manual',
+				runSource,
 				path: url.pathname,
 				flushReason: 'manual_rate_limited',
 				durationMs: Date.now() - requestStartedAt,
@@ -8961,7 +8972,7 @@ export default {
 
 			await flushBetterStackLogs(env, {
 				requestId,
-				runSource: 'manual',
+				runSource,
 				path: url.pathname,
 				flushReason: 'manual_lock_skipped',
 				durationMs: Date.now() - requestStartedAt,
@@ -8986,20 +8997,21 @@ export default {
 			const result =
 				requestMode === 'translate-backlog'
 					? await translateSummaryBacklog(env, {
-						runSource: 'manual',
+						runSource,
 						requestId,
 						workerLock,
 					})
 					: await refreshArticles(env, {
 						maxAiReviews,
 						imageLookupLimit,
-						runSource: 'manual',
+						runSource,
 						requestId,
 						workerLock,
 					});
 
-			await logInfo(env, 'worker.request.completed', 'Worker manual request completed', {
+			await logInfo(env, 'worker.request.completed', 'Worker request completed', {
 				requestId,
+				runSource,
 				status: 200,
 				mode: requestMode,
 				shardIndex: getShardIndex(env),
@@ -9013,17 +9025,18 @@ export default {
 				requestId,
 			});
 		} catch (error) {
-			await recordRedisWorkerFailure(env, 'manual');
+			await recordRedisWorkerFailure(env, runSource);
 			await saveFailedWorkerRun(env, {
 				runStartedAt: requestStartedAt,
-				runSource: 'manual',
+				runSource,
 				requestId,
 				maxAiReviews,
 				error,
 			});
 
-			await logError(env, 'worker.request.failed', 'Worker manual request failed', error, {
+			await logError(env, 'worker.request.failed', 'Worker request failed', error, {
 				requestId,
+				runSource,
 				status: 500,
 				mode: requestMode,
 				shardIndex: getShardIndex(env),
@@ -9051,7 +9064,7 @@ export default {
 			await releaseRedisLock(env, workerLock);
 			await flushBetterStackLogs(env, {
 				requestId,
-				runSource: 'manual',
+				runSource,
 				path: url.pathname,
 				flushReason: 'manual_request_finished',
 				durationMs: Date.now() - requestStartedAt,
