@@ -100,6 +100,7 @@ type Env = {
 };
 
 type ShardRunMode = 'refresh' | 'translate-backlog';
+type ShardRunSource = 'manual' | 'scheduled';
 type FailoverWakeSource = "manual_fetch" | "scheduled_watchdog" | "alarm";
 type FailoverWakeResult = {
   bound: boolean;
@@ -210,6 +211,7 @@ async function runShard(
     shardIndex: number,
     requestId: string,
     mode: ShardRunMode = "refresh",
+    runSource: ShardRunSource = "manual",
 ): Promise<ShardRunResult> {
   const startedAt = Date.now();
   const shardUrl = buildShardUrl(env, shardIndex, mode);
@@ -219,6 +221,7 @@ async function runShard(
     shardIndex,
     shardUrl,
     mode,
+    runSource,
     maxAiReviewsPerShard: getMaxAiReviewsPerShard(env),
   });
 
@@ -228,6 +231,7 @@ async function runShard(
       headers: {
         "User-Agent": "NutsNewsController/1.0",
         "X-NutsNews-Request-Id": requestId,
+        "X-NutsNews-Run-Source": runSource,
       },
     });
 
@@ -244,6 +248,7 @@ async function runShard(
       shardIndex,
       shardUrl,
       mode,
+      runSource,
       ok: response.ok,
       status: response.status,
       response: body,
@@ -911,7 +916,7 @@ export default {
         requestedMode,
         translationBacklogEnabled: isTranslationBacklogEnabled(env),
         wakeFailover: () => wakeFailoverStateOwner(env, requestId, "manual_fetch"),
-        dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode),
+        dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode, "manual"),
       });
       const { failoverWake, result, translationBacklogResult, scheduling } = cycle;
 
@@ -1036,7 +1041,7 @@ export default {
       requestedMode: null,
       translationBacklogEnabled: isTranslationBacklogEnabled(env),
       wakeFailover: () => wakeFailoverStateOwner(env, requestId, "scheduled_watchdog"),
-      dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode),
+      dispatchShard: (mode: ShardRunMode) => runShard(env, shardIndex, requestId, mode, "scheduled"),
       onFailoverWake: ({ failoverWake, scheduling }: {
         failoverWake: FailoverWakeResult;
         scheduling: ReturnType<typeof buildIngestionSchedulingStatus>;

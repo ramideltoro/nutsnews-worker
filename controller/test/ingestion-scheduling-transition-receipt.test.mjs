@@ -253,16 +253,14 @@ for (const action of ["cutover", "rollback"]) {
   });
 }
 
-test("deprecated apply remains a bounded rollback-only compatibility receipt", () => {
+test("deprecated apply fails closed after its bounded rollback compatibility window", () => {
   const result = runReceipt("rollback", {
     contractKind: "legacy_rollback_compatibility",
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.receipt.invocationAction, "apply");
-  assert.equal(result.receipt.action, "rollback");
-  assert.equal(result.receipt.contractKind, "legacy_rollback_compatibility");
-  assert.equal(result.receipt.backendRunId, null);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /backendAuthorizationMatches/);
+  assert.equal(result.receipt, null);
 });
 
 test("an exact already-deployed identity reconciles without deploy evidence", () => {

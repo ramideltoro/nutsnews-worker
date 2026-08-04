@@ -53,7 +53,11 @@ test("invalid configuration fails closed without echoing its value", () => {
 });
 
 test("machine-readable status supports GET and HEAD without caching", async () => {
-  const env = { INGESTION_SCHEDULING_ENABLED: "false" };
+  const env = {
+    INGESTION_SCHEDULING_ENABLED: "false",
+    SHARD_COUNT: "3",
+    SHARD_RUN_INTERVAL_MINUTES: "5",
+  };
   const getResponse = handleIngestionSchedulingStatusRequest(
     new Request("https://controller.example/ingestion-scheduling/status"),
     env,
@@ -67,7 +71,13 @@ test("machine-readable status supports GET and HEAD without caching", async () =
 
   assert.equal(getResponse.status, 200);
   assert.equal(getResponse.headers.get("cache-control"), "no-store");
-  assert.equal((await getResponse.json()).state, "disabled");
+  const status = await getResponse.json();
+  assert.equal(status.state, "disabled");
+  assert.deepEqual(status.dispatchCadence, {
+    activeShardCount: 3,
+    shardRunIntervalMinutes: 5,
+    fullCycleMinutes: 15,
+  });
   assert.equal(headResponse.status, 200);
   assert.equal(headResponse.headers.get("x-nutsnews-ingestion-scheduling"), "disabled");
   assert.equal(await headResponse.text(), "");
