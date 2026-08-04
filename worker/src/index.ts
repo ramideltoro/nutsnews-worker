@@ -3583,6 +3583,22 @@ function trySpendSubrequestBudget(budget: SubrequestBudgetState, phase: string, 
 	return false;
 }
 
+function trySpendReservedSubrequestBudget(budget: SubrequestBudgetState, phase: string, estimatedCost: number) {
+	const cost = Math.max(0, Math.ceil(estimatedCost));
+
+	if (cost === 0) {
+		return true;
+	}
+
+	if (budget.estimatedUsed + cost <= budget.softLimit) {
+		budget.estimatedUsed += cost;
+		return true;
+	}
+
+	deferSubrequestPhase(budget, phase);
+	return false;
+}
+
 function getSummaryTranslationTaskSubrequestCost(config: RuntimeConfig) {
 	return Math.max(1, getSummaryTranslationProviderOrder(config).length);
 }
@@ -8431,7 +8447,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 		durationMs,
 	};
 
-	const workerRunSaveOk = trySpendSubrequestBudget(subrequestBudget, 'worker_run_save', 1)
+	const workerRunSaveOk = trySpendReservedSubrequestBudget(subrequestBudget, 'worker_run_save', 1)
 		? await saveWorkerRun(
 			env,
 			config,
@@ -8452,7 +8468,7 @@ async function refreshArticles(env: Env, options: RefreshOptions = {}): Promise<
 	};
 
 	const kvRunStateWouldSkip = shouldSkipKvRunStateSave(resultBeforeKvRunStateSave, options.runSource ?? 'unknown');
-	const kvRunStateSaveOk = trySpendSubrequestBudget(
+	const kvRunStateSaveOk = trySpendReservedSubrequestBudget(
 		subrequestBudget,
 		'kv_run_state_save',
 		env.NUTSNEWS_KV && !kvRunStateWouldSkip ? KV_RUN_STATE_SAVE_SUBREQUESTS : 0,
@@ -8824,6 +8840,7 @@ export const __test = {
 	snapshotSubrequestBudget,
 	SupabaseWorkerDatabaseClient,
 	trySpendSubrequestBudget,
+	trySpendReservedSubrequestBudget,
 };
 
 export default {
