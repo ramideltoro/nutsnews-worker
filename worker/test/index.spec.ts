@@ -366,4 +366,23 @@ describe("refresh subrequest budget", () => {
 		expect(snapshot.estimatedRemaining).toBe(1);
 		expect(snapshot.deferredPhases).toEqual(["public_feed_snapshot_refresh"]);
 	});
+
+	it("spends the reserve on essential run persistence without exceeding the soft limit", () => {
+		const budget = __test.createSubrequestBudget({
+			WORKER_SUBREQUEST_SOFT_LIMIT: "45",
+			WORKER_SUBREQUEST_RESERVE: "3",
+		} as any);
+
+		__test.recordEstimatedSubrequests(budget, 42);
+
+		expect(__test.trySpendSubrequestBudget(budget, "ai_usage_save", 1)).toBe(false);
+		expect(__test.trySpendReservedSubrequestBudget(budget, "worker_run_save", 1)).toBe(true);
+		expect(__test.trySpendReservedSubrequestBudget(budget, "kv_run_state_save", 2)).toBe(true);
+		expect(__test.trySpendReservedSubrequestBudget(budget, "past_soft_limit", 1)).toBe(false);
+
+		const snapshot = __test.snapshotSubrequestBudget(budget);
+		expect(snapshot.estimatedUsed).toBe(45);
+		expect(snapshot.estimatedRemaining).toBe(0);
+		expect(snapshot.deferredPhases).toEqual(["ai_usage_save", "past_soft_limit"]);
+	});
 });
