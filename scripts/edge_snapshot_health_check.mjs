@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const DEFAULT_STATUS_URL = 'https://nutsnews-worker-0.nutsnews.workers.dev/public-feed-snapshot/status';
 const TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 20000);
+const MAX_SNAPSHOT_AGE_SECONDS = Number(process.env.NUTSNEWS_EDGE_SNAPSHOT_MAX_AGE_SECONDS || 10800);
 
 function normalizeStatusUrl(value) {
   const raw = String(value || DEFAULT_STATUS_URL).trim().replace(/\/+$/, '');
@@ -66,6 +67,15 @@ function assertReadyStatus(statusUrl, response, text, payload) {
 
   if (!payload.updatedAt || Number.isNaN(Date.parse(payload.updatedAt))) {
     throw new Error(`Edge snapshot Worker is not healthy: updatedAt=${payload.updatedAt ?? 'unknown'}.`);
+  }
+
+  const ageSeconds = Number(payload.ageSeconds);
+  if (!Number.isFinite(ageSeconds) || ageSeconds < 0) {
+    throw new Error(`Edge snapshot Worker is not healthy: ageSeconds=${payload.ageSeconds ?? 'unknown'}.`);
+  }
+
+  if (ageSeconds > MAX_SNAPSHOT_AGE_SECONDS) {
+    throw new Error(`Edge snapshot is stale: ageSeconds=${ageSeconds}, maximum=${MAX_SNAPSHOT_AGE_SECONDS}.`);
   }
 }
 
