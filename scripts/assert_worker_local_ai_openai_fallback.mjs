@@ -36,7 +36,10 @@ const workflow = fs.readFileSync(workflowPath, "utf8");
 
 assertIncludes(".github/workflows/worker-pipeline.yml", workflow, 'AI_PROVIDER_FALLBACK_TO_OPENAI: "true"');
 assertIncludes(".github/workflows/worker-pipeline.yml", workflow, 'NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "true"');
-assertNotIncludes(".github/workflows/worker-pipeline.yml", workflow, 'AI_PROVIDER_FALLBACK_TO_OPENAI: "false"');
+const production = workflow.slice(workflow.indexOf("\n  deploy:"));
+assertIncludes("production workflow", production, 'AI_PROVIDER_FALLBACK_TO_OPENAI: "false"');
+assertIncludes("production workflow", production, 'NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "false"');
+assertNotIncludes("production workflow", production, 'AI_PROVIDER_FALLBACK_TO_OPENAI: "true"');
 
 try {
   const result = spawnSync("npm", ["run", "generate:wrangler"], {

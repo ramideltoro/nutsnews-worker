@@ -216,11 +216,11 @@ for (let index = 0; index < shardCount; index += 1) {
 			...optionalShardVars,
 		},
 		secrets_store_secrets: [
-			{
+			...(configuredAiProvider === 'local' && configuredOpenAiFallback === 'false' ? [] : [{
 				binding: 'OPENAI_API_KEY',
 				store_id: secretsStoreId,
 				secret_name: 'OPENAI_API_KEY',
-			},
+			}]),
 			{
 				binding: 'BETTER_STACK_SOURCE_TOKEN',
 				store_id: secretsStoreId,
