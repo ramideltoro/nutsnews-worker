@@ -4415,9 +4415,16 @@ function parsePublishedDate(value: string): string | null {
 }
 
 function parseRss(xml: string, source: string): RssArticle[] {
-	const itemMatches = xml.match(/<item\b[\s\S]*?<\/item>/gi) ?? [];
-	const entryMatches = xml.match(/<entry\b[\s\S]*?<\/entry>/gi) ?? [];
-	const matches = itemMatches.length > 0 ? itemMatches : entryMatches;
+	// Stop scanning after the existing per-feed limit. Large feeds must not
+	// allocate every item (and scan Atom entries too) just to discard them.
+	const matches: string[] = [];
+	for (const pattern of [/<item\b[\s\S]*?<\/item>/gi, /<entry\b[\s\S]*?<\/entry>/gi]) {
+		for (const match of xml.matchAll(pattern)) {
+			matches.push(match[0]);
+			if (matches.length === MAX_ITEMS_PER_FEED) break;
+		}
+		if (matches.length) break;
+	}
 
 	return matches.slice(0, MAX_ITEMS_PER_FEED).map((itemXml) => {
 		const title = stripHtml(getTagValue(itemXml, 'title'));
@@ -4461,7 +4468,7 @@ function hasUsableThumbnail(article: RssArticle): article is RssArticle & { imag
 	return Boolean(article.imageUrl?.trim() && isUsableImageUrl(article.imageUrl));
 }
 
-function scoreArticleCandidate(article: RssArticle, positiveSources: Set<string>): number {
+function scoreArticleCandidate(article: RssArticle, positiveSources: Set<string>, now = Date.now()): number {
 	const text = `${article.source} ${article.title} ${article.excerpt}`.toLowerCase();
 	let score = 0;
 
@@ -4490,7 +4497,7 @@ function scoreArticleCandidate(article: RssArticle, positiveSources: Set<string>
 	}
 
 	if (article.publishedAt) {
-		const ageInHours = (Date.now() - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
+		const ageInHours = (now - new Date(article.publishedAt).getTime()) / 1000 / 60 / 60;
 
 		if (ageInHours <= 24) {
 			score += 6;
@@ -4551,18 +4558,12 @@ function buildRejectedArticles(
 }
 
 function sortArticlesForReview(articles: RssArticle[], positiveSources: Set<string>): RssArticle[] {
-	return [...articles].sort((a, b) => {
-		const scoreDifference = scoreArticleCandidate(b, positiveSources) - scoreArticleCandidate(a, positiveSources);
-
-		if (scoreDifference !== 0) {
-			return scoreDifference;
-		}
-
-		const aTime = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
-		const bTime = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
-
-		return bTime - aTime;
-	});
+	const now = Date.now();
+	return articles.map(article => ({
+		article,
+		score: scoreArticleCandidate(article, positiveSources, now),
+		time: article.publishedAt ? new Date(article.publishedAt).getTime() : 0,
+	})).sort((a, b) => b.score - a.score || b.time - a.time).map(row => row.article);
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -8821,6 +8822,9 @@ async function serveBackendShadowSmoke(request: Request, env: Env, requestId: st
 }
 
 export const __test = {
+	parseRss,
+	scoreArticleCandidate,
+	sortArticlesForReview,
 	createSubrequestBudget,
 	estimateRefreshSubrequestsBeforeSummary,
 	getArticlePublishTranslationReadiness,

@@ -97,6 +97,11 @@ jobs:
         working-directory: worker
         run: npx tsc --noEmit
 
+      - name: Verify bounded candidate work and no-paid production configuration
+        run: |
+          npm --prefix worker run test:unit
+          node --test scripts/no-paid-deployment.test.mjs
+
       - name: Controller syntax check
         run: |
           if [ -d controller ]; then
@@ -140,10 +145,14 @@ jobs:
       LOCAL_AI_URL: ${{ secrets.LOCAL_AI_URL }}
       LOCAL_AI_API_KEY_SECRET_NAME: ${{ secrets.LOCAL_AI_API_KEY_SECRET_NAME || 'LOCAL_AI_API_KEY' }}
       AI_PROVIDER: local
-      AI_PROVIDER_FALLBACK_TO_OPENAI: "true"
-      NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "true"
+      AI_PROVIDER_FALLBACK_TO_OPENAI: "false"
+      NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT: "false"
       ENABLE_LOCAL_AI_SECRET_BINDING: "true"
       LOCAL_AI_MODEL: qwen2.5:3b
+      RSS_FEED_FETCH_TIMEOUT_MS: "15000"
+      ARTICLE_PAGE_FETCH_TIMEOUT_MS: "10000"
+      LOCAL_AI_TIMEOUT_MS: "15000"
+      OPENAI_TIMEOUT_MS: "30000"
       NUTSNEWS_WORKER_DEPLOY_CONCURRENCY: "1"
       ENABLE_UPSTASH_REDIS_SECRET_BINDING: ${{ vars.ENABLE_UPSTASH_REDIS_SECRET_BINDING || 'false' }}
       UPSTASH_REDIS_REST_URL_SECRET_NAME: ${{ vars.UPSTASH_REDIS_REST_URL_SECRET_NAME || 'UPSTASH_REDIS_REST_URL' }}
