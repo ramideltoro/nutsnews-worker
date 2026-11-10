@@ -1,44 +1,45 @@
 {
-	"name": "nutsnews-worker",
-	"version": "1.0.0",
-	"private": true,
-	"type": "module",
-	"scripts": {
-		"generate:wrangler": "node scripts/generate-wrangler-config.mjs",
-		"generate:shadow-smoke": "node scripts/generate-shadow-smoke-config.mjs",
-		"dev": "wrangler dev -c generated-wrangler/wrangler.shard0.jsonc",
-		"test:unit": "vitest run --config vitest.config.mts",
-		"deploy:shard0": "npm run check:local-ai-config && wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
-		"deploy:all": "npm run check:local-ai-config && node ../scripts/deploy_worker_shards.mjs",
-		"test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs",
-		"test:db-provider-modes": "node ../scripts/worker_db_provider_modes_smoke.mjs",
-		"test:local-ai-openai-fallback": "cd .. && node scripts/assert_worker_local_ai_openai_fallback.mjs",
-		"test:shadow-smoke-config": "node ../scripts/assert_worker_shadow_smoke_config.mjs",
-		"test:shadow-smoke-route": "node ../scripts/worker_shadow_smoke_route_test.mjs",
-		"smoke:shadow-live": "node ../scripts/worker_shadow_smoke_live_check.mjs",
-		"test:backpressure-locks": "node ../scripts/assert_worker_backpressure_locks.mjs",
-		"check:local-ai-config": "npm run generate:wrangler && node scripts/verify-local-ai-wrangler-config.mjs",
-		"deploy:local-ai": "npm run deploy:all",
-		"test:local-ai-lock": "node ../scripts/assert_worker_local_ai_lock.mjs",
-		"test:kv-usage": "node ../scripts/check_worker_kv_usage.mjs",
-		"test:feature-flags": "node scripts/feature_flags_regression.mjs",
-		"test:immutable": "node ../scripts/check_immutable_tests.mjs",
-		"test:ai-safety": "node ../scripts/ai_content_safety_eval.mjs",
-		"deploy:openai-only": "NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT=true npm run generate:wrangler && node ../scripts/deploy_worker_shards.mjs"
-	},
-	"dependencies": {
-		"@sentry/cloudflare": "^10.59.0"
-	},
-	"overrides": {
-		"sharp": "0.35.0",
-		"undici": "7.30.2"
-	},
-	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.18.6",
-		"@cloudflare/workers-types": "^4.20260621.1",
-		"@types/node": "^20.19.43",
-		"typescript": "^5.9.3",
-		"vitest": "^4.1.10",
-		"wrangler": "^4.105.0"
-	}
+  "name": "nutsnews-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:wrangler": "node scripts/generate-wrangler-config.mjs",
+    "generate:shadow-smoke": "node scripts/generate-shadow-smoke-config.mjs",
+    "dev": "wrangler dev -c generated-wrangler/wrangler.shard0.jsonc",
+    "test:unit": "vitest run --config vitest.config.mts",
+    "deploy:shard0": "npm run check:local-ai-config && wrangler deploy -c generated-wrangler/wrangler.shard0.jsonc",
+    "deploy:all": "npm run check:local-ai-config && node ../scripts/deploy_worker_shards.mjs",
+    "test:e2e:offline": "node ../scripts/worker_offline_e2e_regression.mjs",
+    "test:db-provider-modes": "node ../scripts/worker_db_provider_modes_smoke.mjs",
+    "test:local-ai-openai-fallback": "cd .. && node scripts/assert_worker_local_ai_openai_fallback.mjs",
+    "test:shadow-smoke-config": "node ../scripts/assert_worker_shadow_smoke_config.mjs",
+    "test:shadow-smoke-route": "node ../scripts/worker_shadow_smoke_route_test.mjs",
+    "smoke:shadow-live": "node ../scripts/worker_shadow_smoke_live_check.mjs",
+    "test:backpressure-locks": "node ../scripts/assert_worker_backpressure_locks.mjs",
+    "check:local-ai-config": "npm run generate:wrangler && node scripts/verify-local-ai-wrangler-config.mjs",
+    "deploy:local-ai": "npm run deploy:all",
+    "test:local-ai-lock": "node ../scripts/assert_worker_local_ai_lock.mjs",
+    "test:kv-usage": "node ../scripts/check_worker_kv_usage.mjs",
+    "test:feature-flags": "node scripts/feature_flags_regression.mjs",
+    "test:immutable": "node ../scripts/check_immutable_tests.mjs",
+    "test:ai-safety": "node ../scripts/ai_content_safety_eval.mjs",
+    "deploy:openai-only": "NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT=true npm run generate:wrangler && node ../scripts/deploy_worker_shards.mjs"
+  },
+  "dependencies": {
+    "@sentry/cloudflare": "^11.11.0"
+  },
+  "overrides": {
+    "sharp": "0.35.5",
+    "undici": "7.30.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+		"@cloudflare/vitest-plugin": "^1.6.1",
+    "@cloudflare/workers-types": "^5.20261110.1",
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.159.0"
+  }
 }
