@@ -35,7 +35,7 @@ function loadDeployEnvFile(filePath) {
 loadDeployEnvFile(path.resolve(process.cwd(), '..', '.env.deploy.local'));
 loadDeployEnvFile(path.resolve(process.cwd(), '.env.deploy.local'));
 
-const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '20');
+const feedsPerShard = Number(process.env.FEEDS_PER_SHARD ?? '2');
 const secretsStoreId = process.env.NUTSNEWS_SECRETS_STORE_ID;
 const allowOpenAiOnlyDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT === 'true';
 const allowOpenAiFallbackDeployment = process.env.NUTSNEWS_ALLOW_OPENAI_FALLBACK_DEPLOYMENT === 'true';
