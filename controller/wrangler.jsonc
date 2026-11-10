@@ -3,7 +3,9 @@
   "name": "nutsnews-controller",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-10",
-  "compatibility_flags": ["global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
   "workers_dev": true,
   "preview_urls": false,
   "observability": {
@@ -27,14 +29,18 @@
   "migrations": [
     {
       "tag": "v1-failover-controller-state",
-      "new_sqlite_classes": ["FailoverControllerStateObject"]
+      "new_sqlite_classes": [
+        "FailoverControllerStateObject"
+      ]
     }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": [
+      "*/5 * * * *"
+    ]
   },
   "vars": {
-    "SHARD_COUNT": "3",
+    "SHARD_COUNT": "25",
     "SHARD_RUN_INTERVAL_MINUTES": "5",
     "SHARD_WORKER_PREFIX": "nutsnews-worker",
     "SHARD_WORKER_SUBDOMAIN": "nutsnews",
