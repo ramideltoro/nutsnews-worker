@@ -27,7 +27,7 @@
     "deploy:openai-only": "NUTSNEWS_ALLOW_OPENAI_ONLY_DEPLOYMENT=true npm run generate:wrangler && node ../scripts/deploy_worker_shards.mjs"
   },
   "dependencies": {
-    "@sentry/cloudflare": "^10.59.0"
+    "@sentry/cloudflare": "^11.11.0"
   },
   "overrides": {
     "sharp": "0.35.5",
@@ -35,7 +35,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.23.0",
+		"@cloudflare/vitest-plugin": "^1.6.1",
     "@cloudflare/workers-types": "^5.20261110.1",
     "@types/node": "^20.19.43",
     "typescript": "^5.9.3",
